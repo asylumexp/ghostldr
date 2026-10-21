@@ -19,9 +19,9 @@ Start with [docs/ghost-on-stock-ps5.md](docs/ghost-on-stock-ps5.md): triggering 
 | `ghostldr/native/` | **The loader core** (C, about 6,400 lines). Runs inside SWRR from Luac0re's JIT buffer. Its runtime extension (`ext/`, see [ext/README.md](ghostldr/native/ext/README.md)) carries the NID table and more HLE code, and is fetched from the computer at boot. |
 | `ghostldr/host/` | **Computer-side tools** (Python). |
 | `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the save resigner, and the sandbox/save probes. |
-| `ghostldr/tools/` | **Build and analysis helpers:** ELF/NID parsing, the extension packer and its offline checker (`mkext.py`, `check_ext.py`), disassembler, cross-references, Luac0re bundler. |
-| `ghostldr/data/` | Ghost's file open order, used to pack the containers (file names only). |
-| `ghostldr/tests/` | Offline tests: the installer against a fake console, and the extension loader run on the built `ext.bin`. |
+| `ghostldr/tools/` | **Build and analysis helpers:** ELF/NID parsing, the extension packer and its offline checker (`mkext.py`, `check_ext.py`), the import coverage report (`import_report.py`), disassembler, cross-references, Luac0re bundler. |
+| `ghostldr/data/` | Ghost's file open order, used to pack the containers (file names only), and the system modules a PS4 app can load on a 13.60 PS5. |
+| `ghostldr/tests/` | Offline tests: the installer against a fake console, the extension loader run on the built `ext.bin`, and the import report against a synthetic title. |
 | `host/payloads/` | **Dev-only console payloads** (ps5-payload-sdk), for a jailbroken console: launch or close SWRR (US or EU), unjail it, save watcher, ps, df, module dump. |
 | `tools/fetch_deps.sh` | Fetches the public build inputs (see Setup). |
 
@@ -67,6 +67,15 @@ The core's memory plan and patches are built for CUSA11456 v2.18; the symbol tab
   ```bash
   python3 -m unittest discover -s ghostldr/tests
   ```
+
+## Import coverage
+
+`ghostldr/tools/import_report.py` lists every import of a title's `eboot.bin` and `sce_module/*.prx` and how the loader would bind it: core HLE, extension HLE, the title's own modules, a system module on the console (`ghostldr/data/ps5_ps4_sysmodules.txt`), or nothing. Given a [shadPS4](https://github.com/shadps4-emu/shadPS4) source tree, it also shows which of those functions shadPS4 implements or stubs.
+
+```bash
+python3 ghostldr/tools/import_report.py build/ghost/app0 --shadps4 /path/to/shadPS4 \
+    --md coverage.md --json coverage.json
+```
 
 ## Choosing a console
 
