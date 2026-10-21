@@ -61,6 +61,9 @@ struct boot_ctx {
      * [2] = IPU_PROG_BASE (start of the emulator's JIT program buffers),
      * [3] = first free byte of the IPU buffer after the core image */
     u64 reserved[8];
+    /* runtime extension (ext.c): a TCP socket connected to run.py's extension
+     * server (-1: none), and the blob's size and CRC-32 */
+    u64 ext_fd, ext_size, ext_crc;
 };
 
 /* ---- runtime (rt.c) ---- */
@@ -84,11 +87,13 @@ void log_init(struct boot_ctx *ctx);
 void logf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void log_hex(const char *tag, const void *p, size_t n);
 
-/* ---- host functions (host.c) ---- */
+/* ---- host functions (host.c, hle.c, hle_sys.c) ---- */
 u64 call_gadget6(u64 fn, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6);
 int host_init(struct boot_ctx *ctx);
 void *host_dlsym(u32 handle, const char *name);
 int host_find_module(const char *name, u32 *handle_out);
+void *host_real(const char *name);                         /* libkernel / libSceSysmodule, cached */
+void *host_real_in(const char *modname, const char *name); /* any host module, loaded on demand */
 
 struct sce_module_info {
     u64 size;
@@ -311,16 +316,19 @@ struct module *module_load_file(const char *path, bool is_main);
 u64 module_export(struct module *m, const char *nid);
 const char *module_sym_name(struct module *m, const struct elf_sym *s);
 
-/* ---- resolution (resolve.c, nids) ---- */
-const char *nid_to_name(const char *nid);
+/* ---- resolution (resolve.c, nid.c) ---- */
+const char *nid_to_name(const char *nid); /* ext.c: the extension's table, until ext_boot_done */
+void compute_nid(const char *name, char out[12]);
 u64 resolve_import(struct module *m, const char *encoded, bool weak, bool plt_func);
+u64 stub_alloc_code(const u8 *code, u32 len);
 int host_module_handle(const char *modname, u32 *out);
 int host_module_handle_for(struct module *m, const char *modname, u32 *out);
 void crash_install(void);
-u64 unresolved_stub(const char *lib, const char *nid);
+u64 unresolved_stub(const char *lib, const char *nid, s64 ret, bool denied);
 
 /* ---- HLE + TLS (hle.c, tls.c) ---- */
 u64 hle_lookup(const char *lib, const char *name);
+struct module *ghost_main_module(void);
 void tls_setup(struct module *main_mod);
 void *tls_get_addr(void *ti);
 int ghost_thread_create(void *thr, const void *attr, void *(*fn)(void *), void *arg, const char *name);
@@ -332,5 +340,15 @@ int arena_init(void);
 int arena_code_region(u64 *start, u64 *end);
 bool arena_is_rx(u64 addr, u64 size);
 u64 arena_small_alloc(u64 size);
+u64 arena_small_alloc_top(u64 size, u64 keep);
 int arena_write(u64 dst, const void *src, u64 size);
 int arena_punch_rw(u64 addr, u64 size);
+
+/* ---- runtime extension (ext.c; interface in ghost_api.h) ---- */
+#define CTX_FLAG_EXT_JIT 64 /* place the extension in a new JIT block (run.py --ext-jit) */
+int ext_fetch(void);     /* receive and verify ext.bin (the NID table lives there) */
+int ext_start(void);     /* place, relocate and initialize its code */
+void ext_boot_done(void); /* imports resolved: free the blob */
+u64 ext_hle_lookup(const char *lib, const char *nid, const char *name);
+const struct ext_lib *ext_lib_policy(const char *lib);
+int ext_dlsym(u32 handle, const char *name, void **out);

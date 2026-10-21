@@ -90,6 +90,18 @@ u64 arena_small_alloc(u64 size)
     return p;
 }
 
+/* 16 KiB-aligned space from the top of the small area (the runtime
+ * extension), leaving at least keep bytes below it; 0 when it does not fit. */
+u64 arena_small_alloc_top(u64 size, u64 keep)
+{
+    size = ALIGN_UP(size, 0x4000);
+    u64 top = ALIGN_DOWN(g_small_end, 0x4000);
+    if (top < g_small_cur || top - g_small_cur < keep + size)
+        return 0;
+    g_small_end = top - size;
+    return g_small_end;
+}
+
 int arena_write(u64 dst, const void *src, u64 size)
 {
     return jit_copy_to(dst, src, size);

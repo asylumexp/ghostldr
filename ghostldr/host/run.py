@@ -4,6 +4,10 @@
     python3 ghostldr/host/run.py probe            # core probe (flags=1)
     python3 ghostldr/host/run.py boot             # load and start the title
     python3 ghostldr/host/run.py logs             # only listen for UDP logs
+
+A boot also serves the runtime extension (build/ghostldr/ext.bin: the NID
+table and the extension's HLE code) on TCP 18195; the core fetches it first
+and stops before touching the title when it cannot.
 """
 
 from __future__ import annotations
@@ -16,14 +20,18 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE = ROOT / "build/ghostldr/core.bin"
 LAYOUT = ROOT / "build/ghostldr/core.json"
+EXT = ROOT / "build/ghostldr/ext.bin"
 BOOT_LUA = ROOT / "ghostldr/lua/ghostldr.lua"
 from console import console_ip
 LOG_PORT = 18194
+EXT_PORT = LOG_PORT + 1   # TCP
+LUA_MAX = 500 * 1024      # Luac0re's remote Lua loader reads at most this much
 
 
 def local_ip_for(host: str) -> str:
@@ -36,11 +44,11 @@ def build_core() -> None:
     try:
         subprocess.run(["make", "-s", "-C", str(ROOT / "ghostldr/native")], check=True)
     except (OSError, subprocess.CalledProcessError) as e:
-        hint = " (a release's prebuilt core is there: add --no-build)" if CORE.exists() else ""
+        hint = " (a release's prebuilt core is there: add --no-build)" if CORE.exists() and EXT.exists() else ""
         raise SystemExit(f"building the core failed: {e}{hint}")
 
 
-def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int]) -> bytes:
+def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int], ext: bytes = b"") -> bytes:
     core = CORE.read_bytes()
     layout = json.loads(LAYOUT.read_text())
     text_size = (layout["__text_end"] + 0x3FFF) & ~0x3FFF
@@ -54,10 +62,49 @@ def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int])
         f"GHOSTLDR_LOG_PORT = {LOG_PORT}",
         f"GHOSTLDR_FLAGS = {flags}",
         f'GHOSTLDR_APP_ROOT = "{app_root}"',
+        f"GHOSTLDR_EXT_PORT = {EXT_PORT}",
+        f"GHOSTLDR_EXT_SIZE = {len(ext)}",
+        f"GHOSTLDR_EXT_CRC = {zlib.crc32(ext):#x}",
         *[f"GHOSTLDR_{k.upper()}_MIB = {v}" for k, v in knobs.items()],
         "",
     ])
-    return (header + BOOT_LUA.read_text()).encode()
+    payload = (header + BOOT_LUA.read_text()).encode()
+    if len(payload) >= LUA_MAX:
+        raise SystemExit(f"the Lua payload is {len(payload)} bytes; Luac0re reads at most {LUA_MAX}")
+    return payload
+
+
+class ExtServer(threading.Thread):
+    """Serves ext.bin to the core: each connection gets the whole blob."""
+
+    def __init__(self, blob: bytes) -> None:
+        super().__init__(daemon=True)
+        self.blob = blob
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.sock.bind(("0.0.0.0", EXT_PORT))
+        except OSError as e:
+            raise SystemExit(f"cannot serve the extension on TCP {EXT_PORT}: {e}")
+        self.sock.listen(4)
+        self.sock.settimeout(0.5)
+        self.stop = threading.Event()
+        self.sent = threading.Event()
+
+    def run(self) -> None:
+        while not self.stop.is_set():
+            try:
+                conn, peer = self.sock.accept()
+            except socket.timeout:
+                continue
+            with conn:
+                conn.settimeout(30)
+                try:
+                    conn.sendall(self.blob)
+                    self.sent.set()
+                    print(f"extension: sent {len(self.blob)} bytes to {peer[0]}", flush=True)
+                except OSError as e:
+                    print(f"extension: sending to {peer[0]} failed: {e}", flush=True)
 
 
 class LogListener(threading.Thread):
@@ -124,6 +171,8 @@ def main() -> int:
     parser.add_argument("--cpu-heap-mib", type=int, default=0, help="CPU malloc heap at 0x1000000000 (default 384)")
     parser.add_argument("--force-title-ready", action="store_true",
                         help="experiment: set the title world's ready flag from the watchdog")
+    parser.add_argument("--ext-jit", action="store_true",
+                        help="test: put the extension's code in a new JIT block instead of the core's RX area")
     parser.add_argument("--host", default=None, help="console address (default: looked up by host-id)")
     parser.add_argument("--wait", type=float, default=20.0)
     parser.add_argument("--app-root", default="/data/ghost/app0")
@@ -140,19 +189,30 @@ def main() -> int:
         print(f"recorder (pid {recorder}) is logging to build/ghostldr/run.log", flush=True)
     if args.mode in ("probe", "boot"):
         if args.no_build:
-            if not CORE.exists() or not LAYOUT.exists():
-                raise SystemExit(f"--no-build needs {CORE.relative_to(ROOT)} and {LAYOUT.relative_to(ROOT)}")
+            needed = (CORE, LAYOUT, EXT) if args.mode == "boot" else (CORE, LAYOUT)
+            missing = [p.relative_to(ROOT) for p in needed if not p.exists()]
+            if missing:
+                raise SystemExit(f"--no-build needs {', '.join(map(str, missing))}")
         else:
             build_core()
         release = args.mode == "boot" and not args.keep_host_memory
         flags = (1 if args.mode == "probe" else 0) | (2 if release else 0) | (4 if args.snap or args.count_imports or args.profile else 0) \
             | (16 if args.profile else 0) \
-            | (8 if args.count_imports else 0) | (32 if args.force_title_ready else 0)
+            | (8 if args.count_imports else 0) | (32 if args.force_title_ready else 0) \
+            | (64 if args.ext_jit else 0)
         knobs = {"gpu_heap": args.gpu_heap_mib, "slack": args.slack_mib, "pool1": args.pool1_mib,
                  "cpu_heap": args.cpu_heap_mib}
-        payload = build_payload(flags, local_ip_for(args.host), args.app_root, knobs)
+        ext = EXT.read_bytes() if args.mode == "boot" else b""
+        if ext:
+            ext_server = ExtServer(ext)
+            ext_server.start()
+            print(f"serving the extension ({len(ext)} bytes) on TCP {EXT_PORT}", flush=True)
+        payload = build_payload(flags, local_ip_for(args.host), args.app_root, knobs, ext)
         print(f"sending {len(payload)} bytes of Lua to {args.host}:9026", flush=True)
         send_lua(args.host, payload)
+        if ext and not ext_server.sent.wait(60):
+            print(f"extension: the console did not fetch it (is TCP {EXT_PORT} open in this computer's firewall?)",
+                  flush=True)
     elif args.mode == "lua":
         send_lua(args.host, args.file.read_bytes())
     if listener:
