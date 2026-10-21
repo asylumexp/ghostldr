@@ -89,7 +89,8 @@ extern const struct ghost_api *G HIDDEN;
 #define arena_write G->arena_write
 #define stub_alloc_code G->stub_alloc_code
 #define hle_lookup G->hle_lookup
-#define title_id G->title_id
+/* not a bare `title_id` macro: families have struct fields of that name */
+#define ext_title_id G->title_id
 #define path_remap_add G->path_remap_add
 #define gfs_mount_user G->gfs_mount_user
 #define gfs_slot_reserve G->gfs_slot_reserve

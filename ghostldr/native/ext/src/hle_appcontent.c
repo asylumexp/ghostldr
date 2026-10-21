@@ -117,7 +117,7 @@ static void title_load(void)
         const struct sfo_ent *e = sfo_find("TITLE_ID");
         const char *t = e && e->fmt != 0x0404 && e->max_len ? (const char *)g_sfo + g_sfo_data + e->data_off : NULL;
         if (!t || !*t)
-            t = title_id ? title_id() : "";
+            t = ext_title_id ? ext_title_id() : "";
         strlcpy(g_tid, *t ? t : "untitled", sizeof(g_tid));
         for (u32 i = 0; i < ARRAY_SIZE(k_fallback); i++)
             if (strcmp(k_fallback[i].title, g_tid) == 0)

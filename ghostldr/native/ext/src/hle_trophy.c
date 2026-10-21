@@ -184,8 +184,8 @@ static void load_meta(void)
     static volatile int lock;
     spin_lock(&lock);
     if (!g_meta_loaded) {
-#ifdef title_id
-        const char *core_id = title_id();
+#ifdef ext_title_id
+        const char *core_id = ext_title_id();
         if (core_id)
             strlcpy(g_title_id, core_id, sizeof(g_title_id));
 #endif
