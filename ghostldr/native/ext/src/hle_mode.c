@@ -125,8 +125,7 @@ static bool routed_virtual(const struct hle_lib *L, const struct hle_route *rt)
         return true;
     if (f & RF_PURE)
         return false;
-    return L->mode == HM_VIRT || ((f & RF_MASKSTUB) && L->mode == HM_MASKED) || ((f & RF_OWNED) && !L->owned) ||
-           ((f & RF_READY) && !L->ready);
+    return L->mode == HM_VIRT || ((f & RF_OWNED) && !L->owned) || ((f & RF_READY) && !L->ready);
 }
 
 /* hle_gen_entry's question: where does the call through trampoline `at` go?
@@ -148,6 +147,10 @@ u64 hle_route(u64 at, u64 *regs, s64 *answer)
     const struct hle_route *rt = &r->routes[idx];
     struct hle_lib *L = &r->libs[rt->lib];
     const char *name = r->hle[r->first + idx].name;
+    if ((rt->flags & RF_MASKSTUB) && L->mode == HM_MASKED) {
+        *answer = 0; /* SWRR's instance stays up */
+        return 0;
+    }
     if (!routed_virtual(L, rt)) {
         void *fn = hle_host(L, name, &r->cache[idx]);
         if (fn)

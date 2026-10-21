@@ -603,8 +603,8 @@ HLE_ROOT(sceRudpInit, LIB(RU), v_ok)
     X(SS, sceScreenShotGetAppInfo, 0, 0x80BE0141, 0)                                              \
     X(SS, sceScreenShotCapture, 0, 0x80BE0141, 0)                                                 \
     X(SS, sceScreenShotGetDrcParam, 0, 0x80BE0141, 0)                                             \
-    X(SU, sceShareUtilityTerminate, 0, 0, 0)                                                      \
-    X(SU, sceShareUtilityAdvanceTerminate, 0, 0, 0)                                               \
+    X(SU, sceShareUtilityTerminate, RF_MASKSTUB, 0, 0)                                            \
+    X(SU, sceShareUtilityAdvanceTerminate, RF_MASKSTUB, 0, 0)                                     \
     X(SU, sceShareUtilityAdvanceSetUploadContentData, 0, 0, 0)                                    \
     X(SU, sceShareUtilityAdvanceSetPlayingContent, 0, 0, 0)                                       \
     X(SU, sceShareUtilityAdvanceResetPlayingContent, 0, 0, 0)                                     \
@@ -692,7 +692,7 @@ HLE_ROOT(sceRudpInit, LIB(RU), v_ok)
     X(VR, sceVideoRecordingInit, 0, 0, 0)                                                         \
     X(VR, sceVideoRecordingTerm, 0, 0, 0)                                                         \
     X(VR, sceVideoRecordingCopyBGRAtoNV12, RF_PURE, 0x80A80008, 0)                                \
-    X(CE, sceContentExportTerm, 0, 0, 0)                                                          \
+    X(CE, sceContentExportTerm, RF_MASKSTUB, 0, 0)                                                \
     X(CE, sceContentExportFromFile, RF_NOGFS, 0x809D3001, 0)                                      \
     X(CE, sceContentExportFromFileWithThumbnail, RF_NOGFS, 0x809D3001, 0)                         \
     X(CE, sceContentExportFromFileWithTitleIdList, RF_NOGFS, 0x809D3001, 0)                       \
@@ -732,7 +732,7 @@ HLE_ROOT(sceRudpInit, LIB(RU), v_ok)
     X(VO, sceVoiceSetThreadsParams, 0, 0, 0)                                                      \
     X(VO, sceVoiceVADAdjustment, 0, 0, 0)                                                         \
     X(VO, sceVoiceVADSetVersion, 0, 0, 0)                                                         \
-    X(VQ, sceVoiceQoSEnd, 0, 0, 0)                                                                \
+    X(VQ, sceVoiceQoSEnd, RF_MASKSTUB, 0, 0)                                                      \
     X(VQ, sceVoiceQoSCreateLocalEndpoint, 0, 0, v_qos_new_id)                                     \
     X(VQ, sceVoiceQoSCreateRemoteEndpoint, 0, 0, v_qos_new_id)                                    \
     X(VQ, sceVoiceQoSDeleteLocalEndpoint, 0, 0, 0)                                                \
@@ -769,7 +769,7 @@ HLE_ROOT(sceRudpInit, LIB(RU), v_ok)
     X(A3, sceAudio3dAudioOutClose, 0, 0x80EA0002, 0)                                              \
     X(A3, sceAudio3dAudioOutOutput, 0, 0x80EA0002, 0)                                             \
     X(A3, sceAudio3dAudioOutOutputs, 0, 0x80EA0002, 0)                                            \
-    X(RU, sceRudpEnd, 0, 0, 0)                                                                    \
+    X(RU, sceRudpEnd, RF_MASKSTUB, 0, 0)                                                          \
     X(RU, sceRudpEnableInternalIOThread, 0, 0, 0)                                                 \
     X(RU, sceRudpEnableInternalIOThread2, 0, 0, 0)                                                \
     X(RU, sceRudpSetEventHandler, 0, 0, 0)                                                        \

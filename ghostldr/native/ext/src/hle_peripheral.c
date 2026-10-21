@@ -602,7 +602,7 @@ HLE_ROOT(sceSystemGestureInitializePrimitiveTouchRecognizer, LIB(SG), v_ok)
     X(CAM, sceCameraGetDeviceIDWithoutOpen, CAM_CRASH, 0x802E0010, 0)                             \
     X(CAM, sceCameraGetProductInfo, CAM_CRASH, 0x802E0010, 0)                                     \
     X(CAM, sceCameraGetMmapConnectedCount, CAM_CRASH, 0, v_cam_mmap_count)                        \
-    X(MOVE, sceMoveTerm, 0, 0, v_move_term)                                                       \
+    X(MOVE, sceMoveTerm, RF_MASKSTUB, 0, v_move_term)                                             \
     X(MOVE, sceMoveOpen, 0, 0, v_move_open)                                                       \
     X(MOVE, sceMoveClose, 0, 0, 0)                                                                \
     X(MOVE, sceMoveReadStateLatest, 0, 0, v_move_latest)                                          \
@@ -639,7 +639,7 @@ HLE_ROOT(sceSystemGestureInitializePrimitiveTouchRecognizer, LIB(SG), v_ok)
     X(MT, sceMoveTrackerRecordStart, 0, 0x80EF0004, 0)                                            \
     X(MT, sceMoveTrackerRecordStop, 0, 0x80EF0004, 0)                                             \
     X(MT, sceMoveTrackerRecordSave, 0, 0x80EF0004, 0)                                             \
-    X(HMD, sceHmdTerminate, 0, 0, v_hmd_term)                                                     \
+    X(HMD, sceHmdTerminate, RF_MASKSTUB, 0, v_hmd_term)                                           \
     X(HMD, sceHmdClose, 0, 0, v_hmd_close)                                                        \
     X(HMD, sceHmdGetFieldOfView, 0, 0x81110004, 0)                                                \
     X(HMD, sceHmdGet2DEyeOffset, 0, 0x81110004, 0)                                                \

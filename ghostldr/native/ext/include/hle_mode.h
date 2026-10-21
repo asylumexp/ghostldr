@@ -63,7 +63,7 @@ struct hle_lib {
 
 /* how a routed function is answered */
 #define RF_VIRT 0x01     /* never the host: UI launchers, system-wide calls, SWRR's Terminate */
-#define RF_MASKSTUB 0x02 /* virtual while the library is MASKED (SWRR's Terminate/Close) */
+#define RF_MASKSTUB 0x02 /* answers 0 while the library is MASKED: SWRR's Terminate/End */
 #define RF_OWNED 0x04    /* the host only for the title's own session (hle_lib.owned) */
 #define RF_READY 0x08    /* the host only while the device reports READY (hle_lib.ready) */
 #define RF_CRASH 0x10    /* crash class: virtual until hle_lib.probed */
