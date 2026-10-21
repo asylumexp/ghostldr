@@ -23,6 +23,7 @@ CORE = ROOT / "build/ghostldr/core.bin"
 LAYOUT = ROOT / "build/ghostldr/core.json"
 BOOT_LUA = ROOT / "ghostldr/lua/ghostldr.lua"
 from console import console_ip
+import profiles
 LOG_PORT = 18194
 
 
@@ -124,6 +125,10 @@ def main() -> int:
     parser.add_argument("--cpu-heap-mib", type=int, default=0, help="CPU malloc heap at 0x1000000000 (default 384)")
     parser.add_argument("--force-title-ready", action="store_true",
                         help="experiment: set the title world's ready flag from the watchdog")
+    parser.add_argument("--title", help="title to boot: one of the installed ones (ghostfs; default: the only one "
+                        "installed) or the dump at --app-root (default: found by its eboot fingerprint)")
+    parser.add_argument("--trace-opens", action="store_true",
+                        help="log every file the title opens (capture_order.py turns run.log into an open order)")
     parser.add_argument("--host", default=None, help="console address (default: looked up by host-id)")
     parser.add_argument("--wait", type=float, default=20.0)
     parser.add_argument("--app-root", default="/data/ghost/app0")
@@ -151,6 +156,11 @@ def main() -> int:
         knobs = {"gpu_heap": args.gpu_heap_mib, "slack": args.slack_mib, "pool1": args.pool1_mib,
                  "cpu_heap": args.cpu_heap_mib}
         payload = build_payload(flags, local_ip_for(args.host), args.app_root, knobs)
+        try:   # the title profiles (host/profiles.py; read by native/src/profile.c)
+            bundle = profiles.boot_bundle(args.title, ("trace_opens",) if args.trace_opens else ())
+        except profiles.ProfileError as e:
+            raise SystemExit(str(e))
+        payload = f'GHOSTLDR_PROFILE_HEX = "{bundle.hex()}"\n'.encode() + payload
         print(f"sending {len(payload)} bytes of Lua to {args.host}:9026", flush=True)
         send_lua(args.host, payload)
     elif args.mode == "lua":

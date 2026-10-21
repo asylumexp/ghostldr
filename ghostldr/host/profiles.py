@@ -2,16 +2,22 @@
 """Per-title compatibility profiles (ghostldr/data/titles/*.json).
 
 Everything ghostldr does differently for one title lives in its profile, as
-data: how its files are packed, its sceAppContent parameters, its memory plan
-(only for titles that need more than SWRR's budget gives them), title-specific
-diagnostics, and HLE rules that fix single imports without writing C.
-default.json holds the generic values; <TITLE>.json overrides them (objects
-merge key by key, everything else replaces).  docs/compatibility.md explains
-every field.
+data: how its files are packed, its sceAppContent parameters, its save
+container size, its memory plan (only for titles that need more than SWRR's
+budget gives them), title-specific diagnostics, and HLE rules that answer
+single imports without writing C.  default.json holds the generic values;
+<TITLE>.json overrides them (objects merge key by key, everything else
+replaces).  docs/compatibility.md explains every field.
 
-run.py compiles the merged profile into a small blob (compile_blob) and sends
-it with the core as a GHOSTLDR_PROFILE_HEX line, so changing a profile needs
-no reinstall.  The core's twin is ghostldr/native/src/profile.c.
+A profile that names an eboot fingerprint is bound to that build: on any
+other build of the title the core uses the generic defaults.  A memory plan
+and the ghost_* features patch or read fixed offsets in the executable, so
+they need the fingerprint.
+
+run.py compiles the profiles into small blobs (boot_bundle) and sends them
+with the core as a GHOSTLDR_PROFILE_HEX line, so changing a profile needs no
+reinstall.  The blob format is struct prof_hdr and the records after it in
+ghostldr/native/include/ghost.h; the core's side is native/src/profile.c.
 
     python3 ghostldr/host/profiles.py check                 # validate every profile
     python3 ghostldr/host/profiles.py show CUSA11456        # merged profile and its blob size
@@ -38,11 +44,12 @@ import gfs_catalog as gc  # noqa: E402
 TITLE_RE = re.compile(r"[A-Z0-9_-]{1,16}")
 NID_RE = re.compile(r"[A-Za-z0-9+-]{11}")
 
-# feature names -> core flag bits (profile.c PF_*)
+# blob header flags (ghost.h PF_*)
+PF_REQUESTED, PF_PLAN, PF_HOOKS, PF_DIAG, PF_TRACE_OPENS, PF_OWN = 1, 2, 4, 8, 16, 32
 FEATURES = {
-    "ghost_hooks": 1 << 0,        # hooks.c: inline diagnostic hooks at fixed eboot offsets
-    "ghost_diagnostics": 1 << 1,  # crash.c / hle.c: watchdog reads of globals at fixed eboot offsets
-    "trace_opens": 1 << 2,        # log every file open (capture_order.py turns run.log into an order file)
+    "ghost_hooks": PF_HOOKS,        # hooks.c: inline diagnostic hooks at fixed eboot offsets
+    "ghost_diagnostics": PF_DIAG,   # crash.c / hle.c: watchdog reads of globals at fixed eboot offsets
+    "trace_opens": PF_TRACE_OPENS,  # log every file open (capture_order.py turns run.log into an order file)
 }
 # features whose C code was written against one title's executable
 FEATURE_TITLE = {"ghost_hooks": "CUSA11456", "ghost_diagnostics": "CUSA11456"}
@@ -52,15 +59,18 @@ FEATURE_TITLE = {"ghost_hooks": "CUSA11456", "ghost_diagnostics": "CUSA11456"}
 KNOBS = {"gpu_heap": 4, "pool1": 6, "cpu_heap": 7}
 NO_KNOB = 0xFF
 ROLES = {"set": 0, "absorb": 1}
-ACTIONS = {"return": 1, "trace": 2}
+ACTIONS = {"return": 1}
 
-# blob layout, shared with profile.c
+# blob layout, shared with ghost.h / profile.c
 MAGIC = b"GLPF"
 VERSION = 1
-HEADER = struct.Struct("<4sHHII16s20sI5iIIIII")   # 96 bytes
-REC_PLAN, REC_TABLE, REC_RULE, REC_MODULE = 1, 2, 3, 4
-MAX_BLOB = 8192
-MAX_RULES = 64
+HEADER = struct.Struct("<4sHHII16s20sI5iIiII4x")  # struct prof_hdr, 96 bytes
+REC = struct.Struct("<HHI")                        # struct prof_rec
+REC_PLAN, REC_TABLE, REC_RULE = 1, 2, 3
+MAX_BLOB = 0x10000
+MAX_RULES = 32
+MAX_BUNDLE = 64 << 10
+TITLES_OUT = ROOT / "build/ghostfs"                # gfs_pack.py's packs (layout.json)
 
 
 class ProfileError(Exception):
@@ -225,7 +235,7 @@ def _keys(errors: list, where: str, obj, allowed: set, required: set = frozenset
 
 
 TOP_KEYS = {"title", "name", "version", "status", "notes", "eboot", "pack", "app_params", "save_blocks",
-            "features", "memory", "modules", "hle"}
+            "features", "memory", "hle"}
 MEMORY_KEYS = {"mode", "runtime_reserve_mib", "video_reserve_mib", "flex_mib", "min_mib", "plan"}
 
 
@@ -273,23 +283,23 @@ def validate(p: dict) -> list[str]:
         for f in feats:
             if FEATURE_TITLE.get(f, p.get("title")) != p.get("title"):
                 e.append(f"feature {f}: its C code is written for {FEATURE_TITLE[f]}'s executable only")
+            elif f in FEATURE_TITLE and not p.get("eboot", {}).get("fingerprint"):
+                e.append(f"feature {f} reads fixed eboot offsets: set eboot.fingerprint")
     m = p.get("memory", {})
     if _keys(e, "memory", m, MEMORY_KEYS):
-        if m.get("mode", "transparent") not in ("transparent", "plan"):
-            e.append('memory.mode is "transparent" (plan-free) or "plan"')
+        if m.get("mode", "plan-free") not in ("plan-free", "plan"):
+            e.append('memory.mode is "plan-free" or "plan"')
         for k in MEMORY_KEYS - {"mode", "plan"}:
             if k in m and _int(m[k], 0, 8192) is None:
                 e.append(f"memory.{k} must be 0..8192 MiB")
+        if m.get("mode") == "plan" and m.get("plan") and not m.get("runtime_reserve_mib"):
+            e.append("memory.runtime_reserve_mib: a plan needs free memory left for ghostldr (its slack)")
         if m.get("mode") == "plan":
             _validate_plan(e, m.get("plan"))
             if not p.get("eboot", {}).get("fingerprint"):
                 e.append("a memory plan patches fixed eboot offsets: set eboot.fingerprint")
         elif "plan" in m:
             e.append('memory.plan is only used with "mode": "plan"')
-    mods = p.get("modules", [])
-    if not isinstance(mods, list) or any(not (isinstance(x, str) and re.fullmatch(r"[\w.+-]+\.s?prx", x))
-                                         for x in mods):
-        e.append("modules must be a list of sce_module file names (*.prx)")
     rules = p.get("hle", [])
     if not isinstance(rules, list):
         e.append("hle must be a list of rules")
@@ -350,7 +360,7 @@ def _validate_rule(e: list, where: str, r) -> None:
     if "lib" in r and not (isinstance(r["lib"], str) and re.fullmatch(r"\w{1,63}", r["lib"])):
         e.append(f"{where}.lib must be a library name (e.g. libSceNpManager)")
     if r.get("action", "return") not in ACTIONS:
-        e.append(f"{where}.action is return or trace")
+        e.append(f"{where}.action: only return (answer the call with value, after the fills)")
     if "value" in r and _int(r["value"], -2**63, 2**64 - 1) is None:
         e.append(f"{where}.value must be an integer")
     if "log" in r and _int(r["log"], 0, 65535) is None:
@@ -359,8 +369,6 @@ def _validate_rule(e: list, where: str, r) -> None:
     if not isinstance(fills, list) or len(fills) > 8:
         e.append(f"{where}.fill must list at most 8 writes")
         return
-    if fills and r.get("action") == "trace":
-        e.append(f"{where}: a trace rule cannot fill (it passes the call on)")
     for j, f in enumerate(fills):
         w = f"{where}.fill[{j}]"
         if not _keys(e, w, f, {"arg", "offset", "size", "value", "zero"}, {"arg"}):
@@ -390,38 +398,43 @@ def app_params(prof: dict, src: Path | None) -> list[int]:
 
 
 def _rec(kind: int, payload: bytes) -> bytes:
-    payload += b"\0" * (-(len(payload) + 4) % 8)
-    return struct.pack("<HH", kind, len(payload) + 4) + payload
+    payload += b"\0" * (-(len(payload) + REC.size) % 8)
+    return REC.pack(kind, REC.size + len(payload), 0) + payload
 
 
 def _cstr(s: str) -> bytes:
     return s.encode() + b"\0"
 
 
-def compile_blob(prof: dict, src: Path | None = None, extra_features: tuple[str, ...] = ()) -> bytes:
+def compile_blob(prof: dict, src: Path | None = None, flags: int = 0, extra_features: tuple[str, ...] = (),
+                 params: list[int] | None = None) -> bytes:
+    """One title's blob (struct prof_hdr + records).  `params` are its app
+    params when known already (layout.json), else they come from `src`."""
     import orbis_elf as oe
-    flags = 0
+    if prof.get("_has_profile"):
+        flags |= PF_OWN
     for f in list(prof.get("features", [])) + list(extra_features):
         flags |= FEATURES[f]
     fp = bytes.fromhex(prof.get("eboot", {}).get("fingerprint", "") or "00" * 20)
     mem = prof.get("memory", {})
     recs = b""
     if mem.get("mode") == "plan":
+        flags |= PF_PLAN
         plan = mem["plan"]
         sites = [_int(x) for x in plan.get("lazy_sites", [])]
         recs += _rec(REC_PLAN, struct.pack(f"<3I{len(sites)}I", _int(plan["title_fixed_mib"]),
                                            _int(plan.get("overcommit_mib", 0)), len(sites), *sites))
         for t in plan["tables"]:
             exp = [_int(v) for v in t.get("expect", [])]
-            recs += _rec(REC_TABLE, struct.pack("<IBBHIII", _int(t["table"]), ROLES[t["role"]],
+            recs += _rec(REC_TABLE, struct.pack("<IBBHII", _int(t["table"]), ROLES[t["role"]],
                                                 KNOBS.get(t.get("knob"), NO_KNOB), len(exp), _int(t.get("mib", 0)),
-                                                _int(t.get("min_mib", 0)), 0)
+                                                _int(t.get("min_mib", 0)))
                          + struct.pack(f"<{len(exp)}Q", *exp) + _cstr(t.get("what", "table")[:40]))
     for r in prof.get("hle", []):
         nid = r.get("nid") or oe.compute_nid(r["function"])
         fills = r.get("fill", [])
-        body = struct.pack("<BBH12sIQQ", ACTIONS[r.get("action", "return")], len(fills), _int(r.get("log", 1)),
-                           nid.encode(), 0, _int(r.get("value", 0)) % 2**64, 0)
+        body = struct.pack("<BBH12sQ", ACTIONS[r.get("action", "return")], len(fills), _int(r.get("log", 1)),
+                           nid.encode(), _int(r.get("value", 0)) % 2**64)
         for f in fills:
             arg, off = _int(f["arg"]) - 1, _int(f.get("offset", 0))
             if "zero" in f:
@@ -429,16 +442,70 @@ def compile_blob(prof: dict, src: Path | None = None, extra_features: tuple[str,
             else:
                 body += struct.pack("<BBHIQ", arg, f.get("size", 4), off, 0, _int(f.get("value", 0)) % 2**64)
         recs += _rec(REC_RULE, body + _cstr(r.get("lib", "")) + _cstr(r.get("function", r.get("nid", ""))))
-    for mod in prof.get("modules", []):
-        recs += _rec(REC_MODULE, _cstr(mod))
+    video = mem.get("video_reserve_mib")
+    params = params if params is not None else app_params(prof, src)
     header = HEADER.pack(MAGIC, VERSION, HEADER.size, HEADER.size + len(recs), flags, prof["title"].encode(), fp,
-                         _int(prof.get("save_blocks", 1024)), *app_params(prof, src),
-                         _int(mem.get("runtime_reserve_mib", 64)), _int(mem.get("video_reserve_mib", 100)),
-                         _int(mem.get("flex_mib", 0)), _int(mem.get("min_mib", 1024)), 0)
+                         _int(prof.get("save_blocks", 1024)), *params,
+                         _int(mem.get("runtime_reserve_mib", 64)), -1 if video is None else _int(video),
+                         _int(mem.get("flex_mib", 0)), _int(mem.get("min_mib", 1024)))
     blob = header + recs
     if len(blob) > MAX_BLOB:
         raise ProfileError(f"{prof['title']}: the compiled profile is {len(blob)} bytes (at most {MAX_BLOB})")
     return blob
+
+
+def read_blobs(data: bytes) -> list[dict]:
+    """The blobs of a bundle, decoded (as profile.c walks them)."""
+    out, pos = [], 0
+    while pos + HEADER.size <= len(data) and data[pos:pos + 4] == MAGIC:
+        (_, version, hsize, total, flags, title, fp, save_blocks, *rest) = HEADER.unpack_from(data, pos)
+        params, (reserve, video, flex, min_mib) = rest[:5], rest[5:]
+        recs, rp = [], pos + hsize
+        while rp + REC.size <= pos + total:
+            kind, size, _ = REC.unpack_from(data, rp)
+            recs.append((kind, data[rp + REC.size:rp + size]))
+            rp += size
+        out.append({"title": title.rstrip(b"\0").decode(), "flags": flags, "fingerprint": fp.hex(),
+                    "save_blocks": save_blocks, "app_params": list(params), "runtime_reserve_mib": reserve,
+                    "video_reserve_mib": video, "flex_mib": flex, "min_mib": min_mib, "records": recs,
+                    "size": total})
+        pos += total
+    return out
+
+
+def packed(title: str) -> dict:
+    """What gfs_pack.py recorded for the title (build/ghostfs/<TITLE>/layout.json), or {}."""
+    try:
+        return json.loads((TITLES_OUT / title / "layout.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = ()) -> bytes:
+    """What run.py sends as GHOSTLDR_PROFILE_HEX: with a title, its blob
+    (marked requested) and the generic default; without, one blob per title
+    this computer knows (profiles and packs: the core picks the installed
+    one, or the one whose eboot fingerprint matches) and the default.  Ends
+    with 8 zero bytes."""
+    if title:
+        t = normalize_title(title)
+        if not t:
+            raise ProfileError(f"{title!r} is not a title ID")
+        titles, flags = [t], PF_REQUESTED
+    else:
+        packs = [f.parent.name for f in TITLES_OUT.glob("*/layout.json")]
+        titles, flags = sorted(set(known_titles()) | {t for t in packs if normalize_title(t)}), 0
+    blobs = []
+    for t in titles:
+        info = packed(t)
+        src = Path(info["src"]) if info.get("src") else (DEFAULT_SRC if detect_title(DEFAULT_SRC) == t else None)
+        params = info.get("app_params") if not (src and src.is_dir()) else None
+        blobs.append(compile_blob(load(t), src if src and src.is_dir() else None, flags, extra_features, params))
+    blobs.append(compile_blob(load(None), None, 0, extra_features))
+    data = b"".join(blobs) + b"\0" * 8
+    if len(data) > MAX_BUNDLE:
+        raise ProfileError(f"{len(titles)} profiles take {len(data)} bytes (at most {MAX_BUNDLE}): pass --title")
+    return data
 
 
 # ---- command line ----
@@ -485,8 +552,9 @@ def main() -> int:
             prof = load(title)
             print(json.dumps({k: v for k, v in prof.items() if not k.startswith("_")}, indent=1))
             how = "own profile" if prof["_has_profile"] else "no profile: generic defaults"
-            print(f"# {title}: {how}; app params {app_params(prof, args.src)}; "
-                  f"{len(compile_blob(prof, args.src))} bytes compiled")
+            src = args.src or (Path(packed(title)["src"]) if packed(title).get("src") else None)
+            print(f"# {title}: {how}; app params {app_params(prof, src)}; "
+                  f"{len(compile_blob(prof, src))} bytes compiled")
             return 0
         if args.cmd == "detect":
             sfo = param_sfo(args.src)

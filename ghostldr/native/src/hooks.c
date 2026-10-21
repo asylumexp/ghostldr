@@ -1,5 +1,7 @@
 /*
- * Inline hooks on the title's own code (diagnostics).
+ * Inline hooks on the title's own code (diagnostics), written against Ghost
+ * of Tsushima 2.18's executable: only installed when its profile asks for
+ * them (ghost_hooks) and the eboot's fingerprint is that build's.
  *
  * The entry of a hooked function is overwritten in the text image (before it
  * is uploaded) with `jmp rel32` to a C hook; the displaced prologue moves to
@@ -238,6 +240,8 @@ static struct hook k_hooks[] = {
 
 void hooks_patch_text(struct module *m, u8 *text)
 {
+    if (!profile_has(PF_HOOKS))
+        return;
     if (!g_track)
         g_track = page_alloc(TRACK_SLOTS * sizeof(*g_track));
     for (u32 i = 0; i < ARRAY_SIZE(k_hooks); i++) {

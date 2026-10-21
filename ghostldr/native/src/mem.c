@@ -69,6 +69,15 @@ void direct_free(void *addr)
     spin_unlock(&g_dm_lock);
 }
 
+/* size of the block direct_alloc returned at `addr` (0: none starts there) */
+u64 direct_block_size(u64 addr)
+{
+    for (u32 i = 0; i < ARRAY_SIZE(g_dm); i++)
+        if (g_dm[i].addr == addr && addr)
+            return g_dm[i].size;
+    return 0;
+}
+
 bool direct_is_ours(u64 addr)
 {
     for (u32 i = 0; i < ARRAY_SIZE(g_dm); i++)

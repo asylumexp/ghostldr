@@ -265,7 +265,10 @@ int module_write_text(struct module *m)
             m->seg_data[i] = NULL;
     }
     if (m->is_main) {
-        budget_patch_text(m, buf);
+        if (budget_patch_text(m, buf) != 0) { /* the title cannot fit: stop before it starts */
+            page_free(buf, m->text_size);
+            return -1;
+        }
         hooks_patch_text(m, buf);
     }
     int rc = arena_write(m->base, buf, m->text_size);

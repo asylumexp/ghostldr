@@ -262,7 +262,7 @@ struct export_ent {
 extern struct module *g_modules;
 extern struct module *g_main_mod;
 extern u64 g_reported_dmem;
-void budget_patch_text(struct module *m, u8 *text);
+int budget_patch_text(struct module *m, u8 *text); /* -1: the title cannot fit, stop the boot */
 void hooks_patch_text(struct module *m, u8 *text);
 bool vdm_is(u64 off);
 u32 ghost_thread_list(u64 *tids, const char **names, u32 max);
@@ -302,6 +302,86 @@ int vfs_close(int fd);
 int vfs_stat(const char *path, void *st);
 void vdm_log_lazy(void);
 bool budget_lazy_site(u64 eboot_off);
+
+/* ---- ghostfs catalogue: the installed titles (docs/ghostfs-catalogue.md) ---- */
+struct gfs_cat_entry {
+    char title[16], prefix[16], index[32], name[64], version[16];
+    u64 layout_id, total;
+    u32 containers, flags; /* GFS_CAT_* */
+    u64 updated;
+    u8 reserved[16];
+};
+#define GFS_CAT_INCOMPLETE 1
+#define GFS_CAT_LEGACY 2
+u32 gfs_titles(void);                             /* read the catalogue: number of entries (0: none) */
+const struct gfs_cat_entry *gfs_title_at(u32 i);
+int gfs_mount_title(const char *title);           /* its index: its containers become /app0 */
+
+/* ---- title profiles (profile.c; host/profiles.py writes them) ---- */
+struct prof_hdr {
+    char magic[4];             /* "GLPF" */
+    u16 version, header_size;  /* 1, 96 */
+    u32 total;                 /* header and records, a multiple of 8 */
+    u32 flags;                 /* PF_* */
+    char title[16];            /* "": the generic default */
+    u8 fingerprint[20];        /* eboot DT_SCE_FINGERPRINT the profile is for; zero: any */
+    u32 save_blocks;           /* <prefix>SAVE size when created (32 KiB blocks) */
+    s32 app_param[5];          /* sceAppContentAppParamGetInt ids 0-4 */
+    u32 runtime_reserve_mib;   /* direct memory kept for ghostldr (plan: the slack) */
+    s32 video_reserve_mib;     /* for the video decoder; -1: 100 if the title imports one */
+    u32 flex_mib;              /* flexible memory budget; 0: the title's own (plan-free) or none (plan) */
+    u32 min_mib;               /* plan-free: refuse to boot below this direct size */
+    u32 reserved;
+};
+#define PF_REQUESTED 1   /* boot this title (run.py --title) */
+#define PF_PLAN 2        /* memory plan records (needs the fingerprint) */
+#define PF_HOOKS 4       /* hooks.c diagnostics (needs the fingerprint) */
+#define PF_DIAG 8        /* watchdog reads of the title's globals (needs the fingerprint) */
+#define PF_TRACE_OPENS 16 /* log every file the title opens (capture_order.py) */
+#define PF_OWN 32        /* the title has its own profile */
+struct prof_rec {
+    u16 kind, size; /* size includes this header, a multiple of 8 */
+    u32 reserved;
+};
+#define REC_PLAN 1
+#define REC_TABLE 2
+#define REC_RULE 3
+struct prof_plan {
+    struct prof_rec r;
+    u32 title_fixed_mib, overcommit_mib, nsites, sites[]; /* lazily backed allocation sites (return addresses) */
+};
+struct prof_table {     /* a u64 table in the executable's text, indexed by memory mode */
+    struct prof_rec r;
+    u32 offset;
+    u8 role, knob;      /* role 0 set, 1 absorb; knob: boot_ctx reserved[] slot, 0xff none */
+    u16 nexpect;
+    u32 mib, min_mib;
+    u64 expect[];       /* its contents, checked before patching; then the name */
+};
+struct prof_fill {
+    u8 arg, size;       /* argument 0-5; size 1/2/4/8, 0: clear `value` bytes */
+    u16 offset;
+    u32 reserved;
+    u64 value;
+};
+struct prof_rule {
+    struct prof_rec r;
+    u8 action, nfill;   /* action 1: return value */
+    u16 log;            /* calls to log */
+    char nid[12];
+    u64 value;
+    struct prof_fill fill[]; /* then lib and function name, NUL-terminated */
+};
+const char *profile_requested(void);
+void profile_select(const char *title);
+void profile_bind(const u8 *fingerprint);
+u32 profile_has(u32 mask);
+const struct prof_hdr *profile_hdr(void);
+const char *profile_title(void);
+const char *profile_thread_name(void);
+s32 profile_app_param(u32 id);
+const void *profile_record(u32 kind, u32 n);
+u64 profile_resolve(const char *lib, const char *nid);
 
 int module_parse(struct module *m, u8 *file, u64 size);
 int module_place(struct module *m, u64 base);

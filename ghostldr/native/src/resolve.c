@@ -263,6 +263,10 @@ u64 resolve_import(struct module *m, const char *encoded, bool weak, bool plt_fu
     const char *lib = module_import_lib(m, encoded, nid, &modname);
     const char *name = nid_to_name(nid);
 
+    /* the title profile's HLE rules, then plan-free memory calls (profile.c) */
+    u64 p = profile_resolve(lib, nid);
+    if (p)
+        return maybe_count(m, p, lib, nid, name ? name : nid, plt_func);
     if (name) {
         u64 h = hle_lookup(lib, name);
         if (h)

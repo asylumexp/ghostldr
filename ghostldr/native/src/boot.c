@@ -118,7 +118,7 @@ int ghost_boot(void)
     u64 tid = 0;
     K.pthread_attr_init(attr);
     K.pthread_attr_setstacksize(attr, 8 << 20);
-    int rc = ghost_thread_create(&tid, attr, ghost_main_thread, NULL, "CUSA11456-main");
+    int rc = ghost_thread_create(&tid, attr, ghost_main_thread, NULL, profile_thread_name()); /* <TITLE>-main */
     K.pthread_attr_destroy(attr);
     logf("boot: main thread created rc=%x", rc);
     if (g_ctx->flags & 4)
