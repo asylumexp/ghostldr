@@ -20,12 +20,12 @@ https://github.com/user-attachments/assets/6bcab55f-559f-438c-81f5-7104bc5003a3
 
 | Path | What it is |
 |---|---|
-| `ghostldr/native/` | **The loader core** (C, about 6,400 lines). Runs inside SWRR from Luac0re's JIT buffer. |
+| `ghostldr/native/` | **The loader core** (C, about 6,400 lines). Runs inside SWRR from Luac0re's JIT buffer. Its runtime extension (`ext/`, see [ext/README.md](ghostldr/native/ext/README.md)) carries the NID table and more HLE code, and is fetched from the computer at boot. |
 | `ghostldr/host/` | **Computer-side tools** (Python). |
 | `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the save resigner, and the sandbox/save probes. |
-| `ghostldr/tools/` | **Analysis helpers:** ELF/NID parsing, disassembler, cross-references, NID table generator, Luac0re bundler. |
+| `ghostldr/tools/` | **Build and analysis helpers:** ELF/NID parsing, the extension packer and its offline checker (`mkext.py`, `check_ext.py`), disassembler, cross-references, Luac0re bundler. |
 | `ghostldr/data/` | Ghost's file open order, used to pack the containers (file names only). |
-| `ghostldr/tests/` | Offline tests: the installer against a fake console. |
+| `ghostldr/tests/` | Offline tests: the installer against a fake console, and the extension loader run on the built `ext.bin`. |
 | `host/payloads/` | **Dev-only console payloads** (ps5-payload-sdk), for a jailbroken console: launch or close SWRR (US or EU), unjail it, save watcher, ps, df, module dump. |
 | `tools/fetch_deps.sh` | Fetches the public build inputs (see Setup). |
 
@@ -47,13 +47,13 @@ The host tools:
 
 ## Releases
 
-A release zip is this repo plus a prebuilt core (`build/ghostldr/core.bin`, `core.json`); [docs/using-the-release.md](docs/using-the-release.md) walks through it from download to gameplay. With it, booting needs only Python 3, no LLVM or symbol list:
+A release zip is this repo plus a prebuilt core and extension (`build/ghostldr/core.bin`, `core.json`, `ext.bin`, all from one build); [docs/using-the-release.md](docs/using-the-release.md) walks through it from download to gameplay. With it, booting needs only Python 3, no LLVM or symbol list:
 
 ```bash
 python3 ghostldr/host/run.py boot --app-root ghostfs --no-build
 ```
 
-The core is built for CUSA11456 v2.18, and its symbol table comes from that game's imports. The dev payloads are a separate zip; extract it into the same folder (`build/payloads/`).
+The core's memory plan and patches are built for CUSA11456 v2.18; the symbol table in `ext.bin` holds every known PS4 name. The dev payloads are a separate zip; extract it into the same folder (`build/payloads/`).
 
 ## Setup
 
@@ -65,7 +65,7 @@ The core is built for CUSA11456 v2.18, and its symbol table comes from that game
   ```
 
   This downloads the PS4 symbol names (idc/ps4libdoc) to `build/nid/` and clones Luac0re 2.4b to `build/luac0re-src/`.
-- **Game dump:** your CUSA11456 v2.18 dump goes in `build/ghost/app0/`. The core's NID table is generated from its imports.
+- **Game dump:** your CUSA11456 v2.18 dump goes in `build/ghost/app0/`. The build doesn't need it; `ghostldr/tools/check_ext.py` uses its imports to check that the extension resolves them as before.
 - **Tests:**
 
   ```bash

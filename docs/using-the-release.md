@@ -10,7 +10,7 @@ This walks through running Ghost of Tsushima from a ghostldr release on a stock 
 - **A computer on the same network as the PS5** with Python 3.11 or newer.
   - macOS and Linux work; Windows is untested.
   - A wired or fast Wi-Fi connection helps.
-- **The computer's firewall must let Python receive** on UDP port 18194 (the game's log). On macOS, click Allow when asked.
+- **The computer's firewall must let Python receive** on UDP port 18194 (the game's log) and TCP port 18195 (the loader fetches its extension from the computer). On macOS, click Allow when asked.
 
 ## 1. Download and unpack
 
@@ -103,6 +103,7 @@ The computer logs the session to `build/ghostldr/run.log`. That file is what to 
 - **`building the core failed`:** add `--no-build`. The release's core is already built.
 - **The boot command times out while sending:** restart SWRR, open HALL OF FAME, and send again.
 - **Black screen with no log lines on the computer:** the firewall is blocking UDP 18194, or `PS5_HOST` points at another device.
+- **`extension: the console did not fetch it`, or the log stops at `ext: no extension from the computer`:** the firewall is blocking TCP 18195. Nothing was started: allow it and run the same command again.
 - **The PS5 asks for the disc:** the SWRR disc must be in the console that runs it.
 
 ## Removing it
