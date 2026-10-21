@@ -29,6 +29,7 @@ LAYOUT = ROOT / "build/ghostldr/core.json"
 EXT = ROOT / "build/ghostldr/ext.bin"
 BOOT_LUA = ROOT / "ghostldr/lua/ghostldr.lua"
 from console import console_ip
+import profiles
 LOG_PORT = 18194
 EXT_PORT = LOG_PORT + 1   # TCP
 LUA_MAX = 500 * 1024      # Luac0re's remote Lua loader reads at most this much
@@ -173,9 +174,15 @@ def main() -> int:
                         help="experiment: set the title world's ready flag from the watchdog")
     parser.add_argument("--ext-jit", action="store_true",
                         help="test: put the extension's code in a new JIT block instead of the core's RX area")
+    parser.add_argument("--title", help="title to boot: one of the installed ones (ghostfs; default: the only one "
+                        "installed) or the dump at --app-root (default: found by its eboot fingerprint)")
+    parser.add_argument("--trace-opens", action="store_true",
+                        help="log every file the title opens (capture_order.py turns run.log into an open order)")
     parser.add_argument("--host", default=None, help="console address (default: looked up by host-id)")
     parser.add_argument("--wait", type=float, default=20.0)
-    parser.add_argument("--app-root", default="/data/ghost/app0")
+    parser.add_argument("--app-root", default="ghostfs",
+                        help="where the title's app0 is: ghostfs (the installed titles, the default) or a "
+                        "directory on a dev console, e.g. /data/ghost/app0")
     parser.add_argument("--file", type=Path, help="raw Lua file for mode=lua")
     parser.add_argument("--log", type=Path, default=ROOT / "build/ghostldr/run.log")
     args = parser.parse_args()
@@ -208,6 +215,11 @@ def main() -> int:
             ext_server.start()
             print(f"serving the extension ({len(ext)} bytes) on TCP {EXT_PORT}", flush=True)
         payload = build_payload(flags, local_ip_for(args.host), args.app_root, knobs, ext)
+        try:   # the title profiles (host/profiles.py; read by native/src/profile.c)
+            bundle = profiles.boot_bundle(args.title, ("trace_opens",) if args.trace_opens else ())
+        except profiles.ProfileError as e:
+            raise SystemExit(str(e))
+        payload = f'GHOSTLDR_PROFILE_HEX = "{bundle.hex()}"\n'.encode() + payload
         print(f"sending {len(payload)} bytes of Lua to {args.host}:9026", flush=True)
         send_lua(args.host, payload)
         if ext and not ext_server.sent.wait(60):

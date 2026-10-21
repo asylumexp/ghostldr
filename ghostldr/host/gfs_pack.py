@@ -8,24 +8,28 @@ one linear byte space that is cut into CAP-sized pieces, one per container
 (GFSINDEX, index.bin) maps every path to its offset and size.  The title's own
 saves later go into <PREFIX>SAVE, so every title needs its own prefix.
 
-Order matters because only ~12 containers stay mounted: the executable and
-modules first, then (with a profile) the files the title opened in earlier
-boots, then the rest grouped by directory.  CUSA11456 (Ghost of Tsushima) has
-a profile: its traced open order (ghostldr/data/cusa11456-open-order.txt), the
-audio archives after it, area packs by region, and the non-English audio
-dropped.  Its layout is the one installed since 2026-10-20 (prefix GHOST).
+Order matters because only ~12 containers stay mounted.  The title's profile
+(ghostldr/data/titles/<TITLE>.json, "pack") can name an open-order file
+traced from earlier boots (capture_order.py writes one), files to place late
+or leave out, and its own grouping rules.  Without them the generic layout
+is: eboot.bin, sce_module/, sce_sys/, then small files, then everything else
+directory by directory (heuristic_key).  A profile with an order file puts
+the boot group first, then the traced files, then the rest by its groups.
 
-    python3 ghostldr/host/gfs_pack.py                          # CUSA11456 from build/ghost/app0
-    python3 ghostldr/host/gfs_pack.py --src DIR --title CUSA12345 [--prefix NAME]
+    python3 ghostldr/host/gfs_pack.py                     # the dump in build/ghost/app0
+    python3 ghostldr/host/gfs_pack.py --src DIR [--title CUSA12345] [--prefix NAME] [--order FILE]
 
-Writes build/ghostfs/<TITLE>/layout.json and index.bin.
+The title comes from --title, else sce_sys/param.sfo, else the profile whose
+eboot fingerprint matches.  Writes build/ghostfs/<TITLE>/layout.json and
+index.bin.
 
 Index (little endian): 128-byte header "GFS1", version 2, containers, entries,
 cap u64, total u64, names_off, names_size, prefix[16] @40, header_size @56,
 flags @60 (1 = install incomplete), title[16] @64, layout id u64 @80; then
 entries {u64 offset, u64 size, u32 name, u32 flags (1 = dir)} sorted by name
 bytes; then the names.  Version 1 (GHOSTIDX, until 2026-10-21) had a 64-byte
-header and no title.
+header and no title.  The layout id hashes the title, prefix, CAP and every
+container's pieces, so an unchanged order gives an unchanged id.
 """
 
 from __future__ import annotations
@@ -37,6 +41,9 @@ import re
 import struct
 from pathlib import Path
 
+import gfs_catalog as gc
+import profiles as titles
+
 ROOT = Path(__file__).resolve().parents[2]
 OUT_ROOT = ROOT / "build/ghostfs"
 CAP = 992 << 20                      # bytes of data per container (1 GiB container, headroom kept)
@@ -44,71 +51,88 @@ DATA_BLOCKS = 32768                  # 32 KiB blocks: the 1 GiB maximum
 HEADER_SIZE = 128
 FLAG_DIR = 1
 FLAG_INCOMPLETE = 1                  # header flags: written before the data, cleared by the final index
+SMALL = 64 << 10                     # heuristic: "small" files go right after the boot files...
+SMALL_BUDGET = 256 << 20             # ...as long as they stay under this together
 
 
-def ghost_group(rel: str) -> tuple:
-    def region(name: str) -> int:
-        tokens = re.split(r"[_.#&-]", name.lower())
-        for tok, rank in [("izu", 2), ("toy", 3), ("kam", 4), ("iki", 5)]:
-            if tok in tokens or name.lower().startswith(tok):
-                return rank
-        return 1
-    parts = rel.split("/")
-    top = parts[0]
-    if top in ("sce_sys", "sce_module", "ui") or len(parts) == 1:
-        return (0, rel)                       # executable, modules, small root files
-    if top == "cache" and len(parts) == 2:
-        return (1, region(parts[1]), rel)     # area packs, by region
-    if top == "cache" and parts[1] == "psarc":
-        return (2, rel)                       # audio / music archives
-    if top == "cache" and parts[1] == "meshes":
-        return (3, rel)
-    if top == "cache" and parts[1] == "bitmaps":
-        return (4, rel)
-    if top == "cache":
-        return (5, rel)
-    if top == "movies":
-        return (6, rel)
-    return (7, rel)
+def small_limit(files: dict[str, int]) -> int:
+    """Size up to which a file counts as small: SMALL, halved until the small
+    files fit in SMALL_BUDGET (at least 4 KiB)."""
+    limit = SMALL
+    while limit > 4096 and sum(s for s in files.values() if s <= limit) > SMALL_BUDGET:
+        limit //= 2
+    return limit
 
 
-def generic_group(rel: str) -> tuple:
-    parts = rel.split("/")
-    if parts[0] in ("sce_sys", "sce_module") or len(parts) == 1:
-        return (0, rel)                       # executable, modules, root files
-    return (1, rel)                           # the rest, directory by directory
+def heuristic_key(files: dict[str, int]):
+    """Generic order for a title without grouping rules: eboot.bin,
+    sce_module/, sce_sys/, small files, then the rest directory by directory.
+    Rank 0 is the boot group."""
+    limit = small_limit(files)
+
+    def key(rel: str) -> tuple:
+        top, _, rest = rel.partition("/")
+        d, _, name = rel.rpartition("/")
+        if rel == "eboot.bin":
+            return (0, 0, "", rel)
+        if top == "sce_module" and rest:
+            return (0, 1, d, name)
+        if top == "sce_sys" and rest:
+            return (0, 2, d, name)
+        if files[rel] <= limit:
+            return (0, 3, d, name)
+        return (1, 0, d, name)
+    return key
 
 
-PROFILES = {
-    "CUSA11456": {
-        "prefix": "GHOST",
-        "exclude": r"^(eboot\.bin\.xref|cache/psarc/lang_(french|latino|brazilian|japanese)_audio\.psarc)$",
-        "order": ROOT / "ghostldr/data/cusa11456-open-order.txt",
-        "late": "cache/psarc/",               # traced files under here go after the other traced ones
-        "group": ghost_group,
-        "src": ROOT / "build/ghost/app0",
-    },
-}
+def rules_key(groups: list):
+    """Order from a profile's [regex, rank] rules: the first rule whose regex
+    is found in the path gives the rank (unmatched files go last); rank 0 is
+    the boot group.  Within a rank, by path."""
+    rules = [(re.compile(rx), int(rank)) for rx, rank in groups]
+    last = max((r for _, r in rules), default=0) + 1
+
+    def key(rel: str) -> tuple:
+        return (next((r for rx, r in rules if rx.search(rel)), last), rel)
+    return key
 
 
-def param_title(src: Path) -> str | None:
-    """TITLE_ID from sce_sys/param.sfo, if the dump has one."""
-    p = src / "sce_sys/param.sfo"
-    if not p.exists():
-        return None
-    d = p.read_bytes()
-    kt, dt, n = struct.unpack_from("<III", d, 8)
-    for i in range(n):
-        ko, _, ln, _, do = struct.unpack_from("<HHIII", d, 20 + 16 * i)
-        if d[kt + ko:d.index(b"\0", kt + ko)] == b"TITLE_ID":
-            return d[dt + do:dt + do + ln].rstrip(b"\0").decode()
-    return None
+def read_order(path: Path | None, files: dict[str, int]) -> list[str]:
+    if not path:
+        return []
+    seen: set[str] = set()
+    out = []
+    for line in path.read_text().splitlines():
+        rel = line.strip()
+        if rel and not rel.startswith("#") and rel in files and rel not in seen:
+            seen.add(rel)
+            out.append(rel)
+    return out
 
 
-def pack(src: Path, title: str, prefix: str, out: Path) -> dict:
-    prof = PROFILES.get(title, {})
-    exclude = re.compile(prof.get("exclude", r"^$(?!)"))
-    group = prof.get("group", generic_group)
+def file_order(files: dict[str, int], pack_prof: dict, order_file: Path | None = None) -> tuple[list[str], int]:
+    """Every file in layout order, and how many came from the order file."""
+    groups = pack_prof.get("groups")
+    key = rules_key(groups) if groups else heuristic_key(files)
+    if order_file is None and pack_prof.get("order"):
+        order_file = titles.TITLES / pack_prof["order"]
+    traced = read_order(order_file, files)
+    late = tuple(pack_prof.get("late", []))
+    traced_set = set(traced)
+    boot = sorted((p for p in files if key(p)[0] == 0 and p not in traced_set), key=key)
+    traced_first = [p for p in traced if not (late and p.startswith(late))]
+    traced_late = [p for p in traced if late and p.startswith(late)]
+    placed = set(boot) | traced_set
+    rest = sorted((p for p in files if p not in placed), key=key)
+    return boot + traced_first + traced_late + rest, len(traced)
+
+
+def pack(src: Path, title: str, prefix: str, out: Path, prof: dict | None = None,
+         order_file: Path | None = None) -> dict:
+    if prof is None:
+        prof = titles.load(title)
+    pk = prof.get("pack", {})
+    exclude = re.compile(pk.get("exclude") or r"^$(?!)")
     files: dict[str, int] = {}
     dirs: set[str] = {""}
     for p in sorted(src.rglob("*")):
@@ -123,18 +147,9 @@ def pack(src: Path, title: str, prefix: str, out: Path) -> dict:
             while "/" in d:
                 d = d.rsplit("/", 1)[0]
                 dirs.add(d)
-
-    traced: list[str] = []
-    if prof.get("order"):
-        lines = prof["order"].read_text().splitlines()
-        traced = [p for p in lines if p and not p.startswith("#") and p in files]
-    late = prof.get("late")
-    boot = sorted((p for p in files if group(p)[0] == 0 and p not in traced))
-    traced_first = [p for p in traced if not (late and p.startswith(late))]
-    traced_late = [p for p in traced if late and p.startswith(late)]
-    placed = set(boot) | set(traced)
-    rest = sorted((p for p in files if p not in placed), key=group)
-    order = boot + traced_first + traced_late + rest
+    if "eboot.bin" not in files:
+        raise SystemExit(f"{src}: no eboot.bin (point --src at the title's app0)")
+    order, traced = file_order(files, pk, order_file)
 
     # linear layout, then cut into containers
     offset = 0
@@ -175,13 +190,34 @@ def pack(src: Path, title: str, prefix: str, out: Path) -> dict:
     (out / "index.bin").write_bytes(index)
     # small containers lose a lot to filesystem overhead: give the index 4x its size
     idx_blocks = max(512, (4 * len(index) + 32767) // 32768)
+    sfo = titles.param_sfo(src)
     info = {
         "title": title, "prefix": prefix, "layout_id": f"{layout_id:016x}", "src": str(src), "cap": CAP,
         "total": total, "entries": len(packed), "index_blocks": idx_blocks, "containers": containers,
-        "traced": len(traced), "files": len(files), "dirs": len(dirs),
+        "traced": traced, "files": len(files), "dirs": len(dirs),
+        # for the catalogue entry and run.py (not part of the layout)
+        "name": prof.get("name") or str(sfo.get("TITLE", "")), "version": prof.get("version") or
+        str(sfo.get("APP_VER", "")), "app_params": titles.app_params(prof, src),
     }
     (out / "layout.json").write_text(json.dumps(info, indent=1))
     return info
+
+
+def packed_titles() -> list[str]:
+    """Titles packed in build/ghostfs, most recently packed first."""
+    found = sorted(OUT_ROOT.glob("*/layout.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    return [f.parent.name for f in found if (f.parent / "index.bin").is_file()]
+
+
+def default_title(what: str) -> str:
+    """The title a tool works on when not told: the only one packed, else the
+    most recently packed (said out loud)."""
+    packed = packed_titles()
+    if not packed:
+        raise SystemExit(f"nothing packed in {OUT_ROOT.relative_to(ROOT)}: run gfs_pack.py first, or pass --title")
+    if len(packed) > 1:
+        print(f"{what} {packed[0]}, the most recently packed of {', '.join(packed)} (--title picks another)")
+    return packed[0]
 
 
 def index_header(count: int, entries: int, total: int, names_off: int, names_size: int, prefix: str, title: str,
@@ -193,21 +229,33 @@ def index_header(count: int, entries: int, total: int, names_off: int, names_siz
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", type=Path, help="the title's extracted app0 (default: CUSA11456's)")
-    ap.add_argument("--title", help="title ID (default: sce_sys/param.sfo's, else CUSA11456)")
-    ap.add_argument("--prefix", help="container name prefix, unique per title (default: profile's, else G + digits)")
+    ap.add_argument("--src", type=Path, default=titles.DEFAULT_SRC,
+                    help="the title's extracted app0 (default: build/ghost/app0)")
+    ap.add_argument("--title", help="title ID (default: param.sfo's, else the profile matching the eboot)")
+    ap.add_argument("--prefix", help="container name prefix, unique per title (default: the profile's, else G + "
+                    "the ID's digits)")
+    ap.add_argument("--order", type=Path, help="open-order file to use instead of the profile's (capture_order.py)")
     args = ap.parse_args()
-    src = args.src or PROFILES["CUSA11456"]["src"]
-    title = args.title or param_title(src) or ("CUSA11456" if not args.src else None)
-    if not title or not re.fullmatch(r"[A-Z]{4}\d{5}", title):
-        raise SystemExit("pass --title (e.g. CUSA12345): the dump has no sce_sys/param.sfo")
-    prefix = args.prefix or PROFILES.get(title, {}).get("prefix") or "G" + title[4:]
-    if not re.fullmatch(r"[A-Z0-9]{1,12}", prefix):
-        raise SystemExit("the prefix must be 1-12 of A-Z 0-9")
-    info = pack(src, title, prefix, OUT_ROOT / title)
+    src = args.src
+    if not (src / "eboot.bin").is_file():
+        raise SystemExit(f"{src}: no eboot.bin (point --src at the title's app0)")
+    title = titles.normalize_title(args.title) if args.title else titles.detect_title(src)
+    if not title:
+        raise SystemExit("pass --title (e.g. CUSA12345): the dump's sce_sys/param.sfo has no usable TITLE_ID "
+                         "and no profile matches its eboot")
+    try:
+        prof = titles.load(title)
+    except titles.ProfileError as e:
+        raise SystemExit(str(e))
+    prefix = (args.prefix or prof.get("pack", {}).get("prefix") or titles.default_prefix(title)).upper()
+    why = gc.prefix_problem(prefix)
+    if why:
+        raise SystemExit(f"prefix {prefix}: {why} (--prefix picks another)")
+    info = pack(src, title, prefix, OUT_ROOT / title, prof, args.order)
     cs = info["containers"]
-    print(f"{title}: {info['files']} files ({info['traced']} traced first), {info['dirs']} dirs, "
-          f"{info['total'] / 2**30:.1f} GiB in {len(cs)} containers {prefix}000..; layout {info['layout_id']}")
+    how = "own profile" if prof["_has_profile"] else "no profile: generic layout"
+    print(f"{title} ({how}): {info['files']} files ({info['traced']} from the open order first), {info['dirs']} "
+          f"dirs, {info['total'] / 2**30:.1f} GiB in {len(cs)} containers {prefix}000..; layout {info['layout_id']}")
     for c in cs[:6]:
         first = c["pieces"][0][0] if c["pieces"] else "-"
         print(f"  {c['dir']}: {c['size'] >> 20} MiB, {len(c['pieces'])} pieces, starts with {first}")

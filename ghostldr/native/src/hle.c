@@ -78,7 +78,7 @@ static int hle_open(const char *path, int flags, int mode)
     const char *p = remap_path(path, buf, sizeof(buf));
     int fd = ((int (*)(const char *, int, int))host_real("sceKernelOpen"))(p, flags, mode);
     static u32 opens;
-    if (fd < 0 || __atomic_fetch_add(&opens, 1, __ATOMIC_RELAXED) < 400)
+    if (fd < 0 || profile_has(PF_TRACE_OPENS) || __atomic_fetch_add(&opens, 1, __ATOMIC_RELAXED) < 400)
         logf("open %s (%s) flags %x -> %x", path, p, flags, fd);
     if (fd >= 0 && strstr(path, "movies/"))
         for (u32 i = 0; i < ARRAY_SIZE(g_watch_fd); i++)
@@ -282,16 +282,26 @@ static s64 hle_write(int fd, const void *buf, size_t len)
     return (s64)len;
 }
 
+int budget_alloc_gate(u64 len);
+void budget_alloc_note(s64 len);
+int budget_flex_gate(u64 len);
+void budget_flex_note(s64 len);
+
 /* Flexible memory is scarce inside SWRR: back named/unnamed flexible
- * mappings with direct memory instead. */
-static int hle_map_flex(void **addr, size_t len, int prot, int flags)
+ * mappings with direct memory instead, within the title's flex budget
+ * (budget.c). */
+int hle_map_flex(void **addr, size_t len, int prot, int flags)
 {
+    int rc = budget_flex_gate(len);
+    if (rc)
+        return rc;
     u64 fixed = (flags & MAP_FIXED) ? (u64)*addr : 0;
     void *p = direct_alloc(len, prot ? prot : PROT_READ | PROT_WRITE, fixed);
     if (!p) {
         logf("flex->direct %lx failed", len);
         return 0x8002000c;
     }
+    budget_flex_note((s64)ALIGN_UP(len, 0x4000));
     *addr = p;
     return 0;
 }
@@ -328,8 +338,11 @@ static void usage_add_map(u64 phys, u64 len)
         }
 }
 
-static int hle_alloc_direct(off_t start, off_t end, size_t len, size_t align, int type, off_t *out)
+int hle_alloc_direct(off_t start, off_t end, size_t len, size_t align, int type, off_t *out)
 {
+    int gate = budget_alloc_gate(len); /* plan-free: the reported size is the budget */
+    if (gate)
+        return gate;
     size_t real_size = ((size_t (*)(void))host_real("sceKernelGetDirectMemorySize"))();
     /* the title bounds its searches by the size it was told (budget.c), but
      * the free physical memory lies anywhere below the real size */
@@ -343,8 +356,14 @@ static int hle_alloc_direct(off_t start, off_t end, size_t len, size_t align, in
     else
         rc = ((int (*)(off_t, off_t, size_t, size_t, int, off_t *))host_real("sceKernelAllocateDirectMemory"))(
             start, end, len, align, type, out);
+    bool planfree = !profile_has(PF_PLAN); /* its offsets are handles: any free memory will do */
+    if (rc != 0 && planfree && (start || (u64)end < real_size))
+        rc = ((int (*)(off_t, off_t, size_t, size_t, int, off_t *))host_real("sceKernelAllocateDirectMemory"))(
+            0, (off_t)real_size, len, align, type, out);
     if (rc != 0 && len >= 0x200000) /* no single hole is big enough: scatter it (vdm.c) */
-        rc = vdm_alloc((u64)start, (u64)end, len, align, type, out);
+        rc = vdm_alloc(planfree ? 0 : (u64)start, planfree ? real_size : (u64)end, len, align, type, out);
+    if (rc == 0)
+        budget_alloc_note((s64)len);
     if (rc == 0 && out)
         usage_add_alloc((u64)*out, len, type, g_main_mod ? ra - g_main_mod->base : ra);
     logf("AllocateDirectMemory(%lx-%lx, len %lx, align %lx, type %d) -> %x phys %lx from eboot+%lx", (u64)start,
@@ -439,6 +458,8 @@ static int hle_release_direct(off_t start, size_t len)
 {
     int rc = vdm_is((u64)start) ? vdm_release((u64)start, len)
                                 : ((int (*)(off_t, size_t))host_real("sceKernelReleaseDirectMemory"))(start, len);
+    if (rc == 0)
+        budget_alloc_note(-(s64)len);
     logf("ReleaseDirectMemory(%lx, %lx) -> %x", (u64)start, len, rc);
     return rc;
 }
@@ -455,7 +476,7 @@ static size_t hle_direct_size(void)
 {
     size_t v = ((size_t (*)(void))host_real("sceKernelGetDirectMemorySize"))();
     struct module *m = ghost_main_module();
-    if (m && m->image_size > 0x28e24e8) {
+    if (m && m->image_size > 0x28e24e8 && profile_has(PF_DIAG)) {
         /* CUSA11456 memory planner inputs (eboot 2.18): config pool sizes */
         u32 *cfg = (u32 *)(m->base + 0x28e24d8);
         u64 *pools = (u64 *)(m->base + 0x16b29c8), *pool2 = (u64 *)(m->base + 0x16b2a90);

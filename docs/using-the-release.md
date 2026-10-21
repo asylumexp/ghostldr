@@ -80,7 +80,10 @@ python3 ghostldr/host/gfs_install.py
 - **`no space left on the console's storage`:** free space on the PS5 and run it again.
 - **A slow default network link** on the computer: `--interface en0` sends through a chosen interface (macOS).
 
-The data lands in SWRR's saved data under the signed-in user, as about 57 entries named `GHOST000`…`GHOST055` and `GFSINDEX`. It belongs to the SWRR region you installed from: US and EU SWRR each keep their own saved data, so install from the one you will play in.
+The data lands in SWRR's saved data under the signed-in user, as 58 entries: `GHOST000`…`GHOST055`, `GHOSTINDEX` and `GFSCATALOG` (an install made with v0.1 has `GFSINDEX` instead of `GHOSTINDEX`, and keeps working). It belongs to the SWRR region you installed from: US and EU SWRR each keep their own saved data, so install from the one you will play in.
+
+- **Not enough space:** the installer checks before sending and stops without changing anything. Free space on the PS5 and run it again.
+- **Other titles** can be installed next to Ghost; none but Ghost has been tested ([compatibility.md](compatibility.md)).
 
 ## 6. Play
 
@@ -108,6 +111,14 @@ The computer logs the session to `build/ghostldr/run.log`. That file is what to 
 
 ## Removing it
 
-Delete Ghost's data from **Settings → Saved Data and Game/App Settings → Saved Data (PS4) → Console Storage → Star Wars Racer Revenge**. The entries are `GHOST000`…`GHOST055` and `GFSINDEX`.
+With Luac0re's loader listening:
+
+```bash
+python3 ghostldr/host/gfs_install.py --remove CUSA11456
+```
+
+This deletes Ghost's data and index and keeps its progress, `GHOSTSAVE` (add `--remove-saves` to delete that too). Other installed titles and SWRR's own save are not touched.
+
+Or delete the entries by hand in **Settings → Saved Data and Game/App Settings → Saved Data (PS4) → Console Storage → Star Wars Racer Revenge**: `GHOST000`…`GHOST055` and `GHOSTINDEX` (or `GFSINDEX`).
 
 Keep `GHOSTSAVE` (Ghost's progress) and the Luac0re save (`SLUS-20268` on US SWRR, `SLES-50366` on EU) unless you mean to remove those too.

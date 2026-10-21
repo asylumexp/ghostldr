@@ -11,6 +11,8 @@
 --                       NID table): run.py serves it over TCP on the log IP;
 --                       size 0 = none.  This script only connects the socket:
 --                       the core reads the blob itself and checks size and CRC.
+--   GHOSTLDR_PROFILE_HEX  the title profiles (host/profiles.py boot_bundle); the
+--                       core finds them through the last u64 of the context
 
 local function fail(msg)
     send_notification("ghostldr: " .. msg)
@@ -134,6 +136,15 @@ write64(ctx + #fields * 8 + 0x38, GHOSTLDR_CPU_HEAP_MIB or 0)
 write64(ctx + #fields * 8 + 0x40, ext_fd)
 write64(ctx + #fields * 8 + 0x48, GHOSTLDR_EXT_SIZE or 0)
 write64(ctx + #fields * 8 + 0x50, GHOSTLDR_EXT_CRC or 0)
+-- title profiles: blobs ended by 8 zero bytes, pointed to by the context's last
+-- u64 (profile.c PROFILE_SLOT); without them the core uses its generic defaults
+if GHOSTLDR_PROFILE_HEX and #GHOSTLDR_PROFILE_HEX > 0 then
+    local prof = hex_to_binary(GHOSTLDR_PROFILE_HEX)
+    local prof_mem = malloc(#prof + 8)
+    write_buffer(prof_mem, prof)
+    write64(prof_mem + #prof, 0)
+    write64(ctx + 0x1F8, prof_mem)
+end
 
 send_notification(string.format("ghostldr: core at %x, calling", rx))
 local ret = func_wrap(rx)(ctx)

@@ -5,6 +5,7 @@
 #define DT_NULL 0
 #define DT_INIT 12
 #define DT_FINI 13
+#define DT_SCE_FINGERPRINT 0x61000007
 #define DT_SCE_MODULE_INFO 0x6100000D
 #define DT_SCE_NEEDED_MODULE 0x6100000F
 #define DT_SCE_EXPORT_LIB 0x61000013
@@ -84,7 +85,7 @@ int module_parse(struct module *m, u8 *file, u64 size)
     }
 
     const u64 *dyn = NULL;
-    u64 ndyn = 0;
+    u64 ndyn = 0, dynlib_size = 0, fingerprint = ~0UL;
     for (u32 i = 0; i < m->phnum; i++) {
         struct elf_phdr *p = &m->phdrs[i];
         if (p->type == PT_DYNAMIC && m->seg_data[i]) {
@@ -92,6 +93,7 @@ int module_parse(struct module *m, u8 *file, u64 size)
             ndyn = p->filesz / 16;
         } else if (p->type == PT_SCE_DYNLIBDATA) {
             m->dynlib = m->seg_data[i];
+            dynlib_size = p->filesz;
         } else if (p->type == PT_TLS) {
             m->tls_vaddr = p->vaddr;
             m->tls_filesz = p->filesz;
@@ -121,8 +123,12 @@ int module_parse(struct module *m, u8 *file, u64 size)
         case DT_SCE_PLTRELSZ: pltrelsz = val; break;
         case DT_INIT: m->init = val; break;
         case DT_FINI: m->fini = val; break;
+        case DT_SCE_FINGERPRINT: fingerprint = val; break;
         }
     }
+    /* the build of the executable: title profiles are bound to it (profile.c) */
+    if (m->is_main)
+        profile_bind(fingerprint + 20 <= dynlib_size ? m->dynlib + fingerprint : NULL);
     m->strtab = (const char *)(m->dynlib + strtab);
     m->symtab = (const struct elf_sym *)(m->dynlib + symtab);
     m->nsyms = symtabsz / sizeof(struct elf_sym);

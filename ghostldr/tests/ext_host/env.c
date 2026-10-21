@@ -100,6 +100,9 @@ u64 hle_lookup(const char *lib, const char *name)
     return strcmp(name, "sceKernelOpen") == 0 && (!lib || strcmp(lib, "libkernel") == 0) ? CORE_OPEN : 0;
 }
 u64 module_export(struct module *m, const char *nid) { return 0; }
+/* title profiles (profile.c): no rules, no fingerprint binding here */
+u64 profile_resolve(const char *lib, const char *nid) { (void)lib, (void)nid; return 0; }
+void profile_bind(const u8 *fingerprint) { (void)fingerprint; }
 int host_find_module(const char *name, u32 *handle_out) { return -1; }
 u64 call_gadget6(u64 fn, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6) { return (u64)-1; }
 void *host_dlsym(u32 handle, const char *name)

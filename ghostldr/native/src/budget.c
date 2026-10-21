@@ -1,66 +1,53 @@
 /*
- * Fit CUSA11456's memory plan into SWRR's direct memory.
+ * The title's memory budget inside SWRR's direct memory, fixed at plan time
+ * (the executable is relocated, its text not yet written) and never changed.
  *
- * Ghost's planner (eboot 0x895b40) reserves every byte of
- * sceKernelGetDirectMemorySize() up front.  In memory mode 0 (base PS4) it
- * needs ~5.07 GiB; SWRR's process has 4.5 GiB, ~4.37 GiB of it free once
- * hostmem.c releases the emulator's buffers.
+ * SWRR's process has 4.5 GiB of direct memory, ~4.4-4.5 GiB of it free once
+ * hostmem.c releases the emulator's buffers, and almost no flexible memory.
  *
- * Measured: the type 3 pool at 0x1500000000 (table 0x111ce10) is the general
- * GPU heap (engine heap 0x390d80); boot alone needs ~900 MiB of it, so it
- * keeps its size.  The pool at 0x1200000000 (table 0x111cd50) feeds a paged
- * GPU pool manager and grows 1120 -> 2120 -> 4696 MiB with richer memory
- * modes: the texture streaming pool.  It takes the shortfall.  vdm.c removes
- * the need for physically contiguous blocks, so only the total matters.
+ * Plan-free (every title by default): the title is told one stable direct
+ * size, D = free memory - ghostldr's reserve (64 MiB) - the video decoder's
+ * (100 MiB if it imports one) - its flexible budget F (its own
+ * mem_param.flexible_memory_size, else 448 MiB), and offered it as one
+ * contiguous run; vdm.c scatters what no single hole holds.  Allocations past
+ * D fail with EAGAIN, flexible mappings past F with ENOMEM (flex is backed by
+ * direct memory, never by SWRR's or the system's flex pool).  Neo mode is 0.
+ *
+ * Planned (a profile's memory plan, only on the profile's own build): for
+ * titles whose fixed demand is larger.  Ghost of Tsushima's planner reserves
+ * every byte it is told about up front: ~5.07 GiB in memory mode 0.  The
+ * plan's "set" tables (u64 per memory mode in the executable's text) get
+ * their sizes, its "absorb" table (Ghost: the texture streaming pool,
+ * 1120 MiB) takes the shortfall, and lazy sites (vdm.c) back reservations
+ * the title fills only partly:
+ *     absorb = free - title_fixed - reserve - set deltas + overcommit - video
+ *     reported = title_fixed + set deltas + absorb
+ * Ghost (CUSA11456.json): 4532 MiB free -> streaming pool 1120 -> 588 MiB,
+ * reporting 4520 MiB.
  */
 #include "ghost.h"
 
 #define MiB (1UL << 20)
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define E_NOMEM 0x8002000c
+#define E_AGAIN 0x80020023
+#define DEFAULT_FLEX (448 * MiB)
+#define VIDEO_MIB 100
+#define COLD __attribute__((minsize, cold)) /* runs once per boot (or rarely): small beats fast */
 
-/* rodata tables indexed by memory mode (0 = base PS4) */
-#define TBL_GPU_HEAP 0x111ce10 /* type 3 general GPU heap, mapped at 0x1500000000 */
-#define TBL_POOL1 0x111cde0    /* type 0 engine heap, mapped at 0x1100000000 */
-#define TBL_CPU_HEAP 0x111cd20 /* type 0 CPU malloc mspace, mapped at 0x1000000000 */
-#define TBL_STREAM_POOL 0x111cd50 /* type 3, mapped at 0x1200000000 */
-static const u64 k_stream_pool[6] = {0x46000000, 0x46000000, 0x46000000, 0x84800000, 0x125800000, 0x125800000};
+u64 g_reported_dmem;
+static u64 g_flex_cap;                    /* 0: no cap (planned titles without flex_mib) */
+static volatile u64 g_flex_used, g_title_dmem;
+static bool g_planfree;
 
-/* mode-0 reservations other than the streaming pool, in MiB:
- * 0x111cd20 384 + 0x111cd80 116 + 0x111cdb0 64, 0x111cde0 332 (type 0 pool),
- * 0x111ce10 1390 (GPU heap), subsystem budgets 1660 */
-#define FIXED_MIB 3946UL
-#define REMAINDER_MIB 48UL /* planner's general-heap remainder */
-#define SLACK_MIB 32UL     /* free memory left for late allocations */
-/* the CPU malloc mspace (0x111cd20, 384 MiB) gives 64 MiB to the streaming
- * pool: at 352 MiB the pool cannot hold core_common's textures and loading
- * stalls; at ~512 MiB the world loads */
-#define CPU_HEAP_MIB 320UL
-
-/* Reservations the title maps only partly; vdm.c backs them lazily, 2 MiB at
- * a time.  At the loading screen (measured 2026-10-20): planner type-0 heap
- * 927 of 1096 MiB mapped, planner type-3 heap 440 of 612, 64 KiB-page GPU
- * pool 56 of 116.  Keys are the call sites' return addresses. */
-static const u64 k_lazy_sites[] = {0x896126, 0x89614a, 0xeee2cf};
-#define LAZY_TOTAL_MIB (1096UL + 612UL + 116UL) /* their full sizes (mode 0, REMAINDER_MIB 48) */
-/* Loading the beach (2026-10-20) commits 1040 + 606 + 62 MiB of them, its
- * fight takes the 64 KiB-page pool to 100 MiB.  Together with the movie
- * reserve below this covers all 1824 MiB, and leaves the streaming pool
- * ~590 MiB (550 stalls the beach load). */
-#define LAZY_RESERVE_MIB 1704UL                 /* physical memory kept for their commits */
-/* one PS5 BC video decoder as hle_sys.c vdec_config sizes it (DPB of H.264
- * level 4.2, 2-deep pipeline).  Free at boot for the splash movies; later the
- * pools above may take it, and a movie that finds no memory is skipped. */
-#define MOVIE_RESERVE_MIB 100UL
-
-bool budget_lazy_site(u64 eboot_off)
+COLD bool budget_lazy_site(u64 eboot_off)
 {
-    for (u32 i = 0; i < ARRAY_SIZE(k_lazy_sites); i++)
-        if (k_lazy_sites[i] == eboot_off)
+    const struct prof_plan *p = profile_record(REC_PLAN, 0);
+    for (u32 i = 0; p && i < p->nsites; i++)
+        if (p->sites[i] == eboot_off)
             return true;
     return false;
 }
-#define MIN_POOL_MIB 128UL
-
-u64 g_reported_dmem;
 
 struct hole {
     u64 s, e;
@@ -68,7 +55,7 @@ struct hole {
 #define MAX_HOLES 96
 
 /* free physical ranges: the complement of the allocated ones */
-static u32 free_holes(struct hole *h)
+COLD static u32 free_holes(struct hole *h, u64 *total)
 {
     struct {
         off_t start, end;
@@ -87,59 +74,268 @@ static u32 free_holes(struct hole *h)
     }
     if (cur < real && n < MAX_HOLES)
         h[n++] = (struct hole){cur, real};
+    *total = 0;
+    for (u32 i = 0; i < n; i++)
+        *total += h[i].e - h[i].s;
     return n;
 }
 
-void budget_patch_text(struct module *m, u8 *text)
+COLD static const char *table_name(const struct prof_table *t) { return (const char *)&t->expect[t->nexpect]; }
+
+/* a profile's plan: set tables, absorb the rest (see the top) */
+COLD static void plan_tables(struct module *m, u8 *text, const struct prof_plan *plan)
 {
-    u64 *pool = (u64 *)(text + TBL_STREAM_POOL);
-    if (TBL_STREAM_POOL + sizeof(k_stream_pool) > m->text_size || memcmp(pool, k_stream_pool, sizeof(k_stream_pool))) {
-        logf("budget: streaming pool table not found; leaving the plan alone");
+    const struct prof_hdr *h = profile_hdr();
+    const struct prof_table *t, *absorb = NULL;
+    for (u32 i = 0; (t = profile_record(REC_TABLE, i)); i++)
+        if (t->role == 1)
+            absorb = t;
+    u64 *pool = absorb ? (u64 *)(text + absorb->offset) : NULL;
+    if (!absorb || !absorb->nexpect || absorb->offset + 8UL * absorb->nexpect > m->text_size ||
+        memcmp(pool, absorb->expect, 8UL * absorb->nexpect)) {
+        logf("budget: %s table not found; leaving the plan alone", absorb ? table_name(absorb) : "absorbing");
         return;
     }
-    /* experiment knobs (run.py --gpu-heap-mib/--pool1-mib/--cpu-heap-mib):
-     * resize the other mode-0 reservations; the streaming pool absorbs it */
-    static const struct {
-        u64 table;
-        u32 knob;
-        const char *what;
-    } k_knobs[] = {{TBL_GPU_HEAP, 4, "general GPU heap"}, {TBL_POOL1, 6, "type-0 engine heap"},
-                   {TBL_CPU_HEAP, 7, "CPU malloc heap"}};
-    s64 gpu_delta_mib = 0;
-    for (u32 i = 0; i < ARRAY_SIZE(k_knobs); i++) {
-        u64 want = g_ctx->reserved[k_knobs[i].knob];
-        if (!want && k_knobs[i].table == TBL_CPU_HEAP)
-            want = CPU_HEAP_MIB;
-        if (!want)
+    /* run.py --gpu-heap-mib/--pool1-mib/--cpu-heap-mib override a set table's
+     * size (boot_ctx reserved[knob]); the absorbing table takes the change */
+    s64 delta_mib = 0;
+    for (u32 i = 0; (t = profile_record(REC_TABLE, i)); i++) {
+        u64 want = t->knob < 8 && g_ctx->reserved[t->knob] ? g_ctx->reserved[t->knob] : t->mib;
+        if (t->role != 0 || !want || t->offset + 8UL > m->text_size)
             continue;
-        u64 *t = (u64 *)(text + k_knobs[i].table);
-        gpu_delta_mib += (s64)want - (s64)(t[0] / MiB);
-        logf("budget: %s %lu -> %lu MiB", k_knobs[i].what, t[0] / MiB, want);
-        t[0] = want * MiB;
+        u64 *v = (u64 *)(text + t->offset);
+        delta_mib += (s64)want - (s64)(v[0] / MiB);
+        logf("budget: %s %lu -> %lu MiB", table_name(t), v[0] / MiB, want);
+        v[0] = want * MiB;
     }
-    u64 slack_mib = g_ctx->reserved[5] ? g_ctx->reserved[5] : SLACK_MIB;
+    u64 reserve = g_ctx->reserved[5] ? g_ctx->reserved[5] : h->runtime_reserve_mib; /* run.py --slack-mib */
     struct hole free[MAX_HOLES];
-    u32 nfree = free_holes(free);
-    u64 total = 0;
-    for (u32 i = 0; i < nfree; i++) {
-        total += free[i].e - free[i].s;
+    u64 total;
+    u32 nfree = free_holes(free, &total);
+    for (u32 i = 0; i < nfree; i++)
         if (free[i].e - free[i].s >= 16 * MiB)
             logf("budget: free %lx-%lx (%lu MiB)", free[i].s, free[i].e, (free[i].e - free[i].s) / MiB);
-    }
-    /* the lazily backed reservations (planner heaps = subsystem budgets +
-     * remainder, and the 64 KiB-page pool) count with LAZY_RESERVE_MIB
-     * instead of their full LAZY_TOTAL_MIB */
-    s64 pool_mib = (s64)(total / MiB) - (s64)(FIXED_MIB + 2 + REMAINDER_MIB + slack_mib) - gpu_delta_mib +
-                   (s64)LAZY_TOTAL_MIB - (s64)LAZY_RESERVE_MIB - (s64)MOVIE_RESERVE_MIB;
-    if (pool_mib > (s64)(k_stream_pool[0] / MiB))
-        pool_mib = (s64)(k_stream_pool[0] / MiB);
-    if (pool_mib < (s64)MIN_POOL_MIB) {
-        logf("budget: only %lu MiB free; streaming pool clamped to %lu MiB", total / MiB, MIN_POOL_MIB);
-        pool_mib = MIN_POOL_MIB;
+    s64 video = h->video_reserve_mib >= 0 ? h->video_reserve_mib : VIDEO_MIB;
+    s64 orig = (s64)(absorb->expect[0] / MiB);
+    s64 pool_mib = (s64)(total / MiB) - (s64)plan->title_fixed_mib - (s64)reserve - delta_mib +
+                   (s64)plan->overcommit_mib - video;
+    if (pool_mib > orig)
+        pool_mib = orig;
+    if (pool_mib < (s64)absorb->min_mib) {
+        logf("budget: only %lu MiB free; %s clamped to %u MiB", total / MiB, table_name(absorb), absorb->min_mib);
+        pool_mib = absorb->min_mib;
     }
     pool_mib &= ~1L;
     pool[0] = pool_mib * MiB;
-    g_reported_dmem = (u64)((s64)FIXED_MIB + gpu_delta_mib + pool_mib + 2 + (s64)REMAINDER_MIB) * MiB;
-    logf("budget: %lu MiB free in %u holes; streaming pool %lu -> %ld MiB; reporting %lu MiB direct memory",
-         total / MiB, nfree, k_stream_pool[0] / MiB, pool_mib, g_reported_dmem / MiB);
+    g_reported_dmem = (u64)((s64)plan->title_fixed_mib + delta_mib + pool_mib) * MiB;
+    g_flex_cap = h->flex_mib * MiB;
+    logf("budget: %lu MiB free in %u holes; %s %ld -> %ld MiB; reporting %lu MiB direct memory", total / MiB, nfree,
+         table_name(absorb), orig, pool_mib, g_reported_dmem / MiB);
+}
+
+/* what an address of the executable holds at plan time: text is still in
+ * `text`, RELRO in its shadow, data in place */
+COLD static const u64 *image_u64(struct module *m, const u8 *text, u64 addr)
+{
+    u64 off = addr - m->base;
+    if (addr < m->base || off + 8 > m->image_size)
+        return NULL;
+    if (off + 8 <= m->text_size)
+        return (const u64 *)(text + off);
+    if (m->relro_shadow && off >= m->relro_lo && off + 8 <= m->relro_lo + m->relro_size)
+        return (const u64 *)(m->relro_shadow + (off - m->relro_lo));
+    return (const u64 *)addr;
+}
+
+/* proc param +0x40 -> mem param, +0x10 -> u64 *flexible_memory_size */
+COLD static u64 title_flex(struct module *m, const u8 *text)
+{
+    const u64 *mem = m->proc_param ? image_u64(m, text, m->proc_param + 0x40) : NULL;
+    const u64 *size = mem && *mem ? image_u64(m, text, *mem) : NULL;
+    const u64 *fp = size && *size >= 0x18 ? image_u64(m, text, *mem + 0x10) : NULL;
+    const u64 *flex = fp && *fp ? image_u64(m, text, *fp) : NULL;
+    return flex && *flex ? ALIGN_UP(*flex, 0x4000) : DEFAULT_FLEX;
+}
+
+COLD static bool modules_import(const char *prefix)
+{
+    for (struct module *m = g_modules; m; m = m->next)
+        for (u32 i = 0; i < m->n_import_libs; i++)
+            if (strncmp(m->import_libs[i].name, prefix, strlen(prefix)) == 0)
+                return true;
+    return false;
+}
+
+COLD static bool modules_export(const char *lib)
+{
+    for (struct module *m = g_modules; m; m = m->next)
+        for (u32 i = 0; i < m->n_export_libs; i++)
+            if (strcmp(m->export_libs[i].name, lib) == 0)
+                return true;
+    return false;
+}
+
+COLD static int plan_free(struct module *m, const u8 *text)
+{
+    const struct prof_hdr *h = profile_hdr();
+    u64 flex = h->flex_mib ? h->flex_mib * MiB : title_flex(m, text);
+    u64 reserve = g_ctx->reserved[5] ? g_ctx->reserved[5] : h->runtime_reserve_mib;
+    s64 video = h->video_reserve_mib >= 0 ? h->video_reserve_mib
+                : modules_import("libSceVideodec") || modules_import("libSceAvPlayer") ? VIDEO_MIB : 0;
+    struct hole free[MAX_HOLES];
+    u64 total;
+    u32 nfree = free_holes(free, &total), largest = 0;
+    for (u32 i = 0; i < nfree; i++)
+        if (free[i].e - free[i].s > free[largest].e - free[largest].s)
+            largest = i;
+    s64 d = ((s64)(total / MiB) - (s64)reserve - video - (s64)(flex / MiB)) & ~1L;
+    logf("budget: plan-free: %lu MiB free in %u holes (largest %lu) - %lu ghostldr - %ld video - %lu flex = "
+         "%ld MiB direct memory, one run; Neo mode 0",
+         total / MiB, nfree, nfree ? (free[largest].e - free[largest].s) / MiB : 0, reserve, video, flex / MiB, d);
+    if (!modules_export("libc"))
+        logf("budget: no bundled libc.prx: the title's malloc uses SWRR's own heap (about 38 MiB of flexible "
+             "memory)");
+    if (d < (s64)h->min_mib) {
+        logf("budget: %ld MiB of direct memory is below the profile's minimum of %u MiB: the title would fail "
+             "later, so it is not started (it needs a memory plan or a smaller flex budget)", d, h->min_mib);
+        return -1;
+    }
+    g_reported_dmem = (u64)d * MiB;
+    g_flex_cap = flex;
+    g_planfree = true;
+    return 0;
+}
+
+COLD int budget_patch_text(struct module *m, u8 *text)
+{
+    const struct prof_plan *plan = profile_record(REC_PLAN, 0);
+    if (plan) {
+        plan_tables(m, text, plan);
+        return 0;
+    }
+    return plan_free(m, text);
+}
+
+/* ---- the budget's gates (hle.c) ---- */
+static u32 g_said[2];
+
+int budget_alloc_gate(u64 len)
+{
+    if (!g_planfree || g_title_dmem + len <= g_reported_dmem)
+        return 0;
+    if (!g_said[0]++)
+        logf("budget: direct memory full: %lu of %lu MiB allocated, %lu more asked: EAGAIN", g_title_dmem / MiB,
+             g_reported_dmem / MiB, len >> 20);
+    return (int)E_AGAIN;
+}
+
+void budget_alloc_note(s64 len)
+{
+    u64 old = __atomic_fetch_add(&g_title_dmem, (u64)len, __ATOMIC_RELAXED);
+    if (len < 0 && old < (u64)-len)
+        __atomic_store_n(&g_title_dmem, 0, __ATOMIC_RELAXED);
+}
+
+int budget_flex_gate(u64 len)
+{
+    if (!g_flex_cap || g_flex_used + len <= g_flex_cap)
+        return 0;
+    if (!g_said[1]++)
+        logf("budget: flexible memory full: %lu of %lu MiB mapped, %lu more asked: ENOMEM", g_flex_used / MiB,
+             g_flex_cap / MiB, len >> 20);
+    return (int)E_NOMEM;
+}
+
+void budget_flex_note(s64 len) { __atomic_fetch_add(&g_flex_used, (u64)len, __ATOMIC_RELAXED); }
+
+/* ---- plan-free answers to the memory queries (resolved by NID: the core's
+ * name table only knows the imports of the title it was built against) ---- */
+void *host_real(const char *name);
+void compute_nid(const char *name, char out[12]);
+int hle_map_flex(void **addr, size_t len, int prot, int flags);
+int hle_alloc_direct(off_t start, off_t end, size_t len, size_t align, int type, off_t *out);
+u64 direct_block_size(u64 addr);
+
+COLD static int b_avail_direct(off_t start, off_t end, size_t align, off_t *off, size_t *size)
+{
+    u64 a = align ? align : 0x4000, lo = ALIGN_UP((u64)start, a), hi = MIN((u64)end, g_reported_dmem);
+    struct hole h[MAX_HOLES];
+    u64 phys;
+    free_holes(h, &phys);
+    u64 n = lo < hi ? MIN(hi - lo, g_reported_dmem - MIN(g_title_dmem, g_reported_dmem)) : 0;
+    n = ALIGN_DOWN(MIN(n, phys), 0x4000);
+    if (off)
+        *off = (off_t)lo;
+    if (size)
+        *size = n;
+    return n ? 0 : (int)E_NOMEM;
+}
+
+COLD static int b_alloc_main(size_t len, size_t align, int type, off_t *out)
+{
+    return hle_alloc_direct(0, (off_t)g_reported_dmem, len, align, type, out);
+}
+
+COLD static int b_configured_flex(size_t *out)
+{
+    *out = g_flex_cap;
+    return 0;
+}
+
+COLD static int b_avail_flex(size_t *out)
+{
+    *out = g_flex_cap > g_flex_used ? g_flex_cap - g_flex_used : 0;
+    return 0;
+}
+
+static int b_zero(void) { return 0; }
+
+/* the title's system flex is flex like any other (never the console-wide pool) */
+COLD static int b_sys_flex(void **addr, size_t len, int prot, int flags, const char *name)
+{
+    int rc = hle_map_flex(addr, len, prot, flags);
+    logf("MapNamedSystemFlexibleMemory(%s, %lx) -> flex %x at %p", name ? name : "", len, rc, *addr);
+    return rc;
+}
+
+/* unmapping a whole flex-as-direct block gives its memory back */
+COLD NOINLINE static int b_munmap(void *addr, size_t len)
+{
+    u64 size = direct_block_size((u64)addr);
+    if (size && ALIGN_UP(len, 0x4000) == size) {
+        direct_free(addr);
+        budget_flex_note(-(s64)size);
+        return 0;
+    }
+    return ((int (*)(void *, size_t))host_real("sceKernelMunmap"))(addr, len);
+}
+
+COLD static int b_posix_munmap(void *addr, size_t len) { return b_munmap(addr, len) == 0 ? 0 : -1; }
+
+static const struct {
+    const char *name;
+    void *fn;
+} k_mem[] = {
+    {"sceKernelAvailableDirectMemorySize", b_avail_direct},
+    {"sceKernelAllocateMainDirectMemory", b_alloc_main},
+    {"sceKernelConfiguredFlexibleMemorySize", b_configured_flex},
+    {"sceKernelAvailableFlexibleMemorySize", b_avail_flex},
+    {"sceKernelIsNeoMode", b_zero},
+    {"sceKernelMapNamedSystemFlexibleMemory", b_sys_flex},
+    {"sceKernelMunmap", b_munmap},
+    {"munmap", b_posix_munmap},
+};
+
+COLD u64 budget_resolve(const char *nid)
+{
+    static char nids[ARRAY_SIZE(k_mem)][12];
+    if (profile_record(REC_PLAN, 0))
+        return 0; /* planned titles keep the host's answers */
+    for (u32 i = 0; i < ARRAY_SIZE(k_mem); i++) {
+        if (!nids[i][0])
+            compute_nid(k_mem[i].name, nids[i]);
+        if (strcmp(nids[i], nid) == 0)
+            return (u64)k_mem[i].fn;
+    }
+    return 0;
 }

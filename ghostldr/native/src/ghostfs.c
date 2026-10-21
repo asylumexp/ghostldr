@@ -4,9 +4,14 @@
  * Without a kernel exploit SWRR's sandbox sees nothing but its own app0,
  * save data and a ~1 GiB temp folder, but it can own many save containers
  * of up to 1 GiB each and mount 15 of them at a time.  gfs_pack.py lays the
- * title's files end to end over containers GHOST000.. (data.bin each, `cap`
- * bytes) and writes a sorted index (GHOSTIDX/index.bin); gfs_install.py puts
+ * title's files end to end over containers <prefix>000.. (data.bin each,
+ * `cap` bytes) and writes a sorted index (index.bin); gfs_install.py puts
  * them on the console over the network.
+ *
+ * Several titles can be installed side by side, each with its own prefix
+ * and index container <prefix>INDEX, listed in GFSCATALOG
+ * (docs/ghostfs-catalogue.md); only the booted title's containers are
+ * mounted.
  *
  * Here: the index is loaded at boot; opening /app0/... gives the caller a
  * real placeholder fd (so calls not routed here fail harmlessly) that maps to
@@ -26,7 +31,7 @@ void *host_real_in(const char *modname, const char *name);
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define GFS_DIR 1
 #define GFS_MAX_CONT 96
-#define GFS_SLOTS 12          /* of /savedata1..15: leave room for GHOSTSAVE and a spare */
+#define GFS_SLOTS 12          /* of /savedata1..15: leave room for <prefix>SAVE and a spare */
 #define GFS_FILES 512
 #define SWRR_SAVEDATA_MOUNT 0x3893F0  /* sceSaveDataMount import slot (SWRR US and EU: same executable) */
 #define E_NOENT 0x80020002
@@ -35,6 +40,7 @@ void *host_real_in(const char *modname, const char *name);
 #define E_INVAL 0x80020016
 #define E_ROFS 0x8002001e
 #define E_NOMEM 0x8002000c
+#define COLD __attribute__((minsize, cold)) /* boot-time code: small beats fast */
 
 /* gfs_pack.py: version 2 has a 128-byte header (title, layout id, flags);
  * version 1 (GHOSTIDX until 2026-10-21) stops at prefix, 64 bytes */
@@ -283,18 +289,13 @@ static bool app0_rel(const char *path, char *out, size_t size)
     return true;
 }
 
-int gfs_init(void)
+/* load an index container's index.bin and serve its title as /app0 */
+COLD static int load_index(const char *name, const char *want_title, const char *want_prefix)
 {
-    if (!sd_ready())
-        return -1;
     char mp[16], path[48];
-    int rc = gfs_mount("GFSINDEX", 1, 0, mp);
+    int rc = gfs_mount(name, 1, 0, mp);
     if (rc != 0)
-        rc = gfs_mount("GHOSTIDX", 1, 0, mp);       /* installs before 2026-10-21 */
-    if (rc != 0) {
-        logf("ghostfs: no GFSINDEX or GHOSTIDX (%x): nothing installed", rc);
         return rc;
-    }
     fmt(path, sizeof(path), "%s/index.bin", mp);
     u8 st[0x78];
     int fd = k_open(path, 0, 0);
@@ -312,7 +313,14 @@ int gfs_init(void)
     u32 hsize = got >= 64 && g_hdr->version >= 2 ? g_hdr->header_size : 64;
     if (got != (s64)size || size < 64 || memcmp(g_hdr->magic, "GFS1", 4) != 0 || g_hdr->containers > GFS_MAX_CONT ||
         hsize < 64 || hsize > size) {
-        logf("ghostfs: bad index (%ld of %lu bytes)", got, size);
+        logf("ghostfs: %s: bad index (%ld of %lu bytes)", name, got, size);
+        return -1;
+    }
+    const char *title = g_hdr->version >= 2 ? g_hdr->title : "";
+    if ((want_title && g_hdr->version >= 2 && strncmp(title, want_title, 16) != 0) ||
+        (want_prefix && strncmp(g_hdr->prefix, want_prefix, 16) != 0)) {
+        logf("ghostfs: %s holds %.16s (%.16s000..), not %s", name, title, g_hdr->prefix,
+             want_title ? want_title : want_prefix);
         return -1;
     }
     if (g_hdr->version >= 2 && (g_hdr->flags & GFS_INCOMPLETE)) {
@@ -330,6 +338,9 @@ int gfs_init(void)
         g_cont[i].fd = -1;
     for (u32 i = 0; i < GFS_FILES; i++)
         g_files[i].fd = -1;
+    char t[17];
+    strlcpy(t, want_title && !title[0] ? want_title : title, sizeof(t));
+    profile_select(t);
     g_active = true;
     logf("ghostfs: %.16s, %u entries, %lu MiB in %u containers of %lu MiB (%.16s000..), user %x",
          g_hdr->version >= 2 ? g_hdr->title : "index v1", g_hdr->entries, g_hdr->total >> 20, g_hdr->containers,
@@ -337,7 +348,110 @@ int gfs_init(void)
     return 0;
 }
 
-/* the title's progress container: <prefix>SAVE (GHOSTSAVE for CUSA11456) */
+/* ---- the catalogue of installed titles (GFSCATALOG/catalog.bin) ---- */
+struct gfs_cat_header {
+    char magic[4];
+    u32 version, header_size, entry_size, count, flags;
+    u64 generation;
+};
+static const u8 *g_cat;
+static u32 g_cat_n, g_cat_hsize, g_cat_esize;
+static bool g_cat_read;
+
+COLD u32 gfs_titles(void)
+{
+    if (g_cat_read || !sd_ready())
+        return g_cat_n;
+    g_cat_read = true;
+    char mp[16], path[48];
+    u8 st[0x78];
+    if (gfs_mount("GFSCATALOG", 1, 0, mp) != 0)
+        return 0;
+    fmt(path, sizeof(path), "%s/catalog.bin", mp);
+    int fd = k_open(path, 0, 0);
+    u64 size = fd >= 0 && k_stat(path, st) == 0 ? *(u64 *)(st + 0x48) : 0;
+    u8 *buf = size >= sizeof(struct gfs_cat_header) && size < (1 << 20) ? page_alloc(size) : NULL;
+    s64 got = buf ? k_pread(fd, buf, size, 0) : -1;
+    if (fd >= 0)
+        k_close(fd);
+    gfs_umount(mp, 2000);
+    const struct gfs_cat_header *h = (const struct gfs_cat_header *)buf;
+    if (got != (s64)size || !buf || memcmp(h->magic, "GFSC", 4) != 0 || h->header_size < sizeof(*h) ||
+        h->entry_size < sizeof(struct gfs_cat_entry) || h->count > 256 ||
+        (u64)h->header_size + (u64)h->count * h->entry_size > size) {
+        logf("ghostfs: GFSCATALOG: damaged catalogue (%ld of %lu bytes): ignored", got, size);
+        return 0;
+    }
+    g_cat = buf, g_cat_n = h->count, g_cat_hsize = h->header_size, g_cat_esize = h->entry_size;
+    return g_cat_n;
+}
+
+COLD const struct gfs_cat_entry *gfs_title_at(u32 i)
+{
+    return i < gfs_titles() ? (const struct gfs_cat_entry *)(g_cat + g_cat_hsize + i * g_cat_esize) : NULL;
+}
+
+COLD int gfs_mount_title(const char *title)
+{
+    const struct gfs_cat_entry *e = NULL;
+    for (u32 i = 0; i < gfs_titles() && !e; i++)
+        if (strncmp(gfs_title_at(i)->title, title, 16) == 0)
+            e = gfs_title_at(i);
+    if (!e || (e->flags & GFS_CAT_INCOMPLETE)) {
+        logf("ghostfs: %s is %s", title, e ? "not completely installed: rerun gfs_install.py" : "not installed");
+        return -1;
+    }
+    char index[33], prefix[17];
+    strlcpy(index, e->index, sizeof(index));
+    strlcpy(prefix, e->prefix, sizeof(prefix));
+    int rc = load_index(index, title, prefix);
+    if (rc != 0 && rc != -1)
+        logf("ghostfs: %s: no index %s (%x): reinstall it, or gfs_install.py --remove %s", title, index, rc, title);
+    return rc;
+}
+
+/* The title to serve: the one run.py --title asked for, else the only one
+ * installed.  Installs from before the catalogue have GFSINDEX (GHOSTIDX
+ * until 2026-10-21) only. */
+COLD int gfs_init(void)
+{
+    if (!sd_ready())
+        return -1;
+    const char *want = profile_requested();
+    u32 n = gfs_titles(), ready = 0;
+    if (!n) {
+        int rc = load_index("GFSINDEX", want, NULL);
+        if (rc > 0 || rc < -1)
+            rc = load_index("GHOSTIDX", want, NULL);     /* installs before 2026-10-21 */
+        if (rc > 0 || rc < -1)
+            logf("ghostfs: no GFSCATALOG, GFSINDEX or GHOSTIDX (%x): nothing installed", rc);
+        return rc ? -1 : 0;
+    }
+    char list[400];
+    int len = 0;
+    const struct gfs_cat_entry *only = NULL;
+    list[0] = 0;
+    for (u32 i = 0; i < n; i++) {
+        const struct gfs_cat_entry *e = gfs_title_at(i);
+        if (len < (int)sizeof(list) - 80)
+            len += fmt(list + len, sizeof(list) - len, "%s%.16s (%.40s%s)", i ? ", " : "", e->title, e->name,
+                       (e->flags & GFS_CAT_INCOMPLETE) ? ", incomplete" : "");
+        if (!(e->flags & GFS_CAT_INCOMPLETE))
+            ready++, only = e;
+    }
+    logf("ghostfs: installed: %s", list);
+    if (want)
+        return gfs_mount_title(want);
+    if (ready != 1) {
+        logf("ghostfs: %s: pick one with run.py boot --title TITLE", ready ? "several titles" : "none is complete");
+        return -1;
+    }
+    char title[17];
+    strlcpy(title, only->title, sizeof(title));
+    return gfs_mount_title(title);
+}
+
+/* the title's progress container: <prefix>SAVE (GHOSTSAVE for Ghost of Tsushima) */
 const char *gfs_save_name(void)
 {
     static char name[32];
