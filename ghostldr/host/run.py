@@ -178,6 +178,10 @@ def main() -> int:
                         "installed) or the dump at --app-root (default: found by its eboot fingerprint)")
     parser.add_argument("--trace-opens", action="store_true",
                         help="log every file the title opens (capture_order.py turns run.log into an open order)")
+    parser.add_argument("--dialog-cancel", action="store_true",
+                        help="answer every system dialog with buttons by cancelling (to bisect a title hang)")
+    parser.add_argument("--ime-fixed-name", action="store_true",
+                        help="text input answers \"Player\" instead of the console user's name")
     parser.add_argument("--host", default=None, help="console address (default: looked up by host-id)")
     parser.add_argument("--wait", type=float, default=20.0)
     parser.add_argument("--app-root", default="ghostfs",
@@ -206,7 +210,7 @@ def main() -> int:
         flags = (1 if args.mode == "probe" else 0) | (2 if release else 0) | (4 if args.snap or args.count_imports or args.profile else 0) \
             | (16 if args.profile else 0) \
             | (8 if args.count_imports else 0) | (32 if args.force_title_ready else 0) \
-            | (64 if args.ext_jit else 0)
+            | (64 if args.ext_jit else 0) | (128 if args.dialog_cancel else 0) | (256 if args.ime_fixed_name else 0)
         knobs = {"gpu_heap": args.gpu_heap_mib, "slack": args.slack_mib, "pool1": args.pool1_mib,
                  "cpu_heap": args.cpu_heap_mib}
         ext = EXT.read_bytes() if args.mode == "boot" else b""
