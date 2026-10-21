@@ -16,6 +16,14 @@
 #include "ext.h"
 #include "savedata_fake.h"
 
+/* title profiles (the core's profile.c): the core's savedata.c asks for
+ * <prefix>SAVE's size; Ghost's profile gives 256 blocks */
+const struct prof_hdr *profile_hdr(void)
+{
+    static struct prof_hdr h = {.magic = {'G', 'L', 'P', 'F'}, .save_blocks = 256};
+    return &h;
+}
+
 const struct ghost_api *G;
 
 #include "../../native/ext/src/hle_savedata.c"
