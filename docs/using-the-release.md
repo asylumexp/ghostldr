@@ -9,7 +9,7 @@ This walks through running Ghost of Tsushima from a ghostldr release on a stock 
 - **About 60 GB free on the PS5** for the game data.
 - **A computer on the same network as the PS5** with Python 3.11 or newer.
   - macOS and Linux work; Windows is untested.
-  - A wired or fast Wi-Fi connection helps: the install moves 53 GiB at about 10–14 MB/s.
+  - A wired or fast Wi-Fi connection helps.
 - **The computer's firewall must let Python receive** on UDP port 18194 (the game's log). On macOS, click Allow when asked.
 
 ## 1. Download and unpack
