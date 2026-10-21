@@ -93,3 +93,7 @@ The dev setup is a jailbroken console with elfldr, FTP and klog, plus `/data` fo
 - mast1c0re, by CTurt and McCaulay.
 - PS4 symbol names from idc/ps4libdoc.
 - ps5-payload-sdk, by John Törnblom.
+
+## License
+
+MIT, see [LICENSE](LICENSE). This covers ghostldr's own code only: no game files are included, and Luac0re, ps4libdoc and ps5-payload-sdk keep their own licenses.
