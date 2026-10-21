@@ -173,6 +173,8 @@ def main() -> int:
                         help="experiment: set the title world's ready flag from the watchdog")
     parser.add_argument("--ext-jit", action="store_true",
                         help="test: put the extension's code in a new JIT block instead of the core's RX area")
+    parser.add_argument("--keep-remote-play", action="store_true",
+                        help="dev: ignore the title's sceRemoteplayProhibit, so a Remote Play viewer keeps its picture")
     parser.add_argument("--host", default=None, help="console address (default: looked up by host-id)")
     parser.add_argument("--wait", type=float, default=20.0)
     parser.add_argument("--app-root", default="/data/ghost/app0")
@@ -199,7 +201,7 @@ def main() -> int:
         flags = (1 if args.mode == "probe" else 0) | (2 if release else 0) | (4 if args.snap or args.count_imports or args.profile else 0) \
             | (16 if args.profile else 0) \
             | (8 if args.count_imports else 0) | (32 if args.force_title_ready else 0) \
-            | (64 if args.ext_jit else 0)
+            | (64 if args.ext_jit else 0) | (128 if args.keep_remote_play else 0)
         knobs = {"gpu_heap": args.gpu_heap_mib, "slack": args.slack_mib, "pool1": args.pool1_mib,
                  "cpu_heap": args.cpu_heap_mib}
         ext = EXT.read_bytes() if args.mode == "boot" else b""

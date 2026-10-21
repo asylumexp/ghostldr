@@ -132,6 +132,8 @@ struct ext_family {
     u32 nhle, nlibs;
     const struct ext_lib *libs;
     int (*init)(void); /* optional; nonzero: the family's functions and policies are not used */
+    /* optional (EXT_FAMILY_HOOKS): a sysmodule load the title asked for failed */
+    void (*sysmodule_failed)(u32 id, s32 rc);
 };
 
 #define EXT_EXPORTS_MAGIC 0x32505845u /* "EXP2" */
@@ -144,6 +146,9 @@ struct ext_exports {
     /* everything registered, for logs and tools: nid filled in */
     const struct ext_hle_ent *hle;
     u32 nhle, nfamilies, nlibs;
+    /* Tells the families that a sysmodule load the title asked for failed
+     * (hle.c; the core checks size before calling it). */
+    void (*sysmodule_failed)(u32 id, s32 rc);
 };
 
 typedef const struct ext_exports *(*ext_init_fn)(const struct ghost_api *api);

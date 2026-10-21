@@ -91,14 +91,23 @@ extern const struct ghost_api *G HIDDEN;
 #define hle_lookup G->hle_lookup
 
 /* One family per file: its HLE table, its library policies and an optional
- * int init(void), run by ext_init first (nonzero: the family is skipped). */
-#define EXT_FAMILY_LIBS(family, table, lib_table, init_fn)                                       \
+ * int init(void), run by ext_init first (nonzero: the family is skipped).
+ * EXT_FAMILY_HOOKS adds sysmodule_fn(id, rc), which hears of every sysmodule
+ * load the title asked for that failed. */
+#define EXT_FAMILY_HOOKS(family, table, lib_table, init_fn, sysmodule_fn)                         \
     static const struct ext_family ext_family_ = {family, table, ARRAY_SIZE(table),              \
-                                                  ARRAY_SIZE(lib_table), lib_table, init_fn};   \
+                                                  ARRAY_SIZE(lib_table), lib_table, init_fn,        \
+                                                  sysmodule_fn};                                    \
     static const struct ext_family *const ext_family_ref_                                       \
         __attribute__((used, section("ext_families"))) = &ext_family_
 
+#define EXT_FAMILY_LIBS(family, table, lib_table, init_fn) EXT_FAMILY_HOOKS(family, table, lib_table, init_fn, NULL)
+
 #define EXT_FAMILY(family, table, init_fn)                                                        \
-    static const struct ext_family ext_family_ = {family, table, ARRAY_SIZE(table), 0, NULL, init_fn}; \
+    static const struct ext_family ext_family_ = {family, table, ARRAY_SIZE(table), 0, NULL, init_fn, NULL}; \
     static const struct ext_family *const ext_family_ref_                                       \
         __attribute__((used, section("ext_families"))) = &ext_family_
+
+/* A family that replaces sceSysmoduleLoadModule reports failed loads here
+ * (the core's own version does: hle.c); every family's hook hears of them. */
+void ext_sysmodule_failed(u32 id, s32 rc) HIDDEN;
