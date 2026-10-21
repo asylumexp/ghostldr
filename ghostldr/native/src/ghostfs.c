@@ -346,6 +346,15 @@ const char *gfs_save_name(void)
     return name;
 }
 
+/* the title ID gfs_pack.py wrote in the index (version 2), "" when unknown */
+const char *title_id(void)
+{
+    static char id[17];
+    if (!id[0] && g_hdr && g_hdr->version >= 2)
+        memcpy(id, g_hdr->title, sizeof(g_hdr->title));
+    return id;
+}
+
 /* ---- open files ---- */
 
 

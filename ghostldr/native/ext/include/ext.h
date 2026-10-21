@@ -89,6 +89,8 @@ extern const struct ghost_api *G HIDDEN;
 #define arena_write G->arena_write
 #define stub_alloc_code G->stub_alloc_code
 #define hle_lookup G->hle_lookup
+#define title_id G->title_id
+#define path_remap_add G->path_remap_add
 
 /* One family per file: its HLE table, its library policies and an optional
  * int init(void), run by ext_init first (nonzero: the family is skipped). */

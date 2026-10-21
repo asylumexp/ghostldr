@@ -56,4 +56,6 @@ const struct ghost_api g_ghost_api = {
     .arena_write = arena_write,
     .stub_alloc_code = stub_alloc_code,
     .hle_lookup = hle_lookup,
+    .title_id = title_id,
+    .path_remap_add = path_remap_add,
 };
