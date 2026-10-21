@@ -33,9 +33,9 @@ ROOT = Path(__file__).resolve().parents[2]
 TITLES = ROOT / "ghostldr/data/titles"
 DEFAULT_SRC = ROOT / "build/ghost/app0"          # where the dump goes unless --src says otherwise
 sys.path.insert(0, str(ROOT / "ghostldr/tools"))
+import gfs_catalog as gc  # noqa: E402
 
 TITLE_RE = re.compile(r"[A-Z0-9_-]{1,16}")
-PREFIX_RE = re.compile(r"[A-Z0-9]{1,12}")
 NID_RE = re.compile(r"[A-Za-z0-9+-]{11}")
 
 # feature names -> core flag bits (profile.c PF_*)
@@ -244,8 +244,10 @@ def validate(p: dict) -> list[str]:
             e.append("eboot.fingerprint must be 40 hex digits (profiles.py detect prints it)")
     pk = p.get("pack", {})
     if _keys(e, "pack", pk, {"prefix", "order", "late", "exclude", "groups"}):
-        if "prefix" in pk and not (isinstance(pk["prefix"], str) and PREFIX_RE.fullmatch(pk["prefix"])):
-            e.append("pack.prefix must be 1-12 of A-Z 0-9")
+        if "prefix" in pk:
+            why = gc.prefix_problem(pk["prefix"]) if isinstance(pk["prefix"], str) else "it must be a string"
+            if why:
+                e.append(f"pack.prefix: {why}")
         if pk.get("order") is not None:
             if not isinstance(pk["order"], str) or not (TITLES / pk["order"]).is_file():
                 e.append(f"pack.order: no file ghostldr/data/titles/{pk['order']}")

@@ -9,10 +9,16 @@
 -- commit, verify), 2 QUERY (size of fileName, -1 if missing), 3 BYE,
 -- 4 DELETE, 5 READ (up to `size` bytes of fileName from offset `blocks`; the
 -- reply is followed by `value` bytes), 6 WRITE (the `size` bytes that follow
--- become fileName in an existing container, committed).
+-- become fileName in an existing container, committed), 7 LIST (the title
+-- catalogue GFSCATALOG/catalog.bin follows, or one built from the legacy
+-- GFSINDEX/GHOSTIDX index), 8 FREE (do `size` bytes fit on the console's
+-- storage?  1 GiB probe containers GFSFREEnn are created and deleted; value =
+-- the bytes that fit), 9 DELSAVE (delete a title's progress container).
 -- Reply (32 bytes): "GFSR", status s32, value u64, millis u64, 8 pad.
 -- Containers named *SAVE hold a title's progress: PUT, DELETE and WRITE
--- refuse them, as they refuse SWRR's own save.
+-- refuse them, as they refuse SWRR's own save; only DELSAVE (sent on the
+-- user's explicit request) deletes them, never SWRR's own.
+-- Names and formats: docs/ghostfs-catalogue.md.
 --
 -- Save containers: sceSaveDataMount from SWRR's import table (eboot+0x3893F0),
 -- params userId@0, dirName*@0x10, blocks@0x20, mode@0x28 (RO 1, RW 2,
@@ -249,6 +255,96 @@ local function write_file(cfd, dname, fname, size)
     return urc, w, true
 end
 
+-- up to n bytes of fname (from its start) into p: mount status, bytes read (-1: no file)
+local function read_into(dname, fname, p, n)
+    set_dir(dname)
+    local rc, mp = do_mount(1, 0)
+    if rc ~= 0 then return rc, -1 end
+    write_string(path, mp .. "/" .. fname)
+    local fd = kopen(path, 0, 0)
+    local got = -1
+    if fd >= 0 and fd < 0x10000 then
+        got = kpread(fd, p, n, 0)
+        kclose(fd)
+    end
+    do_umount(mp)
+    return 0, got
+end
+
+local function copy(dst, src, n)
+    for i = 0, n - 1 do write8(dst + i, read8(src + i)) end
+end
+
+-- LIST: the catalogue as stored; without one, built from the legacy index
+-- (header flag 1 = built here, entry flag 2 = legacy index)
+local CAT_MAGIC, INDEX_MAGIC = 0x43534647, 0x31534647     -- "GFSC", "GFS1"
+local function list(cfd)
+    local rc, n = read_into("GFSCATALOG", "catalog.bin", buf, CHUNK)
+    if rc == 0 and n >= 64 and n <= CHUNK and read32(buf) == CAT_MAGIC then
+        send_reply(cfd, 0, n, 0)
+        send_all(cfd, buf, n)
+        return
+    end
+    for i = 0, 255, 8 do write64(buf + i, 0) end
+    local count, h = 0, buf + 0x1000
+    for _, iname in ipairs({"GFSINDEX", "GHOSTIDX"}) do
+        local irc, got = read_into(iname, "index.bin", h, 128)
+        if irc == 0 and got >= 64 and read32(h) == INDEX_MAGIC then
+            local e, version = buf + 64, read32(h + 4)
+            if version >= 2 then
+                copy(e, h + 64, 16)                              -- title
+                write64(e + 0x90, read64(h + 80))                -- layout id
+            end
+            copy(e + 0x10, h + 40, 16)                           -- prefix
+            write_string(e + 0x20, iname)
+            write64(e + 0x98, read64(h + 24))                    -- total
+            write32(e + 0xA0, read32(h + 8))                     -- containers
+            write32(e + 0xA4, 2 | (version >= 2 and (read32(h + 60) & 1) or 0))
+            count = 1
+            break
+        end
+    end
+    write32(buf, CAT_MAGIC)
+    write32(buf + 4, 1)
+    write32(buf + 8, 64)
+    write32(buf + 12, 192)
+    write32(buf + 16, count)
+    write32(buf + 20, 1)
+    send_reply(cfd, 0, 64 + 192 * count, 0)
+    send_all(cfd, buf, 64 + 192 * count)
+end
+
+-- FREE: create 1 GiB probes until `want` bytes are covered or the storage is
+-- full (NO_SPACE_FS 0x809f000a reports the blocks still missing at
+-- result+0x10), then delete them all
+local function free_probe(want)
+    local have, made, status = 0, 0, 0
+    while have < want and made < 100 do
+        set_dir(string.format("GFSFREE%02d", made))
+        do_delete()
+        local rc, mp = do_mount(6, 32768)
+        if rc ~= 0 then
+            if (rc & 0xFFFFFFFF) == 0x809F000A then
+                local missing = read64(result + 0x10)
+                if missing < 32768 then have = have + (32768 - missing) * 32768 end
+            else
+                status = rc
+            end
+            break
+        end
+        do_umount(mp)
+        made = made + 1
+        have = have + (1 << 30)
+    end
+    for i = 0, made do
+        set_dir(string.format("GFSFREE%02d", i))
+        do_delete()
+    end
+    say(string.format("FREE: %d MiB wanted, %d MiB fit (%d probes, status %s)", want >> 20, have >> 20, made,
+        hex(status)))
+    return status, have
+end
+
 local function query(dname, fname)
     set_dir(dname)
     local rc, mp = do_mount(1, 0)
@@ -304,6 +400,21 @@ while running and bad < 3 do
         elseif op == 4 then
             set_dir(dname)
             send_reply(cfd, do_delete(), 0, 0)
+        elseif op == 7 then
+            list(cfd)
+        elseif op == 8 then
+            local status, have = free_probe(size)
+            send_reply(cfd, status, have, 0)
+        elseif op == 9 then
+            -- a title's progress, on the user's explicit request; never SWRR's own save
+            if dname:sub(-4) == "SAVE" and dname ~= "SLUS-20268" and dname ~= "SLES-50366" then
+                set_dir(dname)
+                local rc = do_delete()
+                say(string.format("DELSAVE %s -> %s", dname, hex(rc)))
+                send_reply(cfd, rc, 0, 0)
+            else
+                send_reply(cfd, -3, 0, 0)
+            end
         else
             send_reply(cfd, 0, 0, 0)
             running = false

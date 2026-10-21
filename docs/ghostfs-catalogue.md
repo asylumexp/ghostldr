@@ -56,7 +56,7 @@ Header:
 | 0x08 | `u32` | header_size, 64 |
 | 0x0C | `u32` | entry_size, 192 |
 | 0x10 | `u32` | count (at most 64) |
-| 0x14 | `u32` | flags, 0 |
+| 0x14 | `u32` | flags: 0 in the file; bit 0 set in a LIST reply built from a legacy index (no `GFSCATALOG` yet) |
 | 0x18 | `u64` | generation: every writer adds 1 |
 | 0x20 | 32 bytes | reserved, zero |
 

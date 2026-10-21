@@ -41,6 +41,7 @@ import re
 import struct
 from pathlib import Path
 
+import gfs_catalog as gc
 import profiles as titles
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -189,10 +190,14 @@ def pack(src: Path, title: str, prefix: str, out: Path, prof: dict | None = None
     (out / "index.bin").write_bytes(index)
     # small containers lose a lot to filesystem overhead: give the index 4x its size
     idx_blocks = max(512, (4 * len(index) + 32767) // 32768)
+    sfo = titles.param_sfo(src)
     info = {
         "title": title, "prefix": prefix, "layout_id": f"{layout_id:016x}", "src": str(src), "cap": CAP,
         "total": total, "entries": len(packed), "index_blocks": idx_blocks, "containers": containers,
         "traced": traced, "files": len(files), "dirs": len(dirs),
+        # for the catalogue entry and run.py (not part of the layout)
+        "name": prof.get("name") or str(sfo.get("TITLE", "")), "version": prof.get("version") or
+        str(sfo.get("APP_VER", "")), "app_params": titles.app_params(prof, src),
     }
     (out / "layout.json").write_text(json.dumps(info, indent=1))
     return info
@@ -242,9 +247,10 @@ def main() -> int:
         prof = titles.load(title)
     except titles.ProfileError as e:
         raise SystemExit(str(e))
-    prefix = args.prefix or prof.get("pack", {}).get("prefix") or titles.default_prefix(title)
-    if not titles.PREFIX_RE.fullmatch(prefix):
-        raise SystemExit("the prefix must be 1-12 of A-Z 0-9")
+    prefix = (args.prefix or prof.get("pack", {}).get("prefix") or titles.default_prefix(title)).upper()
+    why = gc.prefix_problem(prefix)
+    if why:
+        raise SystemExit(f"prefix {prefix}: {why} (--prefix picks another)")
     info = pack(src, title, prefix, OUT_ROOT / title, prof, args.order)
     cs = info["containers"]
     how = "own profile" if prof["_has_profile"] else "no profile: generic layout"
