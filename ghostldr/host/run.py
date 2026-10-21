@@ -131,7 +131,9 @@ def main() -> int:
                         help="log every file the title opens (capture_order.py turns run.log into an open order)")
     parser.add_argument("--host", default=None, help="console address (default: looked up by host-id)")
     parser.add_argument("--wait", type=float, default=20.0)
-    parser.add_argument("--app-root", default="/data/ghost/app0")
+    parser.add_argument("--app-root", default="ghostfs",
+                        help="where the title's app0 is: ghostfs (the installed titles, the default) or a "
+                        "directory on a dev console, e.g. /data/ghost/app0")
     parser.add_argument("--file", type=Path, help="raw Lua file for mode=lua")
     parser.add_argument("--log", type=Path, default=ROOT / "build/ghostldr/run.log")
     args = parser.parse_args()

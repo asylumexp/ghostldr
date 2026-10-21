@@ -134,6 +134,15 @@ class GhostfsCoreTests(unittest.TestCase):
         self.catalogue(("CUSA11111", gc.LEGACY_INDEX, "GFSINDEX"), ("CUSA22222", 0, None))
         self.assert_booted(self.boot("CUSA11111"), "CUSA11111")
 
+    def test_catalogued_title_without_its_index(self) -> None:
+        self.install("CUSA22222")
+        del self.files["G22222INDEX/index.bin"]
+        self.catalogue(("CUSA22222", 0, None))
+        lines = self.boot()
+        self.assertIn("ghostfs: CUSA22222: no index G22222INDEX (809f0008): reinstall it, or gfs_install.py --remove "
+                      "CUSA22222", lines)
+        self.assertTrue([ln for ln in lines if ln.startswith("init -")], lines)
+
     def test_unknown_title_and_damaged_catalogue(self) -> None:
         self.install("CUSA11111", "GFSINDEX")
         self.catalogue(("CUSA11111", gc.LEGACY_INDEX, "GFSINDEX"))

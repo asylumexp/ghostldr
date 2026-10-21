@@ -404,7 +404,10 @@ COLD int gfs_mount_title(const char *title)
     char index[33], prefix[17];
     strlcpy(index, e->index, sizeof(index));
     strlcpy(prefix, e->prefix, sizeof(prefix));
-    return load_index(index, title, prefix);
+    int rc = load_index(index, title, prefix);
+    if (rc != 0 && rc != -1)
+        logf("ghostfs: %s: no index %s (%x): reinstall it, or gfs_install.py --remove %s", title, index, rc, title);
+    return rc;
 }
 
 /* The title to serve: the one run.py --title asked for, else the only one
