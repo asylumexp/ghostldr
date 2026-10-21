@@ -313,7 +313,9 @@ int main(int argc, char **argv)
     expect(!nid_to_name("1jfXLRVzis") && !nid_to_name("1jfXLRVziscc") && !nid_to_name("1jfXLRV!isc") && !nid_to_name("1jfXLRVzisd"),
            "malformed NIDs");
     expect(ext_start() == 0, "start (place, relocate, ext_init, self-test)");
-    bool want_jit = strcmp(mode, "jit") == 0 || strcmp(mode, "tiny") == 0;
+    /* an image the small area cannot hold with 16 KiB left for stubs goes in a JIT block */
+    bool fits = ((const struct ext_blob *)blob)->image_memsz + 0x4000 <= small_size;
+    bool want_jit = strcmp(mode, "jit") == 0 || !fits;
     expect(g_jit_blocks == (want_jit ? 1u : 0u), want_jit ? "placed in a JIT block" : "placed in the small area");
     char self[12];
     compute_nid(EXT_SELFTEST_NAME, self);

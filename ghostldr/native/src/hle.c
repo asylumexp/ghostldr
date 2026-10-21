@@ -271,6 +271,8 @@ static int hle_sysmodule_load(u32 id)
 {
     int rc = ((int (*)(u32))host_real("sceSysmoduleLoadModule"))(id);
     logf("sceSysmoduleLoadModule(%x) -> %x", id, rc);
+    if (rc < 0)
+        ext_note_sysmodule(id, rc);
     return rc < 0 ? 0 : rc;
 }
 
@@ -280,6 +282,7 @@ static int hle_sysmodule_load_internal_arg(u32 id, size_t argc, const void *argv
         "sceSysmoduleLoadModuleInternalWithArg"))(id, argc, argv, flags, res);
     logf("sceSysmoduleLoadModuleInternalWithArg(%x) -> %x", id, rc);
     if (rc < 0) {
+        ext_note_sysmodule(id, rc);
         if (res)
             *res = 0;
         return 0;

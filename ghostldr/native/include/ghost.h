@@ -436,9 +436,14 @@ int arena_punch_rw(u64 addr, u64 size);
 
 /* ---- runtime extension (ext.c; interface in ghost_api.h) ---- */
 #define CTX_FLAG_EXT_JIT 64 /* place the extension in a new JIT block (run.py --ext-jit) */
+/* ctx flag bits: 1 probe, 2 release host memory, 4 snap, 8 count imports, 16 profile,
+ * 32 force title ready, 64 ext in a JIT block, 128 dialog cancel, 256 IME fixed name,
+ * 512 keep Remote Play, 1024 start game modules at boot */
+#define CTX_FLAG_KEEP_REMOTE_PLAY 512 /* the title's sceRemoteplayProhibit is a no-op (run.py --keep-remote-play) */
 int ext_fetch(void);     /* receive and verify ext.bin (the NID table lives there) */
 int ext_start(void);     /* place, relocate and initialize its code */
 void ext_boot_done(void); /* imports resolved: free the blob */
 u64 ext_hle_lookup(const char *lib, const char *nid, const char *name);
 const struct ext_lib *ext_lib_policy(const char *lib);
 int ext_dlsym(u32 handle, const char *name, void **out);
+void ext_note_sysmodule(u32 id, s32 rc); /* a failed sysmodule load, for the extension's families */

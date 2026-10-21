@@ -275,6 +275,15 @@ int ext_dlsym(u32 handle, const char *name, void **out)
     return 1;
 }
 
+/* A sysmodule load the title asked for failed (hle.c): families that keep a
+ * library's mode switch it to their virtual implementation. */
+void ext_note_sysmodule(u32 id, s32 rc)
+{
+    if (g_exp && g_exp->size >= __builtin_offsetof(struct ext_exports, sysmodule_failed) + sizeof(void *) &&
+        g_exp->sysmodule_failed)
+        g_exp->sysmodule_failed(id, rc);
+}
+
 static int ext_selftest(void)
 {
     char nid[12];

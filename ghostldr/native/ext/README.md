@@ -25,8 +25,9 @@ The core has to fit in 240 KiB of the emulator's IPU JIT buffer, and the Lua pay
    6. a logging stub (`UNRESOLVED call ...`). It returns 0, or the library policy's `stub_ret` when there is one.
 6. **`ext_boot_done`** runs after relocation. It frees the blob (about 2.2 MiB: the NID table and the image copy) before the memory plan is computed. The extension's code and data stay. `nid_to_name` returns NULL from then on, so stubs keep their own copies of names.
 7. **At run time,** `sceKernelDlsym` on a host module (`hle_dlsym`) first asks the extension, by the NID of the name. If the module's library has `EXT_LIB_NO_HOST` and the extension lacks the function, the call is refused with ENOENT rather than given SWRR's.
+8. **Failed sysmodule loads.** `sceSysmoduleLoadModule` (and `...InternalWithArg`) hide a failure from the title by returning 0. They also pass the id and error to `ext_note_sysmodule`, which calls every family's `sysmodule_failed` hook (`EXT_FAMILY_HOOKS`). A family that replaces `sceSysmoduleLoadModule` in the extension calls `ext_sysmodule_failed(id, rc)` itself, so the hooks keep hearing of failures.
 
-With the core at 192 KiB, the small area has 64 KiB. The extension gets up to 48 KiB of it (text and data, each rounded to 16 KiB). The current extension uses 32 KiB.
+With the core at 192 KiB, the small area has 64 KiB. The extension gets up to 48 KiB of it (text and data, each rounded to 16 KiB). With the media and peripheral families it needs about 128 KiB, so it goes in a new JIT block.
 
 ## Files
 
@@ -36,6 +37,8 @@ With the core at 192 KiB, the small area has 64 KiB. The extension gets up to 48
 | `ext/include/ext.h` | Included by every extension file. Maps the core's names (`logf`, `K`, `g_ctx`, `host_real_in`, ...) to the API, and defines `EXT_FAMILY` and `EXT_FAMILY_LIBS`. |
 | `ext/src/ext_main.c` | `ext_init`: walks the families (linker section `ext_families`), runs their `init`, merges policies and entries (computing NIDs from names), drops duplicates, and answers the core's `lookup` and `lib_policy`. |
 | `ext/src/selftest.c` | The family the core self-tests with (`libGhostldrExt`, alias `libGhostldrExtAlias`, which no title imports). |
+| `ext/include/hle_mode.h`, `ext/src/hle_mode.c` | Per-library modes (PASS, MASKED, VIRT, chosen once and logged) for libraries SWRR may refuse or already own, and the trampolines that route a call to the host or to a virtual body with the title's registers and stack untouched. No family of its own. |
+| `ext/src/hle_media.c`, `ext/src/hle_peripheral.c` | Capture, sharing and voice libraries (GameLiveStreaming, ScreenShot, ShareUtility, SharePlay, Remoteplay, VideoRecording, Companion, ContentExport, Voice, VoiceQoS, Audio3d, Rudp, RazorCpu) and peripherals (Camera, Move, MoveTracker, Hmd, VrTracker, Usbd, Keyboard, Mouse, SystemGesture). |
 | `ext/ext.ld` | Text at 0, data at the next 16 KiB boundary. |
 | `src/ext.c`, `src/ext_api.c` | The core side: fetch, verify, place, relocate, lookups, dlsym; the API table. |
 | `tools/mkext.py`, `tools/gen_nids.py`, `tools/elf64.py` | Build `ext.bin` from `ext.elf` and the name lists. |
@@ -75,6 +78,7 @@ One file per library family. Each file registers itself, so adding one never tou
    };
 
    EXT_FAMILY_LIBS("foo", k_hle, k_libs, foo_init);   /* EXT_FAMILY("foo", k_hle, foo_init) without policies */
+   /* or EXT_FAMILY_HOOKS("foo", k_hle, k_libs, foo_init, foo_sysmodule_failed): also hear of failed sysmodule loads */
    ```
 
 2. Write it like core code. Use `logf`, `host_real`, `host_real_in`, `K.*`, `g_ctx`, `g_main_mod`, `page_alloc`, `arena_alloc`, the `gfs_*` and `vfs_*` calls, `spin_lock` and the rest through the macros in `ext.h`. `rt.c` (memcpy, strcmp, fmt, ...) is linked into the extension.

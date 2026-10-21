@@ -77,7 +77,9 @@ class ExtensionOnHost(unittest.TestCase):
     def test_loads_in_the_small_area_and_self_tests(self) -> None:
         out = self.run_host("small")
         self.assertIn("into flexible memory", out)
-        self.assertIn("in the small RX area", out)
+        # 64 KiB after a 192 KiB core, 16 KiB of it kept for stubs: a bigger image goes in a JIT block
+        image_memsz, = struct.unpack_from("<I", self.blob, 40)
+        self.assertIn("in the small RX area" if image_memsz + 0x4000 <= 0x10000 else "in a new JIT block", out)
         self.assertIn("ext: self-test ok", out)
 
     def test_loads_in_a_jit_block(self) -> None:

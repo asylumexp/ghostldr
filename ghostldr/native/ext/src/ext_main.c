@@ -13,6 +13,7 @@ static const char **g_canon;      /* canonical library of each entry */
 static u32 g_nhle;
 static const struct ext_lib **g_libs;
 static u32 g_nlibs;
+static bool *g_use; /* the families whose init succeeded */
 
 #define FAMILIES(f) for (const struct ext_family *const *f = __ext_families_start; f < __ext_families_end; f++)
 
@@ -57,6 +58,19 @@ static u64 ext_lookup(const char *lib, const char *nid)
 }
 
 static const struct ext_lib *lib_policy(const char *lib) { return policy_of(lib); }
+
+/* A sysmodule load the title asked for failed: from the core (hle.c), or from
+ * a family that replaces sceSysmoduleLoadModule. */
+void ext_sysmodule_failed(u32 id, s32 rc)
+{
+    u32 k = 0;
+    FAMILIES(f)
+    {
+        if (g_use && g_use[k] && (*f)->sysmodule_failed)
+            (*f)->sysmodule_failed(id, rc);
+        k++;
+    }
+}
 
 static bool valid_nid(const char *nid)
 {
@@ -119,7 +133,7 @@ const struct ext_exports *ext_init(const struct ghost_api *api)
     g_hle = arena_alloc((nhle + 1) * sizeof(*g_hle));
     g_canon = arena_alloc((nhle + 1) * sizeof(*g_canon));
     g_libs = arena_alloc((nlibs + 1) * sizeof(*g_libs));
-    bool *use = arena_alloc(nfam + 1);
+    bool *use = g_use = arena_alloc(nfam + 1);
     if (!g_hle || !g_canon || !g_libs || !use)
         return NULL;
     /* every family's init, then every policy (aliases decide how entries
@@ -142,6 +156,6 @@ const struct ext_exports *ext_init(const struct ghost_api *api)
             add_functions(*f);
     }
     g_exports = (struct ext_exports){EXT_EXPORTS_MAGIC, sizeof(g_exports), ext_lookup, lib_policy, g_hle,
-                                     g_nhle, nfam, g_nlibs};
+                                     g_nhle, nfam, g_nlibs, ext_sysmodule_failed};
     return &g_exports;
 }
