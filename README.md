@@ -81,13 +81,13 @@ python3 ghostldr/tools/import_report.py build/ghost/app0 --shadps4 /path/to/shad
 
 ## Choosing a console
 
-The host tools find the PS5 with the PlayStation discovery protocol:
+The host tools find the console with the PlayStation discovery protocol, PS5s on UDP 9302 and PS4s on UDP 987:
 
 ```bash
 python3 ghostldr/host/console.py --list
 ```
 
-Set `PS5_HOST_ID` (follows DHCP moves) or `PS5_HOST` (a fixed address) when more than one console answers.
+The list shows each console's type, name, host-id, firmware, whether it's on or in rest mode, the running app (PS4s report it; SWRR is marked), and whether Luac0re's loader is listening on 9026. With several consoles on, the tools pick the one running SWRR or the loader. Set `PS_HOST_ID` (follows DHCP moves) or `PS_HOST` (a fixed address) to choose one yourself; the older `PS5_HOST_ID` and `PS5_HOST` still work.
 
 ## Dev setup (optional)
 

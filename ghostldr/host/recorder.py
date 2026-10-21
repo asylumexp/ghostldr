@@ -215,7 +215,7 @@ def health(session: Session, events: Events) -> None:
     while not STOP.is_set():
         STOP.wait(10)
         cached = console.CACHE.read_text().strip() if console.CACHE.exists() else ""
-        up = bool(cached) and console._ask(cached)
+        up = bool(cached) and console.probe(cached) is not None
         if not up:
             try:
                 up = bool(console.console_ip())

@@ -53,10 +53,10 @@ Check it: `ls build/ghost/app0` should list `eboot.bin`, `sce_module`, `cache` a
 3. **Find the PS5's address:** **Settings → Network → Connection Status → View Connection Status → IPv4 Address**. Then on the computer:
 
    ```bash
-   export PS5_HOST=192.168.1.123
+   export PS_HOST=192.168.1.123
    ```
 
-   With a single PS5 on the network you can skip this; the tools find it themselves. `python3 ghostldr/host/console.py --list` shows what they see.
+   You can usually skip this: the tools find the console themselves, and with several on they pick the one where Luac0re's loader is listening. `python3 ghostldr/host/console.py --list` shows what they see.
 
 ## 4. Pack the game data (on the computer, a few minutes)
 
@@ -102,7 +102,7 @@ The computer logs the session to `build/ghostldr/run.log`. That file is what to 
 - **`receiver did not come up` or `is SWRR at the Luac0re loader?`:** the loader isn't listening. Open HALL OF FAME again, or restart SWRR first.
 - **`building the core failed`:** add `--no-build`. The release's core is already built.
 - **The boot command times out while sending:** restart SWRR, open HALL OF FAME, and send again.
-- **Black screen with no log lines on the computer:** the firewall is blocking UDP 18194, or `PS5_HOST` points at another device.
+- **Black screen with no log lines on the computer:** the firewall is blocking UDP 18194, or `PS_HOST` points at another device.
 - **`extension: the console did not fetch it`, or the log stops at `ext: no extension from the computer`:** the firewall is blocking TCP 18195. Nothing was started: allow it and run the same command again.
 - **The PS5 asks for the disc:** the SWRR disc must be in the console that runs it.
 

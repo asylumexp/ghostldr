@@ -26,23 +26,23 @@ ghostldr itself uses fixed offsets in SWRR 01.02, US or EU (see "What you need")
 
 ## 2. Point the scripts at your PS5
 
-The scripts find a PS5 with the PlayStation discovery protocol:
+The scripts find the console with the PlayStation discovery protocol (PS5s on UDP 9302, PS4s on UDP 987):
 
 ```bash
 python3 ghostldr/host/console.py --list
 ```
 
-With one PS5 on the network nothing needs setting. Otherwise use one of:
+With one console on, or one running SWRR or Luac0re's loader, nothing needs setting. Otherwise use one of:
 
 ```bash
-export PS5_HOST_ID=0123456789AB
+export PS_HOST_ID=0123456789AB
 ```
 
 ```bash
-export PS5_HOST=192.168.1.123
+export PS_HOST=192.168.1.123
 ```
 
-`PS5_HOST_ID` follows the console when DHCP moves it.
+`PS_HOST_ID` follows the console when DHCP moves it. The older names `PS5_HOST_ID` and `PS5_HOST` still work.
 
 ## 3. Install the game data
 
