@@ -53,7 +53,7 @@
 #define GTRP_VERSION 1
 struct gtrp {
     u32 magic, version;
-    char title_id[16];
+    char title[16]; /* not "title_id": ext.h may define that name as a macro */
     u32 count_hint, reserved;
     u32 flags[MAX_TROPHIES / 32]; /* bit id & 31 of word id >> 5, as SceNpTrophyFlagArray */
     u64 tick[MAX_TROPHIES];       /* SceRtcTick of the unlock (µs since 0001-01-01 UTC); 0: locked */
@@ -280,7 +280,7 @@ static struct user_rec *load_record(s32 user)
     memset(&u->r, 0, sizeof(u->r));
     u->r.magic = GTRP_MAGIC;
     u->r.version = GTRP_VERSION;
-    strlcpy(u->r.title_id, g_title_id, sizeof(u->r.title_id));
+    strlcpy(u->r.title, g_title_id, sizeof(u->r.title));
     u->r.count_hint = g_known_trophies;
     return u;
 }
@@ -492,8 +492,8 @@ static s32 hle_sceNpTrophyUnlockTrophy(s32 ctx, s32 handle, s32 id, s32 *platinu
         else {
             r->flags[id >> 5] |= 1u << (id & 31);
             r->tick[id] = tick;
-            if (!r->title_id[0])
-                strlcpy(r->title_id, g_title_id, sizeof(r->title_id));
+            if (!r->title[0])
+                strlcpy(r->title, g_title_id, sizeof(r->title));
             save = c->rec, user = c->user;
             n = count_unlocked(r), total = trophy_count(r);
         }
