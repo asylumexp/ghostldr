@@ -231,7 +231,7 @@ static s32 wa_create_user(struct wa_api *a, s32 lib, s32 user)
         }
         UNLOCK();
     }
-    NPO_TRACE(r, "npo: %sCreateUserContext(%d, %x) -> %x", a->tag, lib, user, r);
+    NPO_TRACE(r, "npo: %s create user context(lib %d, user %x) -> %x", a->tag, lib, user, r);
     return r;
 }
 
@@ -245,7 +245,7 @@ static s32 wa_delete_user(struct wa_api *a, s32 uctx)
         u->id = 0;
     }
     UNLOCK();
-    NPO_TRACE(r, "npo: %sDeleteUserContext(%x) -> %x", a->tag, uctx, r);
+    NPO_TRACE(r, "npo: %s delete user context(%x) -> %x", a->tag, uctx, r);
     return r;
 }
 
