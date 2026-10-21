@@ -48,9 +48,10 @@ $(OUT)/core.bin: $(OUT)/core.elf
 	$(OBJCOPY) -O binary $< $@
 	@python3 ../tools/core_info.py $< $@
 
-$(OUT)/ext/%.o: ext/src/%.c ext/include/ext.h $(HEADERS)
+# EXT_CFLAGS: build switches for extension families (e.g. -DNPO_PERSONA_A=1)
+$(OUT)/ext/%.o: ext/src/%.c ext/include/ext.h $(wildcard ext/src/*.h) $(HEADERS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Iext/include -c $< -o $@
+	$(CC) $(CFLAGS) $(EXT_CFLAGS) -Iext/include -c $< -o $@
 
 $(OUT)/ext/rt.o: src/rt.c $(HEADERS)
 	@mkdir -p $(dir $@)
