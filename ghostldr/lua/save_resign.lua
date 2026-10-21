@@ -1,6 +1,7 @@
 -- Build a copy of SWRR's Luac0re save for another PSN account, console side.
 -- Started through Luac0re's remote loader by ghostldr/host/resign_save.py,
--- which prepends MODE, TEMP_DIR, ACCOUNT_ID_BYTES (8 bytes, little endian as
+-- which prepends MODE, TEMP_DIR, ORIGINAL_DIR (the save's directory:
+-- SLUS-20268 on US SWRR, SLES-50366 on EU), ACCOUNT_ID_BYTES (8 bytes, little endian as
 -- param.sfo stores them), PATCH_DIR (false keeps TEMP_DIR as the directory
 -- name: a control), PROBE_LOG_IP and PROBE_LOG_PORT.
 --
@@ -8,7 +9,7 @@
 -- made by the system itself: a new container TEMP_DIR (same size as the
 -- original) is created, the files of the mounted Luac0re save (/savedata0,
 -- read only) are copied in, and its sce_sys/param.sfo gets ACCOUNT_ID and
--- SAVEDATA_DIRECTORY "SLUS-20268" before the unmount commits it.  The
+-- SAVEDATA_DIRECTORY ORIGINAL_DIR before the unmount commits it.  The
 -- original save is only read, never mounted or written.
 --   MODE "copy"   create TEMP_DIR from /savedata0 and patch it
 --   MODE "patch"  re-patch an existing TEMP_DIR (another account)
@@ -72,7 +73,7 @@ local CH = 1024 * 1024
 local buf = malloc(CH)
 local dents = malloc(0x4000)
 local SOURCE = "/savedata0"
-local ORIGINAL = "SLUS-20268"
+local ORIGINAL = ORIGINAL_DIR or "SLUS-20268"
 
 local function set_dir(n)
     for i = 0, 31 do write8(dir + i, 0) end

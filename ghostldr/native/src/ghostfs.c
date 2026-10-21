@@ -28,7 +28,7 @@ void *host_real_in(const char *modname, const char *name);
 #define GFS_MAX_CONT 96
 #define GFS_SLOTS 12          /* of /savedata1..15: leave room for GHOSTSAVE and a spare */
 #define GFS_FILES 512
-#define SWRR_SAVEDATA_MOUNT 0x3893F0
+#define SWRR_SAVEDATA_MOUNT 0x3893F0  /* sceSaveDataMount import slot (SWRR US and EU: same executable) */
 #define E_NOENT 0x80020002
 #define E_BADF 0x80020009
 #define E_ISDIR 0x80020015

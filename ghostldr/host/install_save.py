@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LUAC0RE = ROOT / "build/luac0re-src"
 PSU_DIR = ROOT / "build/luac0re-save/ps2"
 from console import console_ip
+from swrr import by_title, running
 
 HOST = console_ip()
 
@@ -71,7 +72,7 @@ def backup(title: str) -> Path:
 
 
 def install(title: str, backup_dir: Path, extra_lua: list[Path]) -> None:
-    serial = "BASLUS-20268" if title == "CUSA03474" else "BESLES-50366"
+    serial = by_title(title)["ps2"]
     card = backup_dir / "VMC0.card"
     if not card.exists():
         raise SystemExit(f"{card} missing: the save layout is not what Luac0re expects")
@@ -109,10 +110,14 @@ def install(title: str, backup_dir: Path, extra_lua: list[Path]) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("step", choices=["list", "backup", "install"])
-    ap.add_argument("--title", default="CUSA03474")
+    ap.add_argument("--title", help="CUSA03474 (US) or CUSA03492 (EU); default: the running SWRR")
     ap.add_argument("--backup-dir", type=Path)
     ap.add_argument("--extra-lua", type=Path, action="append", default=[])
     args = ap.parse_args()
+    if not args.title:
+        f = ftp_connect()
+        args.title = running(f)["title"]
+        f.close()
     if args.step == "list":
         f = ftp_connect()
         for path, size in walk(f, save_root(args.title)):

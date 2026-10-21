@@ -1,8 +1,10 @@
 # ghostldr
 
-Runs a PS4 game backup, Ghost of Tsushima (CUSA11456 v2.18), inside *Star Wars Racer Revenge* (SWRR, PS4 US CUSA03474) on a PS5. It goes through [Luac0re](https://github.com/Gezine/Luac0re)'s userland JIT exploit, with no kernel exploit and no jailbreak.
+Runs a PS4 game backup, Ghost of Tsushima (CUSA11456 v2.18), inside *Star Wars Racer Revenge* (SWRR, PS4 US CUSA03474 or EU CUSA03492) on a PS5. It goes through [Luac0re](https://github.com/Gezine/Luac0re)'s userland JIT exploit, with no kernel exploit and no jailbreak.
 
 The game's files live in SWRR's own save containers, installed once over the network ("ghostfs").
+
+**US and EU SWRR both work.** The two regions run the same executable, so the same core and offsets serve both. Each region keeps its own saved data, though: install the game data from the SWRR you will play it in (an install made in US SWRR doesn't appear in EU SWRR, and vice versa).
 
 **No game files are included.** Bring your own CUSA11456 dump; it goes in `build/ghost/app0`, which git ignores.
 
@@ -18,7 +20,7 @@ Start with [docs/ghost-on-stock-ps5.md](docs/ghost-on-stock-ps5.md): triggering 
 | `ghostldr/tools/` | **Analysis helpers:** ELF/NID parsing, disassembler, cross-references, NID table generator, Luac0re bundler. |
 | `ghostldr/data/` | Ghost's file open order, used to pack the containers (file names only). |
 | `ghostldr/tests/` | Offline tests: the installer against a fake console. |
-| `host/payloads/` | **Dev-only console payloads** (ps5-payload-sdk), for a jailbroken console: launch SWRR, unjail it, save watcher, ps, df, module dump. |
+| `host/payloads/` | **Dev-only console payloads** (ps5-payload-sdk), for a jailbroken console: launch or close SWRR (US or EU), unjail it, save watcher, ps, df, module dump. |
 | `tools/fetch_deps.sh` | Fetches the public build inputs (see Setup). |
 
 What the core contains:
@@ -33,7 +35,7 @@ The host tools:
 
 - **`run.py`:** build the core, send it, and log the run.
 - **`gfs_pack.py` and `gfs_install.py`:** lay out and install the ghostfs data, switching titles safely and resuming interrupted installs.
-- **`resign_save.py`:** make a Luac0re save for another PSN account.
+- **`resign_save.py`:** make a Luac0re save for another PSN account, for the SWRR region it runs on (US or EU).
 - **`recorder.py`:** crash and klog recorder.
 - **`console.py`:** finds the PS5 on the network.
 

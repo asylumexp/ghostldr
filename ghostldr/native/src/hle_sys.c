@@ -122,7 +122,7 @@ static s32 hle_sceVideoOutOpen(s32 user, s32 bus, s32 index, const void *param)
         return h;
     }
     /* SWRR still owns the main output.  Its handle lives at eboot+0x2d695d0
-     * (CUSA03474 01.00/01.02, written right after its sceVideoOutOpen). */
+     * (SWRR 01.00/01.02, US and EU alike, written right after its sceVideoOutOpen). */
     static s32 (*unreg0)(s32, s32);
     if (!unreg0)
         unreg0 = host_real_in("libSceVideoOut", "sceVideoOutUnregisterBuffers");

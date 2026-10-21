@@ -1,4 +1,4 @@
--- ghostldr bootstrap for Luac0re 2.4b (SWRR CUSA03474, after jit_init()).
+-- ghostldr bootstrap for Luac0re 2.4b (SWRR US CUSA03474 or EU CUSA03492, after jit_init()).
 -- The host tool prepends:
 --   GHOSTLDR_CORE_HEX   hex of build/ghostldr/core.bin
 --   GHOSTLDR_TEXT_SIZE  bytes of code placed in JIT RX memory (16 KiB aligned)

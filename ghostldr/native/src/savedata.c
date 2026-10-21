@@ -1,7 +1,7 @@
 /*
  * The title's save data, kept out of SWRR's.
  *
- * Inside SWRR every sceSaveData call works on CUSA03474's save area, where
+ * Inside SWRR every sceSaveData call works on SWRR's own save area, where
  * the PS2 memory card image (and with it the exploit) lives; the title's
  * save-data-memory writes there already made the system discard SWRR's
  * save memory as corrupt.  Redirect everything to files next to the title:

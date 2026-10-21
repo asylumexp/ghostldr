@@ -18,7 +18,16 @@
 #include <time.h>
 #include <unistd.h>
 
-#define SAVE "/mnt/sandbox/CUSA03474_000/savedata0"
+/* the running SWRR's save: US or EU, whichever mounts */
+static const char *const SAVES[] = {"/mnt/sandbox/CUSA03474_000/savedata0", "/mnt/sandbox/CUSA03492_000/savedata0"};
+static const char *SAVE = "/mnt/sandbox/CUSA03474_000/savedata0";
+
+static const char *in_save(const char *name)
+{
+    static char path[128];
+    snprintf(path, sizeof(path), "%s/%s", SAVE, name);
+    return path;
+}
 #define BACKUP "/data/swrr-save-backup"
 #define STAGE "/data/swrr-save-stage2"
 
@@ -88,38 +97,42 @@ static int copy_tree(const char *src, const char *dst)
 int main(void)
 {
     time_t start = time(NULL);
-    klog_printf("[savewatch] waiting for %s\n", SAVE);
+    klog_printf("[savewatch] waiting for SWRR's save (US or EU)\n");
     while (time(NULL) - start < 600) {
-        int hold = open(SAVE "/VMC0.card", O_RDONLY);
+        int hold = -1;
+        for (unsigned i = 0; hold < 0 && i < sizeof(SAVES) / sizeof(SAVES[0]); i++) {
+            SAVE = SAVES[i];
+            hold = open(in_save("VMC0.card"), O_RDONLY);
+        }
         if (hold >= 0) {
-            klog_printf("[savewatch] save mounted, holding fd %d\n", hold);
+            klog_printf("[savewatch] %s mounted, holding fd %d\n", SAVE, hold);
 #ifdef MODE_BACKUP
             int rc = copy_tree(SAVE, BACKUP);
 #else
             /* only a read-write mount (the emulator writing the card) works */
-            int probe = open(SAVE "/.ghostldr_probe", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            int probe = open(in_save(".ghostldr_probe"), O_WRONLY | O_CREAT | O_TRUNC, 0666);
             if (probe < 0) {
                 close(hold);
                 klog_printf("[savewatch] read-only mount (errno %d), waiting for a write\n", errno);
-                while (access(SAVE "/VMC0.card", F_OK) == 0)
+                while (access(in_save("VMC0.card"), F_OK) == 0)
                     usleep(2000);
                 continue;
             }
             close(probe);
-            unlink(SAVE "/.ghostldr_probe");
+            unlink(in_save(".ghostldr_probe"));
             /* let the emulator finish writing its card before replacing it */
             struct stat a, b;
-            stat(SAVE "/VMC0.card", &a);
+            stat(in_save("VMC0.card"), &a);
             for (int stable = 0; stable < 10;) {
                 usleep(100000);
-                stat(SAVE "/VMC0.card", &b);
+                stat(in_save("VMC0.card"), &b);
                 if (b.st_mtime == a.st_mtime && b.st_size == a.st_size)
                     stable++;
                 else
                     stable = 0, a = b;
             }
 #ifdef DELETE_VMC1
-            klog_printf("[savewatch] unlink VMC1.card -> %d\n", unlink(SAVE "/VMC1.card"));
+            klog_printf("[savewatch] unlink VMC1.card -> %d\n", unlink(in_save("VMC1.card")));
 #endif
             int rc = copy_tree(STAGE, SAVE);
             struct statfs fs;

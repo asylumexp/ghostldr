@@ -8,9 +8,9 @@ After that the console needs nothing but SWRR.
 ## What you need
 
 - **The PS5.** It needs a Luac0re save for its PSN account, imported from USB.
-- **The game.** *Star Wars Racer Revenge* USA, **CUSA03474**.
-  - ghostldr uses fixed offsets in the US 01.02 executable (the save-data import slot, the video handle, a bootstrap gadget).
-  - The EU version (CUSA03492) needs its own save and an offset check.
+- **The game.** *Star Wars Racer Revenge*, USA (**CUSA03474**) or Europe (**CUSA03492**).
+  - ghostldr uses fixed offsets in SWRR's 01.02 executable (the save-data import slot, the video handle, a bootstrap gadget). US and EU run the same executable, so the offsets hold for both.
+  - Each region keeps its own saved data. Install the game data from the SWRR you will play in; an install made in one region doesn't appear in the other.
 - **A USB drive.** exFAT or FAT32.
 - **A computer on the same network.** The install moves 53 GiB over LAN. It needs:
   - this repo, Python 3 and LLVM 18 (run.py builds the core; see the README);
@@ -22,7 +22,7 @@ After that the console needs nothing but SWRR.
 
 Trigger Luac0re (2.4b) via SWRR or another mast1c0re-compatible game, the usual way, until its Remote Lua Loader listens on port 9026. Any normal Luac0re save works; ghostldr needs nothing in the save.
 
-ghostldr itself currently uses fixed offsets in SWRR US 01.02 (see "What you need"), so another game needs those ported first.
+ghostldr itself uses fixed offsets in SWRR 01.02, US or EU (see "What you need"), so another game needs those ported first.
 
 ## 2. Point the scripts at your PS5
 
@@ -61,7 +61,7 @@ python3 ghostldr/host/gfs_install.py
 - **Interrupted installs:** run the same command again (after step 1 if SWRR restarted). The console itself records progress: each container gets a tag once sent, and GFSINDEX stays marked incomplete until the end, so an unfinished install never boots.
 - **Receiver still running:** if the installer stopped but SWRR didn't, the receiver still holds Luac0re's loader. Reattach with `--port <its port>` (the installer prints it).
 - **Choosing the network link:** `--interface en0` sends through a given interface of this computer, when a slower one is the default route.
-- **Storage:** the containers belong to SWRR for the signed-in user. They appear in the PS5's saved-data list as SWRR saves (about 56 GB). Deleting them there removes the install.
+- **Storage:** the containers belong to the SWRR region you installed from, for the signed-in user. They appear in the PS5's saved-data list as SWRR saves (about 56 GB). Deleting them there removes the install.
 
 ### Switching to another backup
 
@@ -98,5 +98,5 @@ From a release zip (prebuilt core, no LLVM), add `--no-build`.
 
 - **`receiver did not come up` / no reply on 9026:** Luac0re's loader isn't listening. Redo step 1. Any earlier Lua script must have finished; a stuck one holds the loader until SWRR restarts.
 - **`no space left on the console's storage` (0x809f000a):** free space on the PS5, then rerun the installer to resume.
-- **The boot log stops at `ghostfs: save data unavailable`:** the SWRR executable differs from US 01.02. Its sceSaveDataMount import slot (`SWRR_SAVEDATA_MOUNT` in `ghostldr/native/src/ghostfs.c`, and in `gfs_receiver.lua` and `save_resign.lua`) must be found again for that version.
+- **The boot log stops at `ghostfs: save data unavailable`:** the SWRR executable differs from 01.02 (US and EU 01.02 are the same). Its sceSaveDataMount import slot (`SWRR_SAVEDATA_MOUNT` in `ghostldr/native/src/ghostfs.c`, and in `gfs_receiver.lua` and `save_resign.lua`) must be found again for that version.
 - **Memory:** SWRR's memory budget is fixed by the system. Ghost runs with a 590 MiB streaming pool and skips a movie when the video decoder can't get memory. Newer firmware may change the budget. If the boot stops at a memory plan error, the `run.log` shows the plan.

@@ -1,4 +1,4 @@
--- What can SWRR (CUSA03474) reach from inside its own sandbox?
+-- What can SWRR (US CUSA03474 / EU CUSA03492) reach from inside its own sandbox?
 -- Run through Luac0re's remote Lua loader on a console with NO payloads sent
 -- (no unjail, no kstuff, no ShadowMountPlus), so the sandbox is stock.
 -- The host tool prepends PROBE_LOG_IP / PROBE_LOG_PORT; every line goes there

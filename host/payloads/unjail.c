@@ -8,9 +8,6 @@
 #include <sys/user.h>
 #include <unistd.h>
 
-#ifndef TARGET_TITLE_ID
-#define TARGET_TITLE_ID "CUSA03474"
-#endif
 
 typedef struct app_info {
     uint32_t app_id;
@@ -18,6 +15,16 @@ typedef struct app_info {
     char title_id[14];
     char unknown2[0x3c];
 } app_info_t;
+
+/* SWRR US or EU, unless built for one title with -DTARGET_TITLE_ID */
+static int is_target(const char *title_id)
+{
+#ifdef TARGET_TITLE_ID
+    return strcmp(title_id, TARGET_TITLE_ID) == 0;
+#else
+    return strcmp(title_id, "CUSA03474") == 0 || strcmp(title_id, "CUSA03492") == 0;
+#endif
+}
 
 int sceKernelGetAppInfo(pid_t pid, app_info_t *info);
 
@@ -46,7 +53,7 @@ static pid_t find_target(void)
         }
         if (strcmp(process->ki_comm, "eboot.bin") == 0 &&
             sceKernelGetAppInfo(process->ki_pid, &info) == 0 &&
-            strcmp(info.title_id, TARGET_TITLE_ID) == 0) {
+            is_target(info.title_id)) {
             result = process->ki_pid;
             break;
         }

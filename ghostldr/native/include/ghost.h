@@ -1,5 +1,5 @@
 /*
- * ghostldr: in-process PS4 title loader that runs inside SWRR (CUSA03474)
+ * ghostldr: in-process PS4 title loader that runs inside SWRR (US CUSA03474 or EU CUSA03492)
  * after Luac0re 2.x gives Lua + JIT-compiler code execution.
  *
  * The core is a freestanding, position-independent blob.  Lua copies it into

@@ -9,7 +9,7 @@ include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
 CFLAGS := -Wall -Wextra -Werror -O2
 OUT := ../../build/payloads
 
-ELF := $(OUT)/launch_cusa03492.elf $(OUT)/launch_cusa03474.elf $(OUT)/df.elf $(OUT)/unjail_cusa03474.elf $(OUT)/dumpmod.elf $(OUT)/kill_cusa03474.elf $(OUT)/savewatch_backup.elf $(OUT)/savewatch_install.elf $(OUT)/ps.elf
+ELF := $(OUT)/launch_cusa03492.elf $(OUT)/launch_cusa03474.elf $(OUT)/df.elf $(OUT)/unjail_swrr.elf $(OUT)/dumpmod.elf $(OUT)/kill_cusa03474.elf $(OUT)/kill_cusa03492.elf $(OUT)/savewatch_backup.elf $(OUT)/savewatch_install.elf $(OUT)/ps.elf
 
 all: $(ELF)
 
@@ -25,9 +25,9 @@ $(OUT)/df.elf: df.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -o $@ $^
 
-$(OUT)/unjail_cusa03474.elf: unjail.c
+$(OUT)/unjail_swrr.elf: unjail.c
 	@mkdir -p $(OUT)
-	$(CC) $(CFLAGS) -DTARGET_TITLE_ID='"CUSA03474"' -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^
 
 $(OUT)/dumpmod.elf: dumpmod.c
 	@mkdir -p $(OUT)
@@ -53,3 +53,7 @@ clean:
 $(OUT)/ps.elf: ps.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -o $@ $^
+
+$(OUT)/kill_cusa03492.elf: launch_title.c
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DKILL_ONLY -DTITLE_ID='"CUSA03492"' -o $@ $^ -lSceSystemService -lSceUserService

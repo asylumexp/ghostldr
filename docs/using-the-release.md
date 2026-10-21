@@ -4,7 +4,7 @@ This walks through running Ghost of Tsushima from a ghostldr release on a stock 
 
 ## What you need
 
-- **A PS5 with *Star Wars Racer Revenge* USA (CUSA03474).** Luac0re 2.4b must already work on it: its Remote Lua Loader starts when you open HALL OF FAME.
+- **A PS5 with *Star Wars Racer Revenge*, USA (CUSA03474) or Europe (CUSA03492).** Luac0re 2.4b must already work on it: its Remote Lua Loader starts when you open HALL OF FAME. Both regions work the same way; use the same one for the install and for playing.
 - **Your own Ghost of Tsushima v2.18 dump (CUSA11456)** as a folder of files (`eboot.bin`, `sce_module/`, `cache/`, `movies/` ...), about 63 GB. The release contains no game files.
 - **About 60 GB free on the PS5** for the game data.
 - **A computer on the same network as the PS5** with Python 3.11 or newer.
@@ -14,7 +14,7 @@ This walks through running Ghost of Tsushima from a ghostldr release on a stock 
 
 ## 1. Download and unpack
 
-From the release page, download `ghostldr-v0.1.0.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
+From the release page, download `ghostldr-v0.1.1.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
 
 ```bash
 shasum -a 256 --ignore-missing -c SHA256SUMS.txt
@@ -23,11 +23,11 @@ shasum -a 256 --ignore-missing -c SHA256SUMS.txt
 Unpack it and work from inside the folder; every command below runs there:
 
 ```bash
-unzip ghostldr-v0.1.0.zip
+unzip ghostldr-v0.1.1.zip
 ```
 
 ```bash
-cd ghostldr-v0.1.0
+cd ghostldr-v0.1.1
 ```
 
 ## 2. Put the game files in place
@@ -80,7 +80,7 @@ python3 ghostldr/host/gfs_install.py
 - **`no space left on the console's storage`:** free space on the PS5 and run it again.
 - **A slow default network link** on the computer: `--interface en0` sends through a chosen interface (macOS).
 
-The data lands in SWRR's saved data under the signed-in user, as about 57 entries named `GHOST000`…`GHOST055` and `GFSINDEX`.
+The data lands in SWRR's saved data under the signed-in user, as about 57 entries named `GHOST000`…`GHOST055` and `GFSINDEX`. It belongs to the SWRR region you installed from: US and EU SWRR each keep their own saved data, so install from the one you will play in.
 
 ## 6. Play
 
@@ -109,4 +109,4 @@ The computer logs the session to `build/ghostldr/run.log`. That file is what to 
 
 Delete Ghost's data from **Settings → Saved Data and Game/App Settings → Saved Data (PS4) → Console Storage → Star Wars Racer Revenge**. The entries are `GHOST000`…`GHOST055` and `GFSINDEX`.
 
-Keep `GHOSTSAVE` (Ghost's progress) and `SLUS-20268` (the Luac0re save) unless you mean to remove those too.
+Keep `GHOSTSAVE` (Ghost's progress) and the Luac0re save (`SLUS-20268` on US SWRR, `SLES-50366` on EU) unless you mean to remove those too.
