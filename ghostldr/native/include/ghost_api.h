@@ -96,6 +96,12 @@ struct ghost_api {
 
     /* the core's own overrides (an extension function may wrap one) */
     u64 (*hle_lookup)(const char *lib, const char *name);
+
+    /* the title's identity and path namespace */
+    const char *(*title_id)(void); /* "CUSA11456" from the ghostfs index, "" when unknown */
+    /* remap_path asks fn about title paths starting with prefix; fn returns
+     * the host path (in buf) or NULL.  Only during ext_init (a family's init). */
+    int (*path_remap_add)(const char *prefix, const char *(*fn)(const char *path, char *buf, size_t size));
 };
 
 /* ---- what the extension registers and returns ---- */

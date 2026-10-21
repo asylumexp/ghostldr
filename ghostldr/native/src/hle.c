@@ -7,7 +7,24 @@ void *host_real(const char *name);
 
 static char g_app_root[256];
 
-/* "/app0/x" -> "<app_root>/x".  Other paths pass through. */
+/* namespaces the extension adds (/temp0, /download0, ...), set during ext_init */
+static struct {
+    const char *prefix;
+    const char *(*fn)(const char *path, char *buf, size_t size);
+} g_remaps[4];
+static u32 g_nremaps;
+
+int path_remap_add(const char *prefix, const char *(*fn)(const char *path, char *buf, size_t size))
+{
+    if (!prefix || !*prefix || !fn || g_nremaps >= ARRAY_SIZE(g_remaps))
+        return -1;
+    g_remaps[g_nremaps].prefix = prefix;
+    g_remaps[g_nremaps++].fn = fn;
+    return 0;
+}
+
+/* "/app0/x" -> "<app_root>/x", then the extension's namespaces, then saves.
+ * Other paths pass through. */
 const char *remap_path(const char *path, char *buf, size_t size)
 {
     if (!path)
@@ -17,6 +34,13 @@ const char *remap_path(const char *path, char *buf, size_t size)
     if (!gfs_active() && strncmp(path, "/app0", 5) == 0 && (path[5] == '/' || path[5] == 0)) {
         fmt(buf, size, "%s%s", g_app_root, path + 5);
         return buf;
+    }
+    for (u32 i = 0; i < g_nremaps; i++) {
+        const char *r = strncmp(path, g_remaps[i].prefix, strlen(g_remaps[i].prefix)) == 0
+                            ? g_remaps[i].fn(path, buf, size)
+                            : NULL;
+        if (r)
+            return r;
     }
     const char *savedata_remap(const char *path, char *buf, size_t size);
     const char *s = savedata_remap(path, buf, size);
