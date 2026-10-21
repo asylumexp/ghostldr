@@ -4,8 +4,8 @@
  * Every PS4 system dialog is answered here and never shown.  Inside SWRR a
  * real dialog gets no controller focus, shares SWRR's one CommonDialog slot,
  * follows SWRR's SDK 2.50 rules, runs under SWRR's NP identity and (the save
- * data dialog) lists SWRR's own saves.  Only libSceScreenShot, which has no
- * dialog, still reaches the real library.
+ * data dialog) lists SWRR's own saves.  libSceScreenShot, which has no
+ * dialog, is not handled here (hle_media.c, or SWRR's library).
  *
  * One state machine (struct dlg) serves every CommonDialog client library
  * and ErrorDialog.  ImeDialog and Ime have their own (hle_dialog_ime.c).
@@ -155,8 +155,9 @@ u32 dlg_title_sdk(void) HIDDEN; /* the title's SDK version (proc param), 0 if un
 
 /* sysmodule ids whose libraries the dialog families implement completely
  * (every import of them binds here or to a denied stub): loading one may
- * return 0 without mapping the real sprx into SWRR (hle_dialog_sysmod.c).
- * The family that owns libSceSysmodule should ask this. */
+ * return 0 without mapping the real sprx into SWRR (hle_dialog_sysmod.c,
+ * which passes other ids on to a sysmodule router family).  A router that
+ * links before hle_dialog_sysmod.c should ask this itself. */
 bool dialog_sysmod_virtual(u32 id) HIDDEN;
 const char *dialog_sysmod_name(u32 id) HIDDEN;
 

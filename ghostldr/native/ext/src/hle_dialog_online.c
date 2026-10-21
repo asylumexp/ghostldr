@@ -207,38 +207,27 @@ static struct dlg g_pinv = DLG_INIT("PlayerInvitation", DLG_PLAYERINVITATION, dl
 DLG_FNS(pinv, g_pinv)
 
 /* ---- other *Dialog libraries (§8.16): the same, by library ----
- * PlayGoDialog (hle_playgo.c) and HmdSetupDialog (hle_peripheral.c) belong
- * to other families. */
+ * PlayGoDialog (hle_playgo.c), HmdSetupDialog (hle_peripheral.c) and
+ * NpSnsFacebookDialog (hle_np_online.c) belong to other families, and so
+ * does libSceScreenShot (hle_media.c), which has no dialog. */
 static struct dlg g_gen[] = {
     DLG_INIT("NpEula", DLG_GENERIC + 0, dlg_errs_common, 1),
     DLG_INIT("Login", DLG_GENERIC + 1, dlg_errs_common, 1),
     DLG_INIT("NetCtlAp", DLG_GENERIC + 2, dlg_errs_common, 1),
     DLG_INIT("UsbStorage", DLG_GENERIC + 3, dlg_errs_common, 1),
     DLG_INIT("VrService", DLG_GENERIC + 4, dlg_errs_common, 1),
-    DLG_INIT("NpSnsFacebook", DLG_GENERIC + 5, dlg_errs_common, 1),
-    DLG_INIT("NpSnsYouTube", DLG_GENERIC + 6, dlg_errs_common, 1),
-    DLG_INIT("SocialScreen", DLG_GENERIC + 7, dlg_errs_common, 1),
+    DLG_INIT("NpSnsYouTube", DLG_GENERIC + 5, dlg_errs_common, 1),
+    DLG_INIT("SocialScreen", DLG_GENERIC + 6, dlg_errs_common, 1),
 };
 DLG_FNS(eula, g_gen[0])
 DLG_FNS(login, g_gen[1])
 DLG_FNS(netap, g_gen[2])
 DLG_FNS(usb, g_gen[3])
 DLG_FNS(vrs, g_gen[4])
-DLG_FNS(fb, g_gen[5])
-DLG_FNS(yt, g_gen[6])
-DLG_FNS(social, g_gen[7])
+DLG_FNS(yt, g_gen[5])
+DLG_FNS(social, g_gen[6])
 
 static s32 hle_eula_check_version(void) { return DLG_E_RESULT_NONE; }
-
-/* ---- libSceScreenShot: passed through, except the overlay image, whose
- * path the system would resolve in SWRR's /app0 ---- */
-static s32 hle_screenshot_overlay(const char *path, u32 x, u32 y)
-{
-    char t[124];
-    dlg_text(t, sizeof(t), path);
-    logf("sceScreenShotSetOverlayImage(%s) ignored", t);
-    return 0;
-}
 
 #define SM(lib, pfx, fn) {lib, fn "Initialize", pfx##_init, NULL}, {lib, fn "UpdateStatus", pfx##_update, NULL},           \
                          {lib, fn "GetStatus", pfx##_update, NULL}, {lib, fn "Close", pfx##_close, NULL},                     \
@@ -295,12 +284,9 @@ static const struct ext_hle_ent k_hle[] = {
     GENERIC("libSceNetCtlApDialog", netap, "sceNetCtlApDialog"),
     GENERIC("libSceUsbStorageDialog", usb, "sceUsbStorageDialog"),
     GENERIC("libSceVrServiceDialog", vrs, "sceVrServiceDialog"),
-    GENERIC("libSceNpSnsFacebookDialog", fb, "sceNpSnsFacebookDialog"),
     GENERIC("libSceNpSnsYouTubeDialog", yt, "sceNpSnsYouTubeDialog"),
     GENERIC("libSceSocialScreenDialog", social, "sceSocialScreenDialog"),
 
-    {"libSceScreenShot", "sceScreenShotSetOverlayImage", hle_screenshot_overlay, NULL},
-    {"libSceScreenShot", "sceScreenShotSetOverlayImageWithOrigin", hle_screenshot_overlay, NULL},
 };
 
 #define NO_HOST(lib, aliases) {lib, aliases, EXT_LIB_NO_HOST, DLG_E_NOT_SUPPORTED}
@@ -318,10 +304,8 @@ static const struct ext_lib k_libs[] = {
     NO_HOST("libSceNetCtlApDialog", NULL),
     NO_HOST("libSceUsbStorageDialog", NULL),
     NO_HOST("libSceVrServiceDialog", NULL),
-    NO_HOST("libSceNpSnsFacebookDialog", NULL),
     NO_HOST("libSceNpSnsYouTubeDialog", NULL),
     NO_HOST("libSceSocialScreenDialog", NULL),
-    /* libSceScreenShot: no policy, the rest passes through */
 };
 
 DLG_MINSIZE_END
