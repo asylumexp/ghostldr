@@ -1,0 +1,19 @@
+# build outputs, fetched dependencies and anything game- or console-derived
+build/
+__pycache__/
+*.pyc
+.DS_Store
+# never commit game data, executables, dumps or saves
+*.elf
+*.bin
+*.self
+*.sprx
+*.prx
+*.pkg
+*.psarc
+*.xpps
+*.card
+*.psu
+*.zip
+app0/
+sdimg_*
