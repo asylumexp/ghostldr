@@ -23,9 +23,9 @@ https://github.com/user-attachments/assets/6bcab55f-559f-438c-81f5-7104bc5003a3
 | `ghostldr/native/` | **The loader core** (C, about 6,400 lines). Runs inside SWRR from Luac0re's JIT buffer. |
 | `ghostldr/host/` | **Computer-side tools** (Python). |
 | `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the save resigner, and the sandbox/save probes. |
-| `ghostldr/tools/` | **Analysis helpers:** ELF/NID parsing, disassembler, cross-references, NID table generator, Luac0re bundler. |
-| `ghostldr/data/` | Ghost's file open order, used to pack the containers (file names only). |
-| `ghostldr/tests/` | Offline tests: the installer against a fake console. |
+| `ghostldr/tools/` | **Analysis helpers:** ELF/NID parsing, disassembler, cross-references, NID table generator, import coverage report, Luac0re bundler. |
+| `ghostldr/data/` | Ghost's file open order, used to pack the containers (file names only), and the system modules a PS4 app can load on a 13.60 PS5. |
+| `ghostldr/tests/` | Offline tests: the installer against a fake console, the import report against a synthetic title. |
 | `host/payloads/` | **Dev-only console payloads** (ps5-payload-sdk), for a jailbroken console: launch or close SWRR (US or EU), unjail it, save watcher, ps, df, module dump. |
 | `tools/fetch_deps.sh` | Fetches the public build inputs (see Setup). |
 
@@ -71,6 +71,15 @@ The core is built for CUSA11456 v2.18, and its symbol table comes from that game
   ```bash
   python3 -m unittest discover -s ghostldr/tests
   ```
+
+## Import coverage
+
+`ghostldr/tools/import_report.py` lists every import of a title's `eboot.bin` and `sce_module/*.prx` and how the loader would bind it: core HLE, extension HLE, the title's own modules, a system module on the console (`ghostldr/data/ps5_ps4_sysmodules.txt`), or nothing. Given a [shadPS4](https://github.com/shadps4-emu/shadPS4) source tree, it also shows which of those functions shadPS4 implements or stubs.
+
+```bash
+python3 ghostldr/tools/import_report.py build/ghost/app0 --shadps4 /path/to/shadPS4 \
+    --md coverage.md --json coverage.json
+```
 
 ## Choosing a console
 
