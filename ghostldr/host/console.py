@@ -9,7 +9,10 @@ TCP 9026 (an empty connection runs nothing).
   PS_HOST_ID  the console's host-id (as `python3 ghostldr/host/console.py --list`
               shows it): find that console wherever it is (PS5_HOST_ID works too)
   neither     use the only console that is on; with several, the only one
-              running SWRR or Luac0re's loader (anything else is an error)
+              running SWRR or Luac0re's loader. Whenever more than one console
+              answers, they are listed (on stderr) with the one used marked; if
+              no single one stands out, a terminal asks which to use, anything
+              else stops with the list.
 The last address found is cached in build/ghostldr/console_ip.
 """
 
@@ -51,9 +54,15 @@ class Console:
         """SWRR's region ("US"/"EU") if the console reports it running, else ""."""
         return SWRR_TITLES.get(self.app_id, "")
 
+    @property
+    def firmware(self) -> str:
+        """system-version 13600007 -> 13.60 (PS4s use the same layout)."""
+        v = self.version
+        return f"{int(v[:2])}.{v[2:4]}" if len(v) >= 4 and v[:4].isdigit() else (v or "?")
+
     def describe(self) -> str:
         parts = [self.ip, self.kind or "?", self.name or "?", f"host-id {self.host_id or '?'}",
-                 f"system {self.version or '?'}", "on" if self.on else "rest mode"]
+                 f"firmware {self.firmware}", "on" if self.on else "rest mode"]
         if self.app_id:
             parts.append(f"running {self.app_id}" + (f" ({self.app_name})" if self.app_name else ""))
         if self.swrr:
@@ -155,7 +164,41 @@ def _env(*names: str) -> str:
     return ""
 
 
-def console_ip() -> str:
+def show(found: dict[str, Console], chosen: Console | None = None, why: str = "") -> None:
+    """The numbered list of consoles that answered, on stderr."""
+    print(f"Found {len(found)} consoles:", file=sys.stderr)
+    for n, c in enumerate(found.values(), 1):
+        mark = "   <- using this one" if chosen is c else ""
+        print(f"  {n}) {c.describe()}{mark}", file=sys.stderr)
+    if chosen:
+        print(f"Using {chosen.name or chosen.ip} ({chosen.ip}){': ' + why if why else ''}. "
+              f"Set PS_HOST or PS_HOST_ID to choose another.", file=sys.stderr)
+
+
+def ask(found: dict[str, Console], hits: list[Console]) -> Console | None:
+    """Let the person at the terminal choose one of the candidates."""
+    consoles = list(found.values())
+    choices = [consoles.index(c) + 1 for c in hits] if hits else list(range(1, len(consoles) + 1))
+    while True:
+        try:
+            answer = input(f"Which console? [{', '.join(map(str, choices))}, Enter to stop] ").strip()
+        except EOFError:
+            return None
+        if not answer:
+            return None
+        if answer.isdigit() and int(answer) in choices:
+            c = consoles[int(answer) - 1]
+            if c.host_id:       # later lookups in this run find the same console
+                os.environ["PS_HOST_ID"] = c.host_id
+            else:
+                os.environ["PS_HOST"] = c.ip
+            again = f"export PS_HOST_ID={c.host_id}" if c.host_id else f"export PS_HOST={c.ip}"
+            print(f"Using {c.name or c.ip} ({c.ip}). To skip this question next time: {again}", file=sys.stderr)
+            return c
+
+
+def console_ip(quiet: bool = False) -> str:
+    """The console's address. `quiet` (background callers): never print or ask."""
     fixed = _env("PS_HOST", "PS5_HOST")
     if fixed:
         return fixed
@@ -165,19 +208,37 @@ def console_ip() -> str:
         return cached
     found = discover(check_loader=not want)
     hits = pick(found, want)
-    if len(hits) != 1:
-        consoles = "; ".join(c.describe() for c in found.values()) or "none"
-        raise SystemExit(f"cannot pick a console (found: {consoles}); set PS_HOST or PS_HOST_ID")
+    chosen = hits[0] if len(hits) == 1 else None
+    if not quiet and len(found) > 1:
+        why = ""
+        if chosen and not want:
+            why = ("running SWRR " + chosen.swrr) if chosen.swrr else \
+                  ("Luac0re's loader is listening" if chosen.loader else "the only one that is on")
+        elif chosen:
+            why = "host-id " + want
+        show(found, chosen, why)
+    if not chosen and not quiet and found and sys.stdin.isatty():
+        if not hits:
+            print("None of them is on." if not want else f"None has host-id {want}.", file=sys.stderr)
+        chosen = ask(found, hits)
+    if not chosen:
+        if not found:
+            raise SystemExit("no PS4 or PS5 answered discovery (UDP 987 / 9302): is it on and on this network? "
+                             "Set PS_HOST to its address to skip discovery.")
+        if quiet or not sys.stdin.isatty():
+            consoles = "; ".join(c.describe() for c in found.values())
+            raise SystemExit(f"cannot pick a console (found: {consoles}); set PS_HOST or PS_HOST_ID")
+        raise SystemExit("no console chosen; set PS_HOST or PS_HOST_ID")
     CACHE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE.write_text(hits[0].ip + "\n")
-    return hits[0].ip
+    CACHE.write_text(chosen.ip + "\n")
+    return chosen.ip
 
 
 if __name__ == "__main__":
     if "--list" in sys.argv:
         found = discover()
-        for c in found.values():
-            print(c.describe())
+        for n, c in enumerate(found.values(), 1):
+            print(f"{n}) {c.describe()}")
         if not found:
             print("no PS4 or PS5 answered (UDP 987 / 9302)")
     else:

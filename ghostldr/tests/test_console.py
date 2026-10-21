@@ -1,7 +1,12 @@
 """Console discovery: PS4 and PS5 answers, and which console is picked."""
+import contextlib
+import io
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "host"))
 import console  # noqa: E402
@@ -64,6 +69,82 @@ class Pick(unittest.TestCase):
         ps5 = console.parse_reply("10.0.0.1", PS5_ON)
         ps4 = console.parse_reply("10.0.0.2", PS4_SWRR)
         self.assertEqual([c.ip for c in console.pick(self.found(ps5, ps4), "AAAAAAAAAAAA")], ["10.0.0.1"])
+
+
+class ChooseAndList(unittest.TestCase):
+    """console_ip(): the list on stderr, the pick, the question at a terminal."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = {k: v for k, v in os.environ.items() if k not in ("PS_HOST", "PS5_HOST", "PS_HOST_ID", "PS5_HOST_ID")}
+        for p in (mock.patch.dict(os.environ, env, clear=True),
+                  mock.patch.object(console, "CACHE", Path(tmp.name) / "console_ip")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def run_ip(self, found, tty=False, answers=()):
+        err = io.StringIO()
+        with mock.patch.object(console, "discover", return_value=found), \
+             mock.patch.object(sys.stdin, "isatty", return_value=tty), \
+             mock.patch("builtins.input", side_effect=list(answers)), \
+             contextlib.redirect_stderr(err):
+            try:
+                return console.console_ip(), err.getvalue()
+            except SystemExit as e:
+                return e, err.getvalue()
+
+    def consoles(self):
+        ps5 = console.parse_reply("10.0.0.1", PS5_ON)
+        other = console.parse_reply("10.0.0.5", PS5_ON.replace(b"AAAAAAAAAAAA", b"DDDDDDDDDDDD").replace(b"PS5-A", b"PS5-D"))
+        sleeping = console.parse_reply("10.0.0.3", PS4_STANDBY)
+        return ps5, other, sleeping
+
+    def test_one_console_is_not_listed(self):
+        ip, err = self.run_ip({"10.0.0.1": console.parse_reply("10.0.0.1", PS5_ON)})
+        self.assertEqual((ip, err), ("10.0.0.1", ""))
+
+    def test_several_are_listed_with_the_pick_marked(self):
+        ps5, other, sleeping = self.consoles()
+        other.loader = True
+        ip, err = self.run_ip({c.ip: c for c in (ps5, other, sleeping)})
+        self.assertEqual(ip, "10.0.0.5")
+        self.assertIn("Found 3 consoles:", err)
+        self.assertIn("2) 10.0.0.5", err)
+        self.assertIn("<- using this one", err.splitlines()[2])
+        self.assertIn("Luac0re's loader is listening", err)
+        self.assertIn("rest mode", err)
+        self.assertIn("firmware 13.60", err)
+
+    def test_undecided_without_a_terminal_stops_with_the_list(self):
+        ps5, other, _ = self.consoles()
+        result, err = self.run_ip({c.ip: c for c in (ps5, other)})
+        self.assertIsInstance(result, SystemExit)
+        self.assertIn("set PS_HOST", str(result))
+        self.assertIn("Found 2 consoles:", err)
+
+    def test_undecided_at_a_terminal_asks(self):
+        ps5, other, _ = self.consoles()
+        ip, err = self.run_ip({c.ip: c for c in (ps5, other)}, tty=True, answers=["9", "2"])
+        self.assertEqual(ip, "10.0.0.5")
+        self.assertEqual(os.environ.get("PS_HOST_ID"), "DDDDDDDDDDDD")
+        self.assertIn("export PS_HOST_ID=DDDDDDDDDDDD", err)
+
+    def test_quiet_never_prints_or_asks(self):
+        ps5, other, _ = self.consoles()
+        err = io.StringIO()
+        with mock.patch.object(console, "discover", return_value={c.ip: c for c in (ps5, other)}), \
+             mock.patch.object(sys.stdin, "isatty", return_value=True), \
+             mock.patch("builtins.input", side_effect=AssertionError("asked")), \
+             contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit):
+                console.console_ip(quiet=True)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_nothing_answers(self):
+        result, _ = self.run_ip({})
+        self.assertIsInstance(result, SystemExit)
+        self.assertIn("no PS4 or PS5 answered", str(result))
 
 
 if __name__ == "__main__":

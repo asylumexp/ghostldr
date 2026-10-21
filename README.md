@@ -87,7 +87,7 @@ The host tools find the console with the PlayStation discovery protocol, PS5s on
 python3 ghostldr/host/console.py --list
 ```
 
-The list shows each console's type, name, host-id, firmware, whether it's on or in rest mode, the running app (PS4s report it; SWRR is marked), and whether Luac0re's loader is listening on 9026. With several consoles on, the tools pick the one running SWRR or the loader. Set `PS_HOST_ID` (follows DHCP moves) or `PS_HOST` (a fixed address) to choose one yourself; the older `PS5_HOST_ID` and `PS5_HOST` still work.
+The list shows each console's type, name, host-id, firmware, whether it's on or in rest mode, the running app (PS4s report it; SWRR is marked), and whether Luac0re's loader is listening on 9026. Whenever more than one console answers, every tool prints this numbered list and marks the one it uses: the one running SWRR or the loader. If none stands out, it asks which to use (or stops with the list when not run from a terminal). Set `PS_HOST_ID` (follows DHCP moves) or `PS_HOST` (a fixed address) to choose one yourself; the older `PS5_HOST_ID` and `PS5_HOST` still work.
 
 ## Dev setup (optional)
 
