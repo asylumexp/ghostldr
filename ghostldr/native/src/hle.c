@@ -192,6 +192,13 @@ static int hle_dlsym(u32 handle, const char *name, void **out)
             return a ? 0 : -1;
         }
     }
+    /* the extension's functions first; its no-host-fallback libraries are
+     * refused rather than handed SWRR's */
+    int erc = ext_dlsym(handle, name, out);
+    if (erc <= 0) {
+        logf("dlsym(host %x, %s) -> %s %p", handle, name, erc == 0 ? "extension" : "refused", *out);
+        return erc == 0 ? 0 : (int)0x80020002; /* ENOENT */
+    }
     int rc = (int)call_gadget6(g_ctx->dlsym, handle, (u64)name, (u64)out, 0, 0, 0);
     logf("dlsym(host %x, %s) -> %d %p", handle, name, rc, *out);
     return rc;

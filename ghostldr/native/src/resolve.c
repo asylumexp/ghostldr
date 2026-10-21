@@ -1,31 +1,10 @@
-/* Import resolution:  HLE override -> our loaded modules -> host system
- * modules (loaded on demand, resolved by name) -> logging stub. */
-#include "ghost.h"
+/* Import resolution:  core HLE override (by name) -> extension HLE (by
+ * library and NID) -> our loaded modules -> host system modules (loaded on
+ * demand, resolved by name through the extension's NID table, unless the
+ * extension's policy for the library forbids it) -> logging stub. */
+#include "ghost_api.h"
 
 const char *module_import_lib(struct module *m, const char *encoded, char *nid, const char **modname);
-
-struct nid_ent {
-    char nid[12];
-    const char *name;
-};
-extern const struct nid_ent g_nid_table[] HIDDEN;
-extern const u32 g_nid_count HIDDEN;
-
-const char *nid_to_name(const char *nid)
-{
-    u32 lo = 0, hi = g_nid_count;
-    while (lo < hi) {
-        u32 mid = (lo + hi) / 2;
-        int c = strcmp(g_nid_table[mid].nid, nid);
-        if (c == 0)
-            return g_nid_table[mid].name;
-        if (c < 0)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    return NULL;
-}
 
 /* ---- host modules ---- */
 struct host_mod {
@@ -101,6 +80,8 @@ int host_module_handle_for(struct module *m, const char *modname, u32 *out)
 #define MAX_STUBS 512 /* 16 KiB of code; the small RX area left after the core is 16-40 KiB */
 struct stub_info {
     const char *lib, *nid, *name;
+    s64 ret;     /* what the stub returns (the library's policy; 0 by default) */
+    bool denied; /* no host fallback for its library */
 };
 static u64 g_stub_base;
 static u8 *g_stub_buf;
@@ -110,15 +91,20 @@ static u32 g_nstubs, g_stubs_flushed;
 
 u64 c_unresolved(u32 idx)
 {
-    if (idx < g_nstubs)
-        logf("UNRESOLVED call: %s %s (%s)", g_stubs[idx].lib, g_stubs[idx].nid,
-             g_stubs[idx].name ? g_stubs[idx].name : "?");
-    else
+    if (idx >= g_nstubs) {
         logf("UNRESOLVED call #%u", idx);
-    return 0;
+        return 0;
+    }
+    const struct stub_info *s = &g_stubs[idx];
+    if (s->denied || s->ret)
+        logf("%s call: %s %s (%s) -> %x", s->denied ? "DENIED" : "UNRESOLVED", s->lib, s->nid,
+             s->name ? s->name : "?", (u32)s->ret);
+    else
+        logf("UNRESOLVED call: %s %s (%s)", s->lib, s->nid, s->name ? s->name : "?");
+    return (u64)s->ret;
 }
 
-/* eax = stub index; preserve argument registers, return 0 */
+/* eax = stub index; preserve argument registers, return c_unresolved's value */
 __attribute__((naked, used)) static void unresolved_entry(void)
 {
     __asm__ volatile(
@@ -130,7 +116,6 @@ __attribute__((naked, used)) static void unresolved_entry(void)
         "mov edi, eax\n"
         "call c_unresolved\n"
         "pop r9\n pop r8\n pop rcx\n pop rdx\n pop rsi\n pop rdi\n"
-        "xor eax, eax\n"
         "leave\n"
         "ret\n"
         ".att_syntax prefix\n");
@@ -162,17 +147,19 @@ u64 stub_alloc_code(const u8 *code, u32 len)
     if (len > STUB_SIZE || !stubs_ready())
         return 0;
     u32 idx = g_nstubs++;
-    g_stubs[idx] = (struct stub_info){"hook", "", "trampoline"};
+    g_stubs[idx] = (struct stub_info){"hook", "", "trampoline", 0, false};
     memcpy(g_stub_buf + idx * STUB_SIZE, code, len);
     return g_stub_base + idx * STUB_SIZE;
 }
 
-u64 unresolved_stub(const char *lib, const char *nid)
+u64 unresolved_stub(const char *lib, const char *nid, s64 ret, bool denied)
 {
     if (!stubs_ready())
         return 0;
     u32 idx = g_nstubs++;
-    g_stubs[idx] = (struct stub_info){lib, arena_strdup(nid), nid_to_name(nid)};
+    const char *name = nid_to_name(nid);
+    g_stubs[idx] = (struct stub_info){arena_strdup(lib), arena_strdup(nid), name ? arena_strdup(name) : NULL, ret,
+                                      denied};
     u8 *s = g_stub_buf + idx * STUB_SIZE;
     s[0] = 0xB8;                        /* mov eax, idx */
     *(u32 *)(s + 1) = idx;
@@ -204,7 +191,8 @@ static u64 counting_stub(u64 target, const char *lib, const char *nid, const cha
     if (!stubs_ready() || g_nstubs + 24 >= g_stub_cap) /* keep room for hook trampolines */
         return target;
     u32 idx = g_nstubs++;
-    g_stubs[idx] = (struct stub_info){lib, arena_strdup(nid), name};
+    g_stubs[idx] = (struct stub_info){arena_strdup(lib), arena_strdup(nid), name ? arena_strdup(name) : NULL, 0,
+                                      false};
     g_count_target[idx] = target;
     u64 at = g_stub_base + idx * STUB_SIZE;
     u8 *c = g_stub_buf + idx * STUB_SIZE;
@@ -247,7 +235,7 @@ const char *import_name(u32 idx)
 }
 
 /* ---- resolution ---- */
-static u32 g_logged_misses;
+static u32 g_logged_misses, g_logged_denied;
 
 static u64 maybe_count(struct module *m, u64 target, const char *lib, const char *nid, const char *name, bool fn)
 {
@@ -263,8 +251,12 @@ u64 resolve_import(struct module *m, const char *encoded, bool weak, bool plt_fu
     const char *lib = module_import_lib(m, encoded, nid, &modname);
     const char *name = nid_to_name(nid);
 
+    /* the extension first: it supersedes the core's own overrides */
+    u64 h = ext_hle_lookup(lib, nid, name);
+    if (h)
+        return maybe_count(m, h, lib, nid, name ? name : nid, plt_func);
     if (name) {
-        u64 h = hle_lookup(lib, name);
+        h = hle_lookup(lib, name);
         if (h)
             return maybe_count(m, h, lib, nid, name, plt_func);
     }
@@ -277,6 +269,14 @@ u64 resolve_import(struct module *m, const char *encoded, bool weak, bool plt_fu
             }
         }
     }
+    const struct ext_lib *pol = ext_lib_policy(lib);
+    s64 ret = pol ? (s64)pol->stub_ret : 0;
+    if (pol && (pol->flags & EXT_LIB_NO_HOST)) {
+        if (g_logged_denied++ < 200)
+            logf("denied: %s needs %s:%s (%s): %s has no host fallback, the stub returns %x", m->name, lib, nid,
+                 name ? name : "?", pol->name, (u32)ret);
+        return unresolved_stub(lib, nid, ret, true);
+    }
     if (name) {
         u32 handle;
         if (host_module_handle_for(m, modname, &handle) == 0) {
@@ -288,5 +288,5 @@ u64 resolve_import(struct module *m, const char *encoded, bool weak, bool plt_fu
     if (g_logged_misses++ < 200)
         logf("unresolved%s: %s needs %s:%s (%s) from module %s", weak ? " (weak)" : "", m->name,
              lib ? lib : "?", nid, name ? name : "?", modname ? modname : "?");
-    return unresolved_stub(lib ? lib : "?", nid);
+    return unresolved_stub(lib ? lib : "?", nid, ret, false);
 }

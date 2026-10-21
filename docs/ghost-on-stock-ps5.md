@@ -89,6 +89,7 @@ python3 ghostldr/host/run.py boot --app-root ghostfs --snap
 
 From a release zip (prebuilt core, no LLVM), add `--no-build`.
 
+- **Extension:** run.py serves `build/ghostldr/ext.bin` (the NID table and extra HLE code) on TCP 18195, and the core fetches it before touching the title. Without it, the boot stops there with `ext: ...` in the log. See [ghostldr/native/ext/README.md](../ghostldr/native/ext/README.md).
 - **Logging:** the core logs to `build/ghostldr/run.log` (UDP 18194 to this computer). Expect `ghostfs: CUSA11456, 40116 entries ...`, then `ghostfs: mounted GHOST000 ...` and the boot progress.
 - **Load times:** the first load reads several GiB from the containers, so the title screen and the first world load take longer than from an internal drive.
 - **Saves:** Ghost's saves go into a separate container, **GHOSTSAVE**, which is created on the first save. SWRR's own save is never touched.

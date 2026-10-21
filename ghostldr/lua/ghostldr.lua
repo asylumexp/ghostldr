@@ -6,6 +6,11 @@
 --   GHOSTLDR_LOG_IP / GHOSTLDR_LOG_PORT   UDP log sink
 --   GHOSTLDR_FLAGS      1 = probe only
 --   GHOSTLDR_APP_ROOT   path of the title's app0 directory
+--   GHOSTLDR_EXT_PORT / GHOSTLDR_EXT_SIZE / GHOSTLDR_EXT_CRC
+--                       the runtime extension (build/ghostldr/ext.bin, with the
+--                       NID table): run.py serves it over TCP on the log IP;
+--                       size 0 = none.  This script only connects the socket:
+--                       the core reads the blob itself and checks size and CRC.
 
 local function fail(msg)
     send_notification("ghostldr: " .. msg)
@@ -70,7 +75,30 @@ write8(log_addr + 1, AF_INET)
 write16(log_addr + 2, ((GHOSTLDR_LOG_PORT << 8) | (GHOSTLDR_LOG_PORT >> 8)) & 0xFFFF)
 write32(log_addr + 4, u32le_ip(GHOSTLDR_LOG_IP))
 
--- 6. boot context (field order must match struct boot_ctx in ghost.h)
+-- 6. extension socket (created through the compiler like the log socket)
+local ext_fd = -1
+if (GHOSTLDR_EXT_SIZE or 0) > 0 then
+    local sa, tv = malloc(16), malloc(16)
+    for i = 0, 15 do write8(sa + i, 0) end
+    write8(sa + 1, AF_INET)
+    write16(sa + 2, ((GHOSTLDR_EXT_PORT << 8) | (GHOSTLDR_EXT_PORT >> 8)) & 0xFFFF)
+    write32(sa + 4, u32le_ip(GHOSTLDR_LOG_IP))
+    write64(tv, 15)     -- SO_RCVTIMEO: a stalled transfer fails instead of hanging the core
+    write64(tv + 8, 0)
+    ext_fd = create_socket(AF_INET, SOCK_STREAM, 0)
+    if ext_fd >= 0 then
+        syscall.setsockopt(ext_fd, SOL_SOCKET, 0x1006, tv, 16)
+        local rc = syscall.connect(ext_fd, sa, 16)
+        if rc ~= 0 then
+            send_notification(string.format("ghostldr: extension server %s:%d: connect failed (%s)",
+                GHOSTLDR_LOG_IP, GHOSTLDR_EXT_PORT, get_error_string()))
+            syscall.close(ext_fd)
+            ext_fd = -1
+        end
+    end
+end
+
+-- 7. boot context (field order must match struct boot_ctx in ghost.h)
 local fields = {
     0x3130305244484c47, 0, EBOOT_BASE, SCE_KERNEL_DLSYM, EBOOT_BASE + 0x31aa9,
     LIBKERNEL_HANDLE, 0, log_fd, log_addr,
@@ -91,7 +119,7 @@ local fields = {
 local ctx = malloc(0x200)
 for i = 0, 0x1F8, 8 do write64(ctx + i, 0) end
 for i, v in ipairs(fields) do write64(ctx + (i - 1) * 8, v) end
-write64(ctx + 8, #fields * 8 + 8 * 8)
+write64(ctx + 8, #fields * 8 + 8 * 8 + 3 * 8)    -- fields, reserved[8], ext_fd/size/crc
 local app_root = malloc(#GHOSTLDR_APP_ROOT + 1)
 write_string(app_root, GHOSTLDR_APP_ROOT)
 write64(ctx + (#fields - 2) * 8, app_root)
@@ -103,6 +131,9 @@ write64(ctx + #fields * 8 + 0x20, GHOSTLDR_GPU_HEAP_MIB or 0)
 write64(ctx + #fields * 8 + 0x28, GHOSTLDR_SLACK_MIB or 0)
 write64(ctx + #fields * 8 + 0x30, GHOSTLDR_POOL1_MIB or 0)
 write64(ctx + #fields * 8 + 0x38, GHOSTLDR_CPU_HEAP_MIB or 0)
+write64(ctx + #fields * 8 + 0x40, ext_fd)
+write64(ctx + #fields * 8 + 0x48, GHOSTLDR_EXT_SIZE or 0)
+write64(ctx + #fields * 8 + 0x50, GHOSTLDR_EXT_CRC or 0)
 
 send_notification(string.format("ghostldr: core at %x, calling", rx))
 local ret = func_wrap(rx)(ctx)

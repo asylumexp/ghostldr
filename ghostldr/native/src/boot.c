@@ -48,6 +48,10 @@ int ghost_boot(void)
     char path[512];
     logf("boot: app root %s", root);
     crash_install();
+    /* the extension carries the NID table: without it nothing resolves, so
+     * stop before anything touches the title or SWRR's state */
+    if (ext_fetch() != 0)
+        return -7;
     if (strcmp(root, "ghostfs") == 0) {
         /* the title's files live in SWRR save containers (no kernel exploit) */
         if (gfs_init() != 0)
@@ -101,12 +105,15 @@ int ghost_boot(void)
         return -3;
     logf("boot: code region %lx-%lx, main at %lx, image end %lx", code_lo, code_hi, cursor,
          cursor + g_main_mod->image_size);
+    if (ext_start() != 0)
+        return -8;
     for (struct module *m = g_modules; m; m = m->next)
         module_finish(m);
     tls_setup(g_main_mod);
     for (struct module *m = g_modules; m; m = m->next)
         if (module_relocate(m) != 0)
             return -4;
+    ext_boot_done();
     for (struct module *m = g_modules; m; m = m->next)
         if (module_write_text(m) != 0)
             return -5;
