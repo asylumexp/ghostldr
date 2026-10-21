@@ -58,4 +58,9 @@ const struct ghost_api g_ghost_api = {
     .hle_lookup = hle_lookup,
     .title_id = title_id,
     .path_remap_add = path_remap_add,
+    .gfs_mount_user = gfs_mount_user,
+    .gfs_slot_reserve = gfs_slot_reserve,
+    .gfs_slot_release = gfs_slot_release,
+    .gfs_title = gfs_title,
+    .remap_hook_add = remap_hook_add,
 };

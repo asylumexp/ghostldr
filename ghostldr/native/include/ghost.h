@@ -301,6 +301,11 @@ int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16]);
 int gfs_umount(const char mount_point[16], u32 max_ms);
 const char *gfs_save_name(void);                        /* <prefix>SAVE */
 const char *title_id(void);                             /* the index's title ID, "" if unknown */
+/* the save data family (ext/src/hle_savedata.c) */
+int gfs_mount_user(s32 user, const char *dirname, int mode, u64 blocks, char mount_point[16], u64 *required_blocks);
+int gfs_slot_reserve(void);                             /* 0, or -1: no real mount slot to spare */
+void gfs_slot_release(void);
+const char *gfs_title(void);                            /* the index's title ID, or NULL */
 int vfs_open(const char *path, int flags, int mode);
 s64 vfs_read(int fd, void *buf, u64 n);
 s64 vfs_lseek(int fd, s64 off, int whence);
@@ -418,6 +423,7 @@ const char *remap_path(const char *path, char *buf, size_t size);
 /* more title path namespaces (registered by the extension's families during
  * ext_init): remap_path asks fn about paths that start with prefix */
 int path_remap_add(const char *prefix, const char *(*fn)(const char *path, char *buf, size_t size));
+int remap_hook_add(const char *(*fn)(const char *path, char *buf, size_t size)); /* 0, or -1: table full */
 
 /* ---- executable arena (arena.c) ---- */
 int arena_init(void);

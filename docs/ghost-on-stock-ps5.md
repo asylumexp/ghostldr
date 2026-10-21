@@ -79,7 +79,7 @@ python3 ghostldr/host/gfs_install.py --title CUSA12345
 - **Space:** before sending, the installer checks that the new containers fit. If they don't, it stops and changes nothing: free space on the PS5, or remove a title.
 - **What is installed:** `gfs_install.py --list`.
 - **Removing a title:** `gfs_install.py --remove CUSA12345` deletes its data containers and index. Its progress (`<prefix>SAVE`, GHOSTSAVE for Ghost) stays unless you add `--remove-saves`. SWRR's own save is never touched.
-- **Progress:** each title keeps its progress in its own `<prefix>SAVE` container (the new title gets `G12345SAVE`).
+- **Progress:** each title keeps its progress in its own `<prefix>SAVE` container (the new title gets `G12345SAVE`). A title that mounts save directories (most games, unlike Ghost) also gets one container per directory, `<prefix>D001SAVE` and up, listed in `<prefix>SAVE`'s catalogue; save data memory too big for `<prefix>SAVE` goes to `<prefix>M<slot>SAVE`. The installer never deletes these unless asked, and the receiver refuses to.
 - **Other titles are untested:** ghostldr is title-agnostic, but only Ghost has been played. [compatibility.md](compatibility.md) covers bringing one up: reading the log, profiles and HLE rules.
 - Names and formats: [ghostfs-catalogue.md](ghostfs-catalogue.md).
 

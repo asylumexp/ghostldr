@@ -91,6 +91,11 @@ extern const struct ghost_api *G HIDDEN;
 #define hle_lookup G->hle_lookup
 #define title_id G->title_id
 #define path_remap_add G->path_remap_add
+#define gfs_mount_user G->gfs_mount_user
+#define gfs_slot_reserve G->gfs_slot_reserve
+#define gfs_slot_release G->gfs_slot_release
+#define gfs_title G->gfs_title
+#define remap_hook_add G->remap_hook_add
 
 /* One family per file: its HLE table, its library policies and an optional
  * int init(void), run by ext_init first (nonzero: the family is skipped). */

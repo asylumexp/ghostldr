@@ -49,7 +49,7 @@ $(OUT)/core.bin: $(OUT)/core.elf
 	@python3 ../tools/core_info.py $< $@
 
 # EXT_CFLAGS: build switches for extension families (e.g. -DNPO_PERSONA_A=1)
-$(OUT)/ext/%.o: ext/src/%.c ext/include/ext.h $(wildcard ext/src/*.h) $(HEADERS)
+$(OUT)/ext/%.o: ext/src/%.c $(wildcard ext/include/*.h) $(wildcard ext/src/*.h) $(HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(EXT_CFLAGS) -Iext/include -c $< -o $@
 

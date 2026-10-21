@@ -102,6 +102,15 @@ struct ghost_api {
     /* remap_path asks fn about title paths starting with prefix; fn returns
      * the host path (in buf) or NULL.  Only during ext_init (a family's init). */
     int (*path_remap_add)(const char *prefix, const char *(*fn)(const char *path, char *buf, size_t size));
+    /* save data family (ext/src/hle_savedata.c): real save containers for a
+     * given user, real mount slots taken from ghostfs's data containers, the
+     * installed title's ID, and path translations ahead of remap_path's own */
+    int (*gfs_mount_user)(s32 user, const char *dirname, int mode, u64 blocks, char mount_point[16],
+                          u64 *required_blocks);
+    int (*gfs_slot_reserve)(void);
+    void (*gfs_slot_release)(void);
+    const char *(*gfs_title)(void);
+    int (*remap_hook_add)(const char *(*fn)(const char *path, char *buf, size_t size));
 };
 
 /* ---- what the extension registers and returns ---- */
