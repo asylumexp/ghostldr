@@ -355,9 +355,10 @@ static u32 sdk(void)
 {
     if (!g_sdk) {
         const u8 *pp = g_main_mod ? (const u8 *)g_main_mod->proc_param : NULL;
-        g_sdk = 0xFFFFFFFFu;
+        u32 v = 0xFFFFFFFFu;
         if (pp && *(const u64 *)pp >= 0x18 && *(const u32 *)(pp + 8) == 0x4942524F) /* "ORBI" */
-            g_sdk = *(const u32 *)(pp + 0x10);
+            v = *(const u32 *)(pp + 0x10);
+        g_sdk = v;
     }
     return g_sdk;
 }
@@ -571,11 +572,17 @@ static u8 *app_file(const char *rel, u32 max, u32 *size)
     return data;
 }
 
+static volatile int g_title_lock;
+
 static void title_info(void)
 {
-    if (g_title_done)
+    if (__atomic_load_n(&g_title_done, __ATOMIC_ACQUIRE))
         return;
-    g_title_done = true;
+    spin_lock(&g_title_lock);
+    if (g_title_done) {
+        spin_unlock(&g_title_lock);
+        return;
+    }
     const char *t = gfs_title();
     if (t)
         strlcpy(g_title_id, t, sizeof(g_title_id));
@@ -587,6 +594,8 @@ static void title_info(void)
         sfo_get(sfo, n, "TITLE", g_title_name, sizeof(g_title_name));
         page_free(sfo, n);
     }
+    __atomic_store_n(&g_title_done, true, __ATOMIC_RELEASE);
+    spin_unlock(&g_title_lock);
     logf("savedata: title %s (%s), SDK %x", g_title_id[0] ? g_title_id : "?", g_title_name[0] ? g_title_name : "-",
          sdk());
 }

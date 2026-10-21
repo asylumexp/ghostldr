@@ -76,7 +76,7 @@ python3 ghostldr/host/gfs_install.py --title CUSA12345
 ```
 
 - **What gets deleted:** the installer reads the console's GFSINDEX, sees a different title, and deletes that title's data containers and index before sending the new one.
-- **What stays:** each title's progress lives in its own `<prefix>SAVE` container, such as GHOSTSAVE for Ghost (the new title gets `G12345SAVE`). The installer never deletes these, and the receiver refuses to. Switching back later reinstalls the data, about an hour, and the old progress is still there.
+- **What stays:** each title's progress lives in its own `<prefix>SAVE` container, such as GHOSTSAVE for Ghost (the new title gets `G12345SAVE`). A title that mounts save directories (most games, unlike Ghost) also gets one container per directory, `<prefix>D001SAVE` and up, listed in `<prefix>SAVE`'s catalogue; save data memory too big for `<prefix>SAVE` goes to `<prefix>M<slot>SAVE`. The installer never deletes these, and the receiver refuses to. Switching back later reinstalls the data, about an hour, and the old progress is still there.
 - **Ghost-only tuning:** ghostldr's memory plan and diagnostics are written for Ghost (`budget.c`, `hooks.c`), so another title needs its own work before it boots.
 
 ## 4. Boot Ghost
