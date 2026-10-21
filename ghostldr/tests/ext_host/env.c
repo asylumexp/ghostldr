@@ -271,8 +271,14 @@ int main(int argc, char **argv)
     char *blob;
     ctx.ext_size = (u64)sys_read_file(argv[2], &blob);
     ctx.ext_fd = (u64)sys_open(argv[2]);
-    /* 64 KiB of small area, as after a 192 KiB core image */
+    /* 64 KiB of small area, as after a 192 KiB core image.  An extension
+     * bigger than the 48 KiB that leaves (with the stub reserve) takes a JIT
+     * block on the console (modes jit and tiny test that); here the area
+     * grows to fit it, so the small-area path stays tested. */
     u64 small_size = strcmp(mode, "tiny") == 0 ? 0x8000 : 0x10000;
+    const struct ext_blob *hdr = (const struct ext_blob *)blob;
+    if (small_size == 0x10000 && (u64)ctx.ext_size >= sizeof(*hdr) && hdr->image_memsz + 0x4000 > small_size)
+        small_size = ALIGN_UP(hdr->image_memsz + 0x4000, 0x4000);
     g_small = sys_map(small_size);
     sys_protect(g_small, small_size, 0);
     g_small_cur = (u64)g_small, g_small_end = (u64)g_small + small_size;
