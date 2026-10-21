@@ -41,7 +41,7 @@ DEFAULT_SRC = ROOT / "build/ghost/app0"          # where the dump goes unless --
 sys.path.insert(0, str(ROOT / "ghostldr/tools"))
 import gfs_catalog as gc  # noqa: E402
 
-TITLE_RE = re.compile(r"[A-Z0-9_-]{1,16}")
+TITLE_RE = re.compile(r"[A-Z0-9_-]{1,15}")    # 15: the 16-byte title fields keep their NUL
 NID_RE = re.compile(r"[A-Za-z0-9+-]{11}")
 
 # blob header flags (ghost.h PF_*)
@@ -247,7 +247,7 @@ def validate(p: dict) -> list[str]:
         if k in p and not isinstance(p[k], str):
             e.append(f"{k} must be a string")
     if p.get("title") and not TITLE_RE.fullmatch(p["title"]):
-        e.append(f"title {p['title']!r}: use A-Z 0-9 _ - (at most 16)")
+        e.append(f"title {p['title']!r}: use A-Z 0-9 _ - (at most 15)")
     if "eboot" in p and _keys(e, "eboot", p["eboot"], {"fingerprint"}):
         fp = p["eboot"].get("fingerprint", "")
         if fp and not re.fullmatch(r"[0-9a-fA-F]{40}", fp):

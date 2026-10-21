@@ -8,10 +8,13 @@ lists the files in the order the selected boots first opened them, skipping
 what the loader itself reads (eboot.bin, sce_module/).  Play the parts of the
 title you care about, then:
 
+    python3 ghostldr/host/run.py boot --app-root ghostfs --title CUSA12345 --trace-opens   # then play
     python3 ghostldr/host/capture_order.py --title CUSA12345 -o ghostldr/data/titles/CUSA12345-open-order.txt
-    python3 ghostldr/host/gfs_pack.py --src DIR --title CUSA12345      # with "order" set in its profile
+    python3 ghostldr/host/gfs_pack.py --src DIR --title CUSA12345 \
+        --order ghostldr/data/titles/CUSA12345-open-order.txt    # or "order" in its profile's "pack"
 
-Then reinstall (the layout changes, so gfs_install.py resends everything).
+Then reinstall (the layout changes, so gfs_install.py resends the title's
+containers; other titles are not touched).
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LOG = ROOT / "build/ghostldr/run.log"
 
 BOOT = re.compile(r"\] ghostldr core at ")
-TITLE = re.compile(r"\] (?:profile|ghostfs): ([A-Z0-9_-]{1,16})[ ,]")
+TITLE = re.compile(r"\] (?:profile|ghostfs): ([A-Z0-9_-]{1,15})[ ,]")
 GFS_OPEN = re.compile(r"\] gfs open /app0/(\S+) \(")
 OPEN = re.compile(r"\] open /app0/(\S+) \(.*\) flags [0-9a-f]+ -> ([0-9a-f]+)$")
 
