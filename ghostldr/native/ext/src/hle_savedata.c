@@ -333,29 +333,33 @@ static s64 now(void)
 
 static bool cont_backend(void) { return gfs_active(); }
 
+/* looked up once (file scope: the tests start over with them cleared) */
+static s32 g_user0 = -1;
+static u32 g_sdk;
+static char g_prefix[20], g_save_root[224];
+static bool g_title_done;
+
 static s32 initial_user(void)
 {
-    static s32 user = -1;
-    if (user < 0) {
+    if (g_user0 < 0) {
         s32 (*get)(s32 *) = host_real_in("libSceUserService", "sceUserServiceGetInitialUser");
         s32 u = -1;
         if (get && get(&u) == 0 && u >= 0)
-            user = u;
+            g_user0 = u;
     }
-    return user;
+    return g_user0;
 }
 
 /* the title's SDK version (procparam), 0xMMmmmppp; unknown: the newest */
 static u32 sdk(void)
 {
-    static u32 v;
-    if (!v) {
+    if (!g_sdk) {
         const u8 *pp = g_main_mod ? (const u8 *)g_main_mod->proc_param : NULL;
-        v = 0xFFFFFFFFu;
+        g_sdk = 0xFFFFFFFFu;
         if (pp && *(const u64 *)pp >= 0x18 && *(const u32 *)(pp + 8) == 0x4942524F) /* "ORBI" */
-            v = *(const u32 *)(pp + 0x10);
+            g_sdk = *(const u32 *)(pp + 0x10);
     }
-    return v;
+    return g_sdk;
 }
 
 /* ---- files ---- */
@@ -569,10 +573,9 @@ static u8 *app_file(const char *rel, u32 max, u32 *size)
 
 static void title_info(void)
 {
-    static bool done;
-    if (done)
+    if (g_title_done)
         return;
-    done = true;
+    g_title_done = true;
     const char *t = gfs_title();
     if (t)
         strlcpy(g_title_id, t, sizeof(g_title_id));
@@ -608,16 +611,15 @@ static void param_default(struct sd_param *p)
 
 static const char *prefix(void)
 {
-    static char p[20];
-    if (!p[0]) {
+    if (!g_prefix[0]) {
         const char *s = gfs_save_name();
         size_t n = s ? strlen(s) : 0;
-        if (n > 4 && n - 4 < sizeof(p) && strcmp(s + n - 4, "SAVE") == 0) {
-            memcpy(p, s, n - 4);
-            p[n - 4] = 0;
+        if (n > 4 && n - 4 < sizeof(g_prefix) && strcmp(s + n - 4, "SAVE") == 0) {
+            memcpy(g_prefix, s, n - 4);
+            g_prefix[n - 4] = 0;
         }
     }
-    return p;
+    return g_prefix;
 }
 
 /* kind 'S': <prefix>SAVE, 'D': <prefix>D<nnn>SAVE, 'M': <prefix>M<ss>SAVE */
@@ -669,15 +671,17 @@ static s32 real_mount(s32 user, const char *name, u32 mode, u64 blocks, char mp[
     return rc;
 }
 
+static s32 (*g_real_delete)(const void *);
+
 static s32 real_delete(s32 user, const char *name)
 {
-    static s32 (*del)(const void *);
+    s32 (*del)(const void *) = g_real_delete;
     if (!real_name_ok(name) || strcmp(name + strlen(prefix()), "SAVE") == 0) {
         logf("savedata: refusing to delete %s for real", name);
         return E_INTERNAL;
     }
     if (!del)
-        del = host_real_in("libSceSaveData", "sceSaveDataDelete");
+        del = g_real_delete = host_real_in("libSceSaveData", "sceSaveDataDelete");
     if (!del)
         return E_INTERNAL;
     char dir[32];
@@ -708,16 +712,15 @@ struct sess {
 
 static const char *save_root(void)
 {
-    static char root[224];
-    if (!root[0]) {
+    if (!g_save_root[0]) {
         const char *app = g_ctx && g_ctx->app_root ? (const char *)g_ctx->app_root : "/data";
         size_t n = strlen(app);
         while (n > 1 && app[n - 1] != '/')
             n--;
-        fmt(root, sizeof(root), "%.*ssavedata", (int)n, app);
-        kf.mkdir(root, 0777);
+        fmt(g_save_root, sizeof(g_save_root), "%.*ssavedata", (int)n, app);
+        kf.mkdir(g_save_root, 0777);
     }
-    return root;
+    return g_save_root;
 }
 
 static void user_dir(char *out, size_t size, s32 user)
