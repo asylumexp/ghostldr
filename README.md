@@ -39,7 +39,7 @@ The host tools:
 
 ## Releases
 
-A release zip is this repo plus a prebuilt core (`build/ghostldr/core.bin`, `core.json`). With it, booting needs only Python 3, no LLVM or symbol list:
+A release zip is this repo plus a prebuilt core (`build/ghostldr/core.bin`, `core.json`); [docs/using-the-release.md](docs/using-the-release.md) walks through it from download to gameplay. With it, booting needs only Python 3, no LLVM or symbol list:
 
 ```bash
 python3 ghostldr/host/run.py boot --app-root ghostfs --no-build
