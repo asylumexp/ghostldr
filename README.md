@@ -16,16 +16,18 @@ The game's files live in SWRR's own save containers, installed once over the net
 
 Start with [docs/ghost-on-stock-ps5.md](docs/ghost-on-stock-ps5.md): triggering Luac0re, the data install, and booting. Other titles: [docs/compatibility.md](docs/compatibility.md). Container names and the title catalogue: [docs/ghostfs-catalogue.md](docs/ghostfs-catalogue.md).
 
+To back up and restore saves from a browser, see [docs/manager.md](docs/manager.md): a small web manager that runs on the PS5 through Luac0re.
+
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `ghostldr/native/` | **The loader core** (C, about 6,400 lines). Runs inside SWRR from Luac0re's JIT buffer. Its runtime extension (`ext/`, see [ext/README.md](ghostldr/native/ext/README.md)) carries the NID table and more HLE code, and is fetched from the computer at boot. |
 | `ghostldr/host/` | **Computer-side tools** (Python). |
-| `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the save resigner, and the sandbox/save probes. |
+| `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the web manager, the save resigner, and the sandbox/save probes. |
 | `ghostldr/tools/` | **Build and analysis helpers:** ELF/NID parsing, the extension packer and its offline checker (`mkext.py`, `check_ext.py`), the import coverage report (`import_report.py`), disassembler, cross-references, Luac0re bundler. |
 | `ghostldr/data/` | Title profiles (`titles/<TITLE>.json` over `titles/default.json`), Ghost's file open order (file names only), and the system modules a PS4 app can load on a 13.60 PS5. |
-| `ghostldr/tests/` | Offline tests: the installer against a fake console, profiles, the pack order, the core's profile, memory-budget and ghostfs code built for the computer, the extension loader run on the built `ext.bin`, and the import report against a synthetic title. |
+| `ghostldr/tests/` | Offline tests: the installer and the web manager against fake consoles (the manager's need a desktop Lua 5.3 or 5.4), profiles, the pack order, the core's profile, memory-budget and ghostfs code built for the computer, the extension loader run on the built `ext.bin`, and the import report against a synthetic title. |
 | `host/payloads/` | **Dev-only console payloads** (ps5-payload-sdk), for a jailbroken console: launch or close SWRR (US or EU), unjail it, save watcher, ps, df, module dump. |
 | `tools/fetch_deps.sh` | Fetches the public build inputs (see Setup). |
 
@@ -43,6 +45,7 @@ The host tools:
 - **`run.py`:** build the core, send it, and log the run.
 - **`gfs_pack.py` and `gfs_install.py`:** lay out and install titles side by side, checking free space and resuming interrupted installs (`--list`, `--remove TITLE`).
 - **`profiles.py`:** check and inspect title profiles. **`capture_order.py`:** turn a boot log into a title's file open order.
+- **`manager.py`:** start the web manager on the PS5: download, restore, copy and delete saves, and remove installed titles, from a browser.
 - **`resign_save.py`:** make a Luac0re save for another PSN account, for the SWRR region it runs on (US or EU).
 - **`recorder.py`:** crash and klog recorder.
 - **`console.py`:** finds the PS5 on the network.
