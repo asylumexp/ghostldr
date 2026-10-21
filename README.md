@@ -2,7 +2,9 @@
 
 Runs a PS4 game backup, Ghost of Tsushima (CUSA11456 v2.18), inside *Star Wars Racer Revenge* (SWRR, PS4 US CUSA03474 or EU CUSA03492) on a PS5. It goes through [Luac0re](https://github.com/Gezine/Luac0re)'s userland JIT exploit, with no kernel exploit and no jailbreak.
 
-https://github.com/user-attachments/assets/6bcab55f-559f-438c-81f5-7104bc5003a3
+[![Ghost of Tsushima gameplay running inside SWRR on a stock PS5 (click for the full video)](docs/media/ghostldr-demo-preview.gif)](docs/media/ghostldr-demo.mp4)
+
+[Full demo, 3½ minutes (MP4)](docs/media/ghostldr-demo.mp4): Luac0re's loader, the ghostldr send, then Ghost booting from the save containers into gameplay on a stock 13.60 PS5.
 
 The game's files live in SWRR's own save containers, installed once over the network ("ghostfs").
 
