@@ -35,7 +35,8 @@ static struct {
 } g_rt_over[4];
 static u32 g_nrt_over;
 
-u32 dlg_policy(u32 id, u32 dflt, u64 caller_off, const char **text)
+/* the override for (lib, call site): its answer, or -1 */
+static s32 find_override(u32 id, u64 caller_off, const char **text)
 {
     *text = NULL;
     u64 size = g_main_mod ? g_main_mod->image_size : 0;
@@ -49,6 +50,14 @@ u32 dlg_policy(u32 id, u32 dflt, u64 caller_off, const char **text)
             *text = g_rt_over[i].text[0] ? g_rt_over[i].text : NULL;
             return g_rt_over[i].answer;
         }
+    return -1;
+}
+
+u32 dlg_policy(u32 id, u32 dflt, u64 caller_off, const char **text)
+{
+    s32 a = find_override(id, caller_off, text);
+    if (a >= 0)
+        return (u32)a;
     if ((g_ctx->flags & CTX_FLAG_DIALOG_CANCEL) && dflt != ANS_HOLD)
         return ANS_CANCEL;
     return dflt;
@@ -201,8 +210,9 @@ u32 dlg_start(struct dlg *d, u32 dflt, u64 ra, const char *what, const char *tex
     d->result = 0, d->button = 0;
     spin_unlock(&d->lock);
     dlg_text(t, sizeof(t), text);
+    const char *why = a == dflt ? "auto" : find_override(d->id, off, &otext) >= 0 ? "override" : "--dialog-cancel";
     logf("dialog: %s %s%s%s%s -> %s (%s) @%s", d->name, what, text ? " \"" : "", t, text ? "\"" : "",
-         dlg_answer_name(a), a == dflt ? "auto" : "override", where);
+         dlg_answer_name(a), why, where);
     return a;
 }
 
