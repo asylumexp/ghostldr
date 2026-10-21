@@ -20,12 +20,29 @@ const struct ghost_api *G;
 
 #include "../../native/ext/src/hle_savedata.c"
 
+/* what a PS4 returns (SCE_SAVE_DATA_ERROR_*, kernel errors), spelled out here
+ * so the expectations do not follow the family's own constants */
+#define W_PARAMETER ((s32)0x809F0000)
+#define W_NOT_INITIALIZED ((s32)0x809F0001)
+#define W_BUSY ((s32)0x809F0003)
+#define W_NOT_MOUNTED ((s32)0x809F0004)
+#define W_EXISTS ((s32)0x809F0007)
+#define W_NOT_FOUND ((s32)0x809F0008)
+#define W_NO_SPACE_FS ((s32)0x809F000A)
+#define W_INTERNAL ((s32)0x809F000B)
+#define W_MOUNT_FULL ((s32)0x809F000C)
+#define W_BAD_MOUNTED ((s32)0x809F000D)
+#define W_BROKEN ((s32)0x809F000F)
+#define W_INVALID_LOGIN_USER ((s32)0x809F0011)
+#define W_MEMORY_NOT_READY ((s32)0x809F0012)
+#define W_ENOENT ((s32)0x80020002)
+#define W_ENOSPC ((s32)0x8002001C)
+#define W_EROFS ((s32)0x8002001E)
+
 /* savedata_os.c */
 void *os_opendir(const char *p);
 int os_readdir(void *d, char *name, int cap);
 void os_closedir(void *d);
-
-#define K_EROFS ((s32)0x8002001E)
 
 static int g_failed;
 static char g_tmp[256];
@@ -190,37 +207,37 @@ static void mount_ok(s32 user, const char *dir, u64 blocks, u32 mode, char mp[16
 static void test_errors_before_and_args(void)
 {
     struct sd_mount_result r;
-    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 100, MODE_CREATE | MODE_RDWR, &r), E_NOT_INITIALIZED,
+    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 100, MODE_CREATE | MODE_RDWR, &r), W_NOT_INITIALIZED,
               "mount before Initialize: NOT_INITIALIZED");
     struct sd_mem_setup2 ms;
     memset(&ms, 0, sizeof(ms));
     ms.user = FAKE_USER0, ms.memory_size = 0x1000;
-    EXPECT_RC(sd_setup_memory2(&ms, NULL), E_NOT_INITIALIZED, "save memory setup before Initialize");
-    EXPECT_RC(umount("/savedata0"), E_NOT_INITIALIZED, "unmount before Initialize");
-    EXPECT_RC(sd_terminate(), E_NOT_INITIALIZED, "Terminate before Initialize");
+    EXPECT_RC(sd_setup_memory2(&ms, NULL), W_NOT_INITIALIZED, "save memory setup before Initialize");
+    EXPECT_RC(umount("/savedata0"), W_NOT_INITIALIZED, "unmount before Initialize");
+    EXPECT_RC(sd_terminate(), W_NOT_INITIALIZED, "Terminate before Initialize");
     EXPECT_RC(sd_initialize(NULL), 0, "Initialize3(NULL)");
     EXPECT_RC(sd_initialize(NULL), 0, "Initialize again");
-    EXPECT_RC(sd_mount2(NULL, &r), E_PARAMETER, "mount NULL: PARAMETER 0x809F0000, not NOT_INITIALIZED");
-    EXPECT_RC(mount2(FAKE_USER0, NULL, 100, MODE_RDWR, &r), E_PARAMETER, "mount without a dirName");
-    EXPECT_RC(mount2(-1, "SAVE0", 100, MODE_RDWR, &r), E_INVALID_LOGIN_USER, "mount for user -1");
-    EXPECT_RC(mount2(FAKE_USER0, "", 100, MODE_RDWR, &r), E_PARAMETER, "empty dirName");
-    EXPECT_RC(mount2(FAKE_USER0, ".hidden", 100, MODE_RDWR, &r), E_PARAMETER, "dirName starting with a dot");
-    EXPECT_RC(mount2(FAKE_USER0, "a/b", 100, MODE_RDWR, &r), E_PARAMETER, "dirName with a slash");
+    EXPECT_RC(sd_mount2(NULL, &r), W_PARAMETER, "mount NULL: PARAMETER 0x809F0000, not NOT_INITIALIZED");
+    EXPECT_RC(mount2(FAKE_USER0, NULL, 100, MODE_RDWR, &r), W_PARAMETER, "mount without a dirName");
+    EXPECT_RC(mount2(-1, "SAVE0", 100, MODE_RDWR, &r), W_INVALID_LOGIN_USER, "mount for user -1");
+    EXPECT_RC(mount2(FAKE_USER0, "", 100, MODE_RDWR, &r), W_PARAMETER, "empty dirName");
+    EXPECT_RC(mount2(FAKE_USER0, ".hidden", 100, MODE_RDWR, &r), W_PARAMETER, "dirName starting with a dot");
+    EXPECT_RC(mount2(FAKE_USER0, "a/b", 100, MODE_RDWR, &r), W_PARAMETER, "dirName with a slash");
     struct sd_mount2 m;
     char full[32];
     memset(full, 'A', sizeof(full));
     memset(&m, 0, sizeof(m));
     m.user = FAKE_USER0, m.dir = full, m.blocks = 100, m.mode = MODE_RDWR;
-    EXPECT_RC(sd_mount2(&m, &r), E_PARAMETER, "dirName without a NUL in 32 bytes");
-    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 100, 0, &r), E_PARAMETER, "mode 0");
-    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 100, MODE_CREATE | MODE_CREATE2 | MODE_RDWR, &r), E_PARAMETER,
+    EXPECT_RC(sd_mount2(&m, &r), W_PARAMETER, "dirName without a NUL in 32 bytes");
+    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 100, 0, &r), W_PARAMETER, "mode 0");
+    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 100, MODE_CREATE | MODE_CREATE2 | MODE_RDWR, &r), W_PARAMETER,
               "CREATE and CREATE2 together");
-    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 32769, MODE_CREATE | MODE_RDWR, &r), E_PARAMETER,
+    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 32769, MODE_CREATE | MODE_RDWR, &r), W_PARAMETER,
               "creating more than 32768 blocks");
-    EXPECT_RC(umount("/savedata3"), E_NOT_FOUND, "unmounting what is not mounted: NOT_FOUND");
+    EXPECT_RC(umount("/savedata3"), W_NOT_FOUND, "unmounting what is not mounted: NOT_FOUND");
     struct sd_mount_info mi;
-    EXPECT_RC(sd_get_mount_info("/savedata0", &mi), E_NOT_MOUNTED, "GetMountInfo of nothing: NOT_MOUNTED");
-    EXPECT_RC(sd_get_mount_info("/savedata0", NULL), E_PARAMETER, "GetMountInfo without info");
+    EXPECT_RC(sd_get_mount_info("/savedata0", &mi), W_NOT_MOUNTED, "GetMountInfo of nothing: NOT_MOUNTED");
+    EXPECT_RC(sd_get_mount_info("/savedata0", NULL), W_PARAMETER, "GetMountInfo without info");
     expect(fake_violations() == 0 && !fake_cont_exists(FAKE_USER0, "GTESTSAVE"),
            "argument errors touch no container");
 }
@@ -231,7 +248,7 @@ static void test_first_boot_create_write_commit(void)
     char mp[16];
     s32 rc;
     char names[4][32];
-    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 0, MODE_RDWR, &r), E_NOT_FOUND, "first boot: mount RDWR is NOT_FOUND");
+    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 0, MODE_RDWR, &r), W_NOT_FOUND, "first boot: mount RDWR is NOT_FOUND");
     expect(search(FAKE_USER0, "SAVE%", 0, 0, names, 4, NULL, NULL, NULL, &rc) == 0 && rc == 0,
            "first boot: DirNameSearch finds nothing");
     expect(!fake_cont_exists(FAKE_USER0, "GTESTSAVE"), "reading creates no <prefix>SAVE");
@@ -260,7 +277,7 @@ static void test_first_boot_create_write_commit(void)
 
     int fd = t_open("/savedata0/sub/data.bin", O_RDONLY);
     expect(fd >= 0, "the title keeps a file open");
-    EXPECT_RC(umount(mp), E_BUSY, "unmount with a file open: BUSY");
+    EXPECT_RC(umount(mp), W_BUSY, "unmount with a file open: BUSY");
     EXPECT_RC(sd_get_mount_info(mp, &mi), 0, "still mounted after BUSY");
     t_close(fd);
     EXPECT_RC(umount(mp), 0, "unmount once the file is closed");
@@ -269,29 +286,29 @@ static void test_first_boot_create_write_commit(void)
            "the unmount committed the title's file");
     expect(!fake_cont_mounted(FAKE_USER0, "GTESTD001SAVE") && fake_reserved() == 0,
            "the real container and its slot are released");
-    EXPECT_RC(umount(mp), E_NOT_FOUND, "a second unmount: NOT_FOUND");
+    EXPECT_RC(umount(mp), W_NOT_FOUND, "a second unmount: NOT_FOUND");
     s64 size;
-    expect(t_stat("/savedata0/sub/data.bin", &size) == K_ENOENT, "its paths are ENOENT once unmounted");
+    expect(t_stat("/savedata0/sub/data.bin", &size) == W_ENOENT, "its paths are ENOENT once unmounted");
 }
 
 static void test_param_icon_and_modes(void)
 {
     struct sd_mount_result r;
     char mp[16];
-    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 100, MODE_CREATE | MODE_RDWR, &r), E_EXISTS,
+    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 100, MODE_CREATE | MODE_RDWR, &r), W_EXISTS,
               "CREATE on an existing save: EXISTS");
     mount_ok(FAKE_USER0, "SAVE0", 0, MODE_CREATE2 | MODE_RDWR, mp, 0, "CREATE2 on an existing save mounts it");
     u8 back[16];
     expect(t_read_file("/savedata0/sub/data.bin", back, 16) == 16 && back[1] == 7, "the committed file is there");
-    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 0, MODE_RDWR, &r), E_BUSY, "mounting it twice: BUSY");
+    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 0, MODE_RDWR, &r), W_BUSY, "mounting it twice: BUSY");
 
     EXPECT_RC(sd_param_set(mp, 1, "My Title", 9), 0, "SetParam TITLE");
     EXPECT_RC(sd_param_set(mp, 2, "Chapter 2", 10), 0, "SetParam SUB_TITLE");
     u32 up = 0x77;
     EXPECT_RC(sd_param_set(mp, 4, &up, 4), 0, "SetParam USER_PARAM");
-    EXPECT_RC(sd_param_set(mp, 5, &up, 4), E_PARAMETER, "SetParam MTIME: PARAMETER");
-    EXPECT_RC(sd_param_set(mp, 4, &up, 2), E_PARAMETER, "SetParam USER_PARAM with 2 bytes");
-    EXPECT_RC(sd_param_set("/savedata9", 1, "x", 2), E_NOT_MOUNTED, "SetParam on nothing: NOT_MOUNTED");
+    EXPECT_RC(sd_param_set(mp, 5, &up, 4), W_PARAMETER, "SetParam MTIME: PARAMETER");
+    EXPECT_RC(sd_param_set(mp, 4, &up, 2), W_PARAMETER, "SetParam USER_PARAM with 2 bytes");
+    EXPECT_RC(sd_param_set("/savedata9", 1, "x", 2), W_NOT_MOUNTED, "SetParam on nothing: NOT_MOUNTED");
     struct sd_param p;
     u64 got = 0;
     EXPECT_RC(sd_param_get(mp, 0, &p, sizeof(p), &got), 0, "GetParam ALL");
@@ -301,8 +318,8 @@ static void test_param_icon_and_modes(void)
     char small[4];
     EXPECT_RC(sd_param_get(mp, 1, small, sizeof(small), &got), 0, "GetParam TITLE into 4 bytes");
     expect(!strcmp(small, "My ") && got == 4, "a TITLE cut to 3 characters, gotSize 4");
-    EXPECT_RC(sd_param_get(mp, 0, &p, 0x52F, &got), E_PARAMETER, "GetParam ALL into 0x52F bytes");
-    EXPECT_RC(sd_param_get(mp, 6, &p, sizeof(p), &got), E_PARAMETER, "GetParam type 6");
+    EXPECT_RC(sd_param_get(mp, 0, &p, 0x52F, &got), W_PARAMETER, "GetParam ALL into 0x52F bytes");
+    EXPECT_RC(sd_param_get(mp, 6, &p, sizeof(p), &got), W_PARAMETER, "GetParam type 6");
     s64 mtime = 0;
     EXPECT_RC(sd_param_get(mp, 5, &mtime, 8, NULL), 0, "GetParam MTIME without gotSize");
 
@@ -314,7 +331,7 @@ static void test_param_icon_and_modes(void)
     icon.buf = png, icon.buf_size = sizeof(png), icon.data_size = sizeof(png);
     EXPECT_RC(sd_save_icon(mp, &icon), 0, "SaveIcon");
     icon.buf = NULL;
-    EXPECT_RC(sd_save_icon(mp, &icon), E_PARAMETER, "SaveIcon without a buffer");
+    EXPECT_RC(sd_save_icon(mp, &icon), W_PARAMETER, "SaveIcon without a buffer");
     memset(&icon, 0, sizeof(icon));
     icon.buf = icon_back, icon.buf_size = sizeof(icon_back);
     EXPECT_RC(sd_load_icon(mp, &icon), 0, "LoadIcon");
@@ -326,12 +343,12 @@ static void test_param_icon_and_modes(void)
     expect(fake_read_host(path, icon_back, sizeof(icon_back)) == sizeof(png), "the icon is kept in GTESTSAVE/icons");
 
     mount_ok(FAKE_USER0, "SAVE0", 0, MODE_RDONLY, mp, 0, "read-only mount");
-    EXPECT_RC(sd_param_set(mp, 1, "x", 2), E_BAD_MOUNTED, "SetParam read-only: BAD_MOUNTED");
+    EXPECT_RC(sd_param_set(mp, 1, "x", 2), W_BAD_MOUNTED, "SetParam read-only: BAD_MOUNTED");
     icon.buf = png, icon.buf_size = sizeof(png), icon.data_size = sizeof(png);
-    EXPECT_RC(sd_save_icon(mp, &icon), E_BAD_MOUNTED, "SaveIcon read-only: BAD_MOUNTED");
+    EXPECT_RC(sd_save_icon(mp, &icon), W_BAD_MOUNTED, "SaveIcon read-only: BAD_MOUNTED");
     EXPECT_RC(sd_param_get(mp, 0, &p, sizeof(p), NULL), 0, "GetParam read-only");
     expect(!strcmp(p.title, "My Title") && p.user_param == 0x77, "param survived the unmount (catalogue)");
-    EXPECT_RC(t_write_file("/savedata0/new.bin", "x", 1), K_EROFS, "the title cannot write a read-only mount");
+    EXPECT_RC(t_write_file("/savedata0/new.bin", "x", 1), W_EROFS, "the title cannot write a read-only mount");
     memset(&icon, 0, sizeof(icon));
     icon.buf = icon_back, icon.buf_size = 100;
     EXPECT_RC(sd_load_icon(mp, &icon), 0, "LoadIcon from the catalogue's icon file");
@@ -385,11 +402,11 @@ static void test_search(void)
     expect(search(FAKE_USER0, NULL, 0, 0, names, 2, &set, NULL, NULL, &rc) == 4 && set == 2, "hitNum 4, setNum 2");
     expect(search(FAKE_USER0, NULL, 0, 0, NULL, 0, &set, NULL, NULL, &rc) == 4 && set == 0, "a count-only search");
     search(FAKE_USER0, NULL, 4, 0, names, 8, NULL, NULL, NULL, &rc);
-    EXPECT_RC(rc, E_PARAMETER, "search key 4: PARAMETER");
+    EXPECT_RC(rc, W_PARAMETER, "search key 4: PARAMETER");
     search(FAKE_USER0, NULL, 0, 2, names, 8, NULL, NULL, NULL, &rc);
-    EXPECT_RC(rc, E_PARAMETER, "search order 2: PARAMETER");
+    EXPECT_RC(rc, W_PARAMETER, "search order 2: PARAMETER");
     search(-1, NULL, 0, 0, names, 8, NULL, NULL, NULL, &rc);
-    EXPECT_RC(rc, E_INVALID_LOGIN_USER, "search for user -1");
+    EXPECT_RC(rc, W_INVALID_LOGIN_USER, "search for user -1");
 
     struct sd_search_cond c;
     struct sd_search_result r;
@@ -428,22 +445,22 @@ static void test_delete_and_vanished(void)
     memset(&d, 0, sizeof(d));
     d.user = FAKE_USER0, d.dir = dn("SAVE1");
     mount_ok(FAKE_USER0, "SAVE1", 0, MODE_RDWR, mp, 0, "mount SAVE1");
-    EXPECT_RC(sd_delete(&d), E_BUSY, "deleting a mounted save: BUSY");
+    EXPECT_RC(sd_delete(&d), W_BUSY, "deleting a mounted save: BUSY");
     umount(mp);
     EXPECT_RC(sd_delete(&d), 0, "Delete SAVE1");
     expect(!fake_cont_exists(FAKE_USER0, "GTESTD002SAVE"), "its container is deleted for real");
     expect(search(FAKE_USER0, "SAVE1", 0, 0, names, 8, NULL, NULL, NULL, &rc) == 0, "it is gone from searches");
-    EXPECT_RC(sd_delete(&d), E_NOT_FOUND, "deleting it again: NOT_FOUND");
+    EXPECT_RC(sd_delete(&d), W_NOT_FOUND, "deleting it again: NOT_FOUND");
     d.dir = NULL;
-    EXPECT_RC(sd_delete(&d), E_PARAMETER, "Delete without a dirName");
+    EXPECT_RC(sd_delete(&d), W_PARAMETER, "Delete without a dirName");
     char other[16] = "CUSA00001";
     d.dir = dn("SAVE0"), d.title_id = other;
-    EXPECT_RC(sd_delete(&d), E_NOT_FOUND, "Delete of another title's save: NOT_FOUND");
+    EXPECT_RC(sd_delete(&d), W_NOT_FOUND, "Delete of another title's save: NOT_FOUND");
 
     /* the user deletes a container in the PS5's settings while SWRR is off */
     fake_cont_delete(FAKE_USER0, "GTESTD003SAVE"); /* save2 */
     crash_and_restart();
-    EXPECT_RC(mount2(FAKE_USER0, "save2", 0, MODE_RDWR, &r), E_NOT_FOUND, "a container deleted outside: NOT_FOUND");
+    EXPECT_RC(mount2(FAKE_USER0, "save2", 0, MODE_RDWR, &r), W_NOT_FOUND, "a container deleted outside: NOT_FOUND");
     expect(search(FAKE_USER0, "save2", 0, 0, names, 8, NULL, NULL, NULL, &rc) == 0,
            "and its catalogue entry is dropped");
     mount_ok(FAKE_USER0, "save2", 96, MODE_CREATE2 | MODE_RDWR, mp, 1, "CREATE2 creates it again");
@@ -460,7 +477,7 @@ static void test_delete_and_vanished(void)
     umount(mp);
 
     fake_set_broken(FAKE_USER0, "GTESTD003SAVE", true);
-    EXPECT_RC(mount2(FAKE_USER0, "SAVE9", 0, MODE_RDWR, &r), E_BROKEN, "a broken container: BROKEN");
+    EXPECT_RC(mount2(FAKE_USER0, "SAVE9", 0, MODE_RDWR, &r), W_BROKEN, "a broken container: BROKEN");
     fake_set_broken(FAKE_USER0, "GTESTD003SAVE", false);
     expect(fake_reserved() == 0, "failed mounts give their real slot back");
 }
@@ -474,7 +491,7 @@ static void test_crash_and_quota(void)
     crash_and_restart();
     mount_ok(FAKE_USER0, "SAVE0", 0, MODE_RDONLY, mp, 0, "after the crash");
     s64 size;
-    expect(t_stat("/savedata0/lost.bin", &size) == K_ENOENT && t_stat("/savedata0/sub/data.bin", &size) == 0,
+    expect(t_stat("/savedata0/lost.bin", &size) == W_ENOENT && t_stat("/savedata0/sub/data.bin", &size) == 0,
            "uncommitted writes are lost, committed ones kept");
     umount(mp);
 
@@ -490,12 +507,12 @@ static void test_crash_and_quota(void)
     struct sd_mount_info mi;
     sd_get_mount_info(mp, &mi);
     expect(mi.free_blocks == 0, "GetMountInfo: no free blocks");
-    EXPECT_RC(t_write_file("/savedata0/d.bin", big, 32768 * 3), K_ENOSPC, "past the container: ENOSPC");
+    EXPECT_RC(t_write_file("/savedata0/d.bin", big, 32768 * 3), W_ENOSPC, "past the container: ENOSPC");
     t_write_file("/savedata0/d.bin", "", 0);
     EXPECT_RC(umount(mp), 0, "a save filled to its size still commits (headroom)");
 
     fake_set_storage_cap(2000);
-    EXPECT_RC(mount2(FAKE_USER0, "HUGE", 30000, MODE_CREATE | MODE_RDWR, &r), E_NO_SPACE_FS,
+    EXPECT_RC(mount2(FAKE_USER0, "HUGE", 30000, MODE_CREATE | MODE_RDWR, &r), W_NO_SPACE_FS,
               "the console is full: NO_SPACE_FS");
     expect(r.required_blocks > 0 && r.required_blocks < 32768, "with the blocks it needs");
     fake_set_storage_cap(0);
@@ -512,7 +529,7 @@ static void test_slots(void)
         mount_ok(FAKE_USER0, name, 96, MODE_CREATE2 | MODE_RDWR, mps[i], 1, "concurrent mounts");
     }
     expect(fake_reserved() == 6 && fake_data_mounts() == 8, "6 saves held, ghostfs down to 8 data containers");
-    EXPECT_RC(mount2(FAKE_USER0, "S6", 96, MODE_CREATE2 | MODE_RDWR, &r), E_MOUNT_FULL,
+    EXPECT_RC(mount2(FAKE_USER0, "S6", 96, MODE_CREATE2 | MODE_RDWR, &r), W_MOUNT_FULL,
               "a 7th: MOUNT_FULL 0x809F000C (not NO_PERMISSION)");
     expect(fake_max_real_mounts() <= 16 && !fake_log_has("no real slot left"),
            "never more than 16 real mounts, and the service never ran out");
@@ -529,11 +546,11 @@ static void test_destruct_off_and_terminate(void)
     crash_and_restart();
     mount_ok(FAKE_USER0, "SAVE0", 0, MODE_RDWR, mp, 0, "a service refusing DESTRUCT_OFF");
     expect(fake_log_has("refuses DESTRUCT_OFF") && !(fake_last_mode() & 8), "mounts go on without it");
-    EXPECT_RC(sd_terminate(), E_BUSY, "Terminate with a save mounted: BUSY");
+    EXPECT_RC(sd_terminate(), W_BUSY, "Terminate with a save mounted: BUSY");
     umount(mp);
     fake_refuse_destruct_off(false);
     EXPECT_RC(sd_terminate(), 0, "Terminate");
-    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 0, MODE_RDWR, &r), E_NOT_INITIALIZED, "after Terminate: NOT_INITIALIZED");
+    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 0, MODE_RDWR, &r), W_NOT_INITIALIZED, "after Terminate: NOT_INITIALIZED");
     sd_initialize(NULL);
 }
 
@@ -542,8 +559,8 @@ static void test_events_and_misc(void)
     char mp[16];
     struct sd_event e;
     struct sd_mount_result r;
-    EXPECT_RC(sd_get_event_result(NULL, &e), E_NOT_FOUND, "no events: NOT_FOUND");
-    EXPECT_RC(sd_get_event_result(NULL, NULL), E_PARAMETER, "GetEventResult without an event");
+    EXPECT_RC(sd_get_event_result(NULL, &e), W_NOT_FOUND, "no events: NOT_FOUND");
+    EXPECT_RC(sd_get_event_result(NULL, NULL), W_PARAMETER, "GetEventResult without an event");
     mount_ok(FAKE_USER0, "SAVE0", 0, MODE_RDWR, mp, 0, "mount for UmountWithBackup");
     char b[16];
     memset(b, 0, sizeof(b));
@@ -553,7 +570,7 @@ static void test_events_and_misc(void)
     expect(e.type == 1 && e.error_code == 0 && e.user == FAKE_USER0 && !strcmp(e.dir, "SAVE0") &&
                !strcmp(e.title_id, "CUSA99999"),
            "event UMOUNT_BACKUP for SAVE0 of CUSA99999");
-    EXPECT_RC(sd_get_event_result(NULL, &e), E_NOT_FOUND, "one event only");
+    EXPECT_RC(sd_get_event_result(NULL, &e), W_NOT_FOUND, "one event only");
     struct sd_backup bk;
     memset(&bk, 0, sizeof(bk));
     bk.user = FAKE_USER0, bk.dir = dn("SAVE0");
@@ -561,27 +578,27 @@ static void test_events_and_misc(void)
     EXPECT_RC(sd_get_event_result(NULL, &e), 0, "Backup's event");
     expect(e.type == 2, "event BACKUP");
     bk.dir = dn("NOPE");
-    EXPECT_RC(sd_backup(&bk), E_NOT_FOUND, "Backup of nothing: NOT_FOUND");
+    EXPECT_RC(sd_backup(&bk), W_NOT_FOUND, "Backup of nothing: NOT_FOUND");
     struct sd_check_backup cb;
     memset(&cb, 0, sizeof(cb));
     cb.user = FAKE_USER0, cb.dir = dn("SAVE0");
-    EXPECT_RC(sd_check_backup(&cb), E_NOT_FOUND, "CheckBackupData: no backup kept");
+    EXPECT_RC(sd_check_backup(&cb), W_NOT_FOUND, "CheckBackupData: no backup kept");
     mount_ok(FAKE_USER0, "SAVE0", 0, MODE_RDONLY, mp, 0, "mounted");
-    EXPECT_RC(sd_check_backup(&cb), E_BUSY, "CheckBackupData of a mounted save: BUSY");
+    EXPECT_RC(sd_check_backup(&cb), W_BUSY, "CheckBackupData of a mounted save: BUSY");
     struct sd_restore_backup rb;
     memset(&rb, 0, sizeof(rb));
     rb.user = FAKE_USER0, rb.dir = dn("SAVE0");
-    EXPECT_RC(sd_restore_backup(&rb), E_BUSY, "RestoreBackupData of a mounted save: BUSY");
+    EXPECT_RC(sd_restore_backup(&rb), W_BUSY, "RestoreBackupData of a mounted save: BUSY");
     umount(mp);
-    EXPECT_RC(sd_restore_backup(&rb), E_NOT_FOUND, "RestoreBackupData: no backup");
+    EXPECT_RC(sd_restore_backup(&rb), W_NOT_FOUND, "RestoreBackupData: no backup");
 
     struct sd_transfer_mount tm;
     char tid[16] = "CUSA00001";
     memset(&tm, 0, sizeof(tm));
     tm.user = FAKE_USER0, tm.title_id = tid, tm.dir = dn("SAVE0");
-    EXPECT_RC(sd_transferring_mount(&tm, &r), E_NOT_FOUND, "TransferringMount: NOT_FOUND");
+    EXPECT_RC(sd_transferring_mount(&tm, &r), W_NOT_FOUND, "TransferringMount: NOT_FOUND");
     tm.title_id = NULL;
-    EXPECT_RC(sd_transferring_mount(&tm, &r), E_PARAMETER, "TransferringMount without a title");
+    EXPECT_RC(sd_transferring_mount(&tm, &r), W_PARAMETER, "TransferringMount without a title");
     u32 progress = 0;
     EXPECT_RC(sd_get_progress(&progress), 0, "GetProgress");
     expect(progress == 0x3F800000, "progress is 1.0f");
@@ -594,7 +611,7 @@ static void test_events_and_misc(void)
     EXPECT_RC(sd_mount1(&m1, &r), 0, "Mount (v1) with the title's own ID");
     umount(r.mount_point);
     m1.title_id = tid;
-    EXPECT_RC(sd_mount1(&m1, &r), E_NOT_FOUND, "Mount (v1) of another title: NOT_FOUND");
+    EXPECT_RC(sd_mount1(&m1, &r), W_NOT_FOUND, "Mount (v1) of another title: NOT_FOUND");
     expect(fake_violations() == 0, "nothing reached the real service with a foreign name");
 }
 
@@ -634,11 +651,11 @@ static void test_memory(void)
     g.user = st.user = sy.user = FAKE_USER0;
     d[0].buf = back, d[0].buf_size = 0x1000;
     g.data = d;
-    EXPECT_RC(sd_get_memory2(&g), E_MEMORY_NOT_READY, "Get2 before Setup2: MEMORY_NOT_READY");
+    EXPECT_RC(sd_get_memory2(&g), W_MEMORY_NOT_READY, "Get2 before Setup2: MEMORY_NOT_READY");
     st.data = d, st.data_num = 1;
-    EXPECT_RC(sd_set_memory2(&st), E_MEMORY_NOT_READY, "Set2 before Setup2");
-    EXPECT_RC(sd_sync_memory(&sy), E_MEMORY_NOT_READY, "Sync before Setup2");
-    EXPECT_RC(sd_setup_memory2(NULL, &res), E_PARAMETER, "Setup2 NULL");
+    EXPECT_RC(sd_set_memory2(&st), W_MEMORY_NOT_READY, "Set2 before Setup2");
+    EXPECT_RC(sd_sync_memory(&sy), W_MEMORY_NOT_READY, "Sync before Setup2");
+    EXPECT_RC(sd_setup_memory2(NULL, &res), W_PARAMETER, "Setup2 NULL");
 
     memset(&s, 0, sizeof(s));
     memset(&p, 0, sizeof(p));
@@ -651,7 +668,7 @@ static void test_memory(void)
     expect(cont_file("GTESTSAVE", "sdmemory_0.bin", buf, sizeof(buf)) == 0x87800 &&
                cont_file("GTESTSAVE", "sdmemory_0.param", hdr, sizeof(hdr)) == 0x530,
            "GTESTSAVE/sdmemory_0.bin (0x87800) and .param (0x530), committed");
-    EXPECT_RC(sd_setup_memory2(&s, &res), E_BUSY, "a second Setup2: BUSY");
+    EXPECT_RC(sd_setup_memory2(&s, &res), W_BUSY, "a second Setup2: BUSY");
 
     fill(buf, sizeof(buf), 1);
     d[0].buf = buf, d[0].buf_size = 0x10000, d[0].offset = 0;
@@ -665,7 +682,7 @@ static void test_memory(void)
            "Set2 is committed when it returns");
     d[0].offset = 0x80000, d[0].buf_size = 0x8000;
     st.data_num = 1, st.param = NULL;
-    EXPECT_RC(sd_set_memory2(&st), E_PARAMETER, "Set2 past the memory's size: PARAMETER");
+    EXPECT_RC(sd_set_memory2(&st), W_PARAMETER, "Set2 past the memory's size: PARAMETER");
     memset(back, 0xEE, sizeof(back));
     d[0].buf = back, d[0].buf_size = 0x9000, d[0].offset = 0x80000;
     g.data = d, g.param = &pb;
@@ -691,7 +708,7 @@ static void test_memory(void)
     EXPECT_RC(sd_setup_memory2(&s, &res), 0, "Setup2 slot 3");
     expect(cont_file("GTESTSAVE", "sdmemory_3.bin", back, 0x3000) == 0x2000, "slot 3 has its own files");
     s.slot = 16;
-    EXPECT_RC(sd_setup_memory2(&s, &res), E_PARAMETER, "slot 16: PARAMETER");
+    EXPECT_RC(sd_setup_memory2(&s, &res), W_PARAMETER, "slot 16: PARAMETER");
 
     /* the next SWRR session */
     crash_and_restart();
@@ -724,7 +741,7 @@ static void test_memory(void)
     memset(back, 0, 0x100);
     EXPECT_RC(sd_get_memory(FAKE_USER0, back, 0x100, 0), 0, "GetSaveDataMemory (v1)");
     expect(!memcmp(back, buf, 0x100), "v1 reads slot 0");
-    EXPECT_RC(sd_set_memory(FAKE_USER0, buf, 0x100, 0x87800), E_PARAMETER, "v1 write past the end");
+    EXPECT_RC(sd_set_memory(FAKE_USER0, buf, 0x100, 0x87800), W_PARAMETER, "v1 write past the end");
 }
 
 static void test_title_store(void)
@@ -768,7 +785,7 @@ static void test_hooks(void)
     struct sd_param p;
     EXPECT_RC(sd_get_param("SAVE0", &p), 0, "sd_get_param");
     expect(!strcmp(p.title, "My Title") && p.mtime > 0, "sd_get_param: the title and time");
-    EXPECT_RC(sd_get_param("NOPE", &p), E_NOT_FOUND, "sd_get_param of nothing");
+    EXPECT_RC(sd_get_param("NOPE", &p), W_NOT_FOUND, "sd_get_param of nothing");
     expect(sd_mtime("SAVE0") == p.mtime && sd_mtime("NOPE") == -1, "sd_mtime");
     struct sd_icon ic;
     struct sd_mount_info info;
@@ -779,10 +796,32 @@ static void test_hooks(void)
     expect(ic.data_size == 3000 && png[1] == (u8)(1 ^ 0x5A) && info.blocks == 100, "savedata_query: icon and sizes");
 }
 
+/* S1: the only names the real service may ever see; the library's policy */
+static void test_gate_and_table(void)
+{
+    expect(real_name_ok("GTESTSAVE") && real_name_ok("GTESTD001SAVE") && real_name_ok("GTESTD999SAVE") &&
+               real_name_ok("GTESTM05SAVE"),
+           "real names: <prefix>SAVE, <prefix>D<nnn>SAVE, <prefix>M<ss>SAVE");
+    static const char *const bad[] = {"SLUS-20268", "SLES-50366", "GFSINDEX",      "GHOSTIDX",    "GTEST000",
+                                      "GTEST012",   "GTESTD01SAVE", "GTESTD0001SAVE", "GTESTDxyzSAVE", "GTESTM5SAVE",
+                                      "OTHERSAVE",  "GTESTSAVEX", "GTEST",         "GTESTD001SAV", ""};
+    bool none = true;
+    for (u32 i = 0; i < ARRAY_SIZE(bad); i++)
+        none &= !real_name_ok(bad[i]);
+    expect(none, "refused: SWRR's saves, ghostfs's index and data containers, anything else");
+    expect(k_libs[0].flags == EXT_LIB_NO_HOST && (u32)k_libs[0].stub_ret == 0x809F000B && !strcmp(k_libs[0].name, SD),
+           "libSceSaveData has no host fallback; what is not here returns INTERNAL");
+    bool table = true;
+    for (u32 i = 0; i < ARRAY_SIZE(k_hle); i++)
+        table &= !strcmp(k_hle[i].lib, SD) && k_hle[i].fn && k_hle[i].name && !strncmp(k_hle[i].name, "sceSaveData", 11);
+    expect(table, "every entry is a libSceSaveData function");
+}
+
 static void run_cont(void)
 {
     fake_init(g_tmp, true, "GTEST", 0x08008011);
     sd_init();
+    test_gate_and_table();
     test_errors_before_and_args();
     test_first_boot_create_write_commit();
     test_param_icon_and_modes();
@@ -844,7 +883,7 @@ static void run_dir(void)
     EXPECT_RC(sd_set_memory2(&st), 0, "dev: Set2");
     expect(fake_read_host(path, mem, 0x100) == 0x100 && !memcmp(mem, back, 0x100), "dev: written to the same file");
     s.user = FAKE_USER1;
-    EXPECT_RC(sd_setup_memory2(&s, &res), E_BUSY, "dev: slot 0 is set up (per process)");
+    EXPECT_RC(sd_setup_memory2(&s, &res), W_BUSY, "dev: slot 0 is set up (per process)");
 
     mount_ok(FAKE_USER0, "SAVE0", 100, MODE_CREATE | MODE_RDWR, mp, 1, "dev: create");
     fmt(path, sizeof(path), "%s/%08x/d/SAVE0", root, FAKE_USER0);
@@ -855,7 +894,7 @@ static void run_dir(void)
     EXPECT_RC(umount(mp), 0, "dev: unmount");
     fmt(path, sizeof(path), "%s/%08x/catalog.bin", root, FAKE_USER0);
     expect(fake_host_exists(path), "dev: the catalogue is per user");
-    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 100, MODE_CREATE | MODE_RDWR, &r), E_EXISTS, "dev: EXISTS");
+    EXPECT_RC(mount2(FAKE_USER0, "SAVE0", 100, MODE_CREATE | MODE_RDWR, &r), W_EXISTS, "dev: EXISTS");
 
     char mps[17][16];
     char name[8];
@@ -865,7 +904,7 @@ static void run_dir(void)
     }
     expect(!strcmp(mps[15], "/savedata15") && !strcmp(mps[10], "/savedata10"), "dev: /savedata10../savedata15");
     EXPECT_RC(t_write_file("/savedata15/x", "x", 1), 0, "dev: a two-digit mount point remaps");
-    EXPECT_RC(mount2(FAKE_USER0, "M16", 96, MODE_CREATE2 | MODE_RDWR, &r), E_MOUNT_FULL, "dev: a 17th: MOUNT_FULL");
+    EXPECT_RC(mount2(FAKE_USER0, "M16", 96, MODE_CREATE2 | MODE_RDWR, &r), W_MOUNT_FULL, "dev: a 17th: MOUNT_FULL");
     for (u32 i = 0; i < 16; i++)
         umount(mps[i]);
     expect(search(FAKE_USER0, "M%", 0, 0, names, 20, NULL, NULL, NULL, &rc) == 16, "dev: search");
@@ -895,10 +934,10 @@ static void run_remap(void)
     const char *p = remap_path("/savedata0/x", b, sizeof(b));
     expect(!strcmp(p, "/app0/ghostldr-no-savedata/savedata0/x"), "no mounts: /savedata0/x is refused");
     s64 size;
-    EXPECT_RC(t_stat("/savedata0/x", &size), K_ENOENT, "and gives ENOENT");
-    EXPECT_RC(t_open("/savedata0", O_RDONLY), K_ENOENT, "/savedata0 itself is ENOENT");
-    EXPECT_RC(t_mkdir("/savedata0/new"), K_ENOENT, "mkdir under it is ENOENT");
-    EXPECT_RC(t_write_file("/savedata0/new.bin", "x", 1), K_ENOENT, "creating a file under it is ENOENT");
+    EXPECT_RC(t_stat("/savedata0/x", &size), W_ENOENT, "and gives ENOENT");
+    EXPECT_RC(t_open("/savedata0", O_RDONLY), W_ENOENT, "/savedata0 itself is ENOENT");
+    EXPECT_RC(t_mkdir("/savedata0/new"), W_ENOENT, "mkdir under it is ENOENT");
+    EXPECT_RC(t_write_file("/savedata0/new.bin", "x", 1), W_ENOENT, "creating a file under it is ENOENT");
     char mp[16], mp2[16];
     mount_ok(FAKE_USER0, "R0", 96, MODE_CREATE | MODE_RDWR, mp, 1, "mount for remap");
     mount_ok(FAKE_USER0, "R1", 96, MODE_CREATE | MODE_RDWR, mp2, 1, "a second mount");
@@ -1057,7 +1096,7 @@ static void run_ghost(void)
     struct sd_mem_get2 g0;
     memset(&g0, 0, sizeof(g0));
     sd_initialize(NULL);
-    EXPECT_RC(sd_get_memory2(&g0), E_MEMORY_NOT_READY, "ext: Get2 before Setup2 is MEMORY_NOT_READY (as on a PS4)");
+    EXPECT_RC(sd_get_memory2(&g0), W_MEMORY_NOT_READY, "ext: Get2 before Setup2 is MEMORY_NOT_READY (as on a PS4)");
     ghost_boot(false, &existed, mem, true, 10);
     expect(existed == 0, "ext: a first boot");
     expect(cont_file("GHOSTSAVE", "sdmemory_0.bin", ext_bin, GHOST_MEM) == GHOST_MEM && !memcmp(ext_bin, want, GHOST_MEM),
