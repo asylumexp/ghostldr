@@ -251,14 +251,15 @@ u64 resolve_import(struct module *m, const char *encoded, bool weak, bool plt_fu
     const char *lib = module_import_lib(m, encoded, nid, &modname);
     const char *name = nid_to_name(nid);
 
-    if (name) {
-        u64 h = hle_lookup(lib, name);
-        if (h)
-            return maybe_count(m, h, lib, nid, name, plt_func);
-    }
+    /* the extension first: it supersedes the core's own overrides */
     u64 h = ext_hle_lookup(lib, nid, name);
     if (h)
         return maybe_count(m, h, lib, nid, name ? name : nid, plt_func);
+    if (name) {
+        h = hle_lookup(lib, name);
+        if (h)
+            return maybe_count(m, h, lib, nid, name, plt_func);
+    }
     for (struct module *o = g_modules; o; o = o->next) {
         for (u32 i = 0; i < o->n_export_libs; i++) {
             if (lib && strcmp(o->export_libs[i].name, lib) == 0) {

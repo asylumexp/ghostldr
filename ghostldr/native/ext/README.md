@@ -17,8 +17,8 @@ The core has to fit in 240 KiB of the emulator's IPU JIT buffer, and the Lua pay
    - A new JIT block from the compiler process is used instead when the image won't fit there with 16 KiB left for stubs, or with `run.py --ext-jit`.
    - It applies the relocations and calls `ext_init(&g_ghost_api)`, then runs the self-test (`selftest.c`): name, NID-only and alias lookups, the policy, and calls. A failure returns -8 before relocation.
 5. Each import binds to the first of:
-   1. the core's overrides (`hle.c` `g_hle`, `hle_sys.c` `g_sys`), by library and name;
-   2. the **extension**, by library and NID, so imports with no known name can be overridden too. Library aliases from the policies count as the same library;
+   1. the **extension**, by library and NID, so imports with no known name can be overridden too. Library aliases from the policies count as the same library. The extension supersedes the core;
+   2. the core's overrides (`hle.c` `g_hle`, `hle_sys.c` `g_sys`), by library and name;
    3. the title's own modules;
    4. if the extension's policy for the library has `EXT_LIB_NO_HOST`: a stub returning the policy's `stub_ret`, logged as `denied:` and `DENIED call: ...`;
    5. host modules by name, using the full table;
@@ -89,8 +89,8 @@ One file per library family. Each file registers itself, so adding one never tou
    - No thread-local variables.
    - Only one `EXT_FAMILY` / `EXT_FAMILY_LIBS` per file.
    - Static data, string tables and function pointers are fine; they're relocated.
-   - The core's own overrides take precedence, so to move one into the extension, delete the core's row in the same change. `check_ext.py` warns about an extension entry that loses to the core.
-   - An extension entry or policy must not change how an import of Ghost resolves today (title module or host). Moving an existing override from the core into the extension is a separate, deliberate change.
+   - The extension takes precedence over the core's own overrides, so a family can reimplement a core override without touching the core. Delete the superseded core row when convenient (it frees core space); `check_ext.py` lists them.
+   - Imports that move to the extension (or to a denied stub) are counted as deliberate by `check_ext.py` (`--verbose` lists them); any other change in how one of Ghost's imports resolves fails the check.
 5. Build and check:
 
    ```bash

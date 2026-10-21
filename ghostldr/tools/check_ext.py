@@ -58,6 +58,9 @@ class Report:
         print(f"ok   {msg}")
 
 
+VERBOSE = False   # --verbose: list every import an extension family took over
+
+
 def cstr(buf: bytes, off: int) -> str:
     end = buf.index(b"\0", off)
     return buf[off:end].decode()
@@ -339,10 +342,10 @@ def check_title(app0: Path, by_nid: dict[str, str], db: dict[str, str], ext: Ext
 
     def stage(lib, nid, name, with_ext: bool) -> str:
         """resolve_import's choice, before (no extension) and after."""
-        if name and core_hit(lib, name):
-            return "core HLE"
         if with_ext and ext.lookup(lib, nid):
             return "extension HLE"
+        if name and core_hit(lib, name):
+            return "core HLE"
         if lib and any(lib in libs and nid in nids for libs, nids in exports):
             return "title module"
         pol = ext.policy(lib) if with_ext else None
@@ -353,6 +356,7 @@ def check_title(app0: Path, by_nid: dict[str, str], db: dict[str, str], ext: Ext
             return "host by name"
         return ("stub (host lookup failed)" if name else "stub (no name)") + ret
 
+    moved: Counter[str] = Counter()
     stages: Counter[str] = Counter()
     changed = 0
     total = 0
@@ -370,16 +374,23 @@ def check_title(app0: Path, by_nid: dict[str, str], db: dict[str, str], ext: Ext
             before, after = stage(libname, nid, old, False), stage(libname, nid, new, True)
             stages[after] += 1
             if before != after:
+                where = f"{Path(img.path).name}: {libname}:{new or nid}"
                 if before.startswith("stub"):
-                    r.ok(f"{Path(img.path).name}: {libname}:{new or nid} was a stub: {before} -> {after}")
+                    r.ok(f"{where} was a stub: {before} -> {after}")
+                elif after in ("extension HLE",) or after.startswith("stub (denied)"):
+                    moved[after] += 1      # deliberate: an extension family took it over
+                    if VERBOSE:
+                        r.ok(f"{where}: {before} -> {after}")
                 else:
                     changed += 1
                     hint = "; if a run logged it as unresolved, pass --log" if before == "host by name" else ""
-                    r.fail(f"{Path(img.path).name}: {libname}:{new or nid} would move from {before} to {after}{hint}")
+                    r.fail(f"{where} would move from {before} to {after}{hint}")
     for _, _, e, fam in ext.entries:
         if e.name and any(n == e.name and ext.canon(l) == ext.canon(e.lib) for l, n in core):
-            r.warn(f"extension entry {e.lib}:{e.name} ({fam}) loses to the core's override for imports from "
-                   f"{e.lib}: remove the core's row when moving it")
+            r.warn(f"core override {e.lib}:{e.name} is superseded by the extension ({fam}): "
+                   f"delete the core's row when convenient")
+    for where, n in sorted(moved.items()):
+        r.ok(f"{n} imports now bind to {where} instead of the core/title/host (extension families)")
     summary = ", ".join(f"{k} {v}" for k, v in stages.most_common())
     if not changed:
         r.ok(f"{app0}: {total} imports of {len(mods)} modules resolve as before ({summary})")
@@ -395,7 +406,10 @@ def main() -> int:
                     help="a title's app0 to compare resolution against (skipped if missing)")
     ap.add_argument("--log", type=Path, help="run log: imports it reports as unresolved count as stubs")
     ap.add_argument("--old-core-elf", type=Path, help="a core.elf built before the extension, to compare with")
+    ap.add_argument("--verbose", action="store_true", help="list every import an extension family took over")
     args = ap.parse_args()
+    global VERBOSE
+    VERBOSE = args.verbose
     r = Report()
     b = Blob(args.ext.read_bytes())
     check_blob(b, r)
