@@ -10,6 +10,12 @@ The game's files live in SWRR's own save containers, installed once over the net
 
 Start with [docs/ghost-on-stock-ps5.md](docs/ghost-on-stock-ps5.md): triggering Luac0re, the data install, and booting.
 
+## Demo
+
+On a stock 13.60 PS5 (US SWRR): Luac0re's loader, the ghostldr send, then Ghost of Tsushima booting from the save containers into gameplay.
+
+https://github.com/user-attachments/assets/6bcab55f-559f-438c-81f5-7104bc5003a3
+
 ## Layout
 
 | Path | What it is |
