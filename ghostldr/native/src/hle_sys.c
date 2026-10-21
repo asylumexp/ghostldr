@@ -73,7 +73,6 @@ static s32 hle_sceAppContentGetAddcontInfoList(u32 label, void *list, u32 n, u32
 INIT_OK(sceGameLiveStreamingInitialize, "libSceGameLiveStreaming")
 INIT_OK(sceShareUtilityInitializeEx2, "libSceShareUtility")
 INIT_OK(sceShareUtilityAdvanceInitialize, "libSceShareUtility")
-INIT_OK(sceNpGameIntentInitialize, "libSceNpGameIntent")
 INIT_OK(sceAudio3dInitialize, "libSceAudio3d")
 
 static s32 hle_sceSaveDataTerminate(void)
@@ -660,7 +659,6 @@ static const struct hle_ent g_sys[] = {
     E("libSceGameLiveStreaming", sceGameLiveStreamingInitialize),
     E("libSceShareUtility", sceShareUtilityInitializeEx2),
     E("libSceShareUtility", sceShareUtilityAdvanceInitialize),
-    E("libSceNpGameIntent", sceNpGameIntentInitialize),
     E("libSceAudio3d", sceAudio3dInitialize),
     E("libSceVideoOut", sceVideoOutOpen),
     E("libSceVideoOut", sceVideoOutRegisterBuffers),
