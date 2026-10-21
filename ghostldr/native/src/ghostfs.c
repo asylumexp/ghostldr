@@ -89,15 +89,19 @@ static void unlock(volatile int *l) { __atomic_store_n(l, 0, __ATOMIC_RELEASE); 
 
 /* ---- save containers ---- */
 
-int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16])
+/* user < 0: the initial user.  required_blocks (may be NULL) gets what a
+ * NO_SPACE_FS (0x809F000A) result says the create needs. */
+int gfs_mount_user(s32 user, const char *dirname, int mode, u64 blocks, char mount_point[16], u64 *required_blocks)
 {
     u8 params[128], result[64];
     char dir[32];
+    if (!sd_mount)
+        return (int)0x809F000B; /* SCE_SAVE_DATA_ERROR_INTERNAL: no save service (not ghostfs) */
     memset(params, 0, sizeof(params));
     memset(result, 0, sizeof(result));
     memset(dir, 0, sizeof(dir));
     strlcpy(dir, dirname, sizeof(dir));
-    *(u32 *)(params + 0x00) = g_user;
+    *(u32 *)(params + 0x00) = user < 0 ? g_user : (u32)user;
     *(u64 *)(params + 0x10) = (u64)dir;
     *(u64 *)(params + 0x20) = blocks;
     *(u32 *)(params + 0x28) = (u32)mode;
@@ -106,17 +110,25 @@ int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16])
         memcpy(mount_point, result, 16);
         mount_point[15] = 0;
     }
+    if (required_blocks)
+        *required_blocks = *(u64 *)(result + 0x10);
     return rc;
 }
 
-/* the unmount is the commit (and asynchronous): wait until the point is gone */
+int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16])
+{
+    return gfs_mount_user(-1, dirname, mode, blocks, mount_point, NULL);
+}
+
+/* the unmount is the commit (and asynchronous): wait until the point is gone.
+ * A refused unmount (BUSY: files still open) returns at once. */
 int gfs_umount(const char mount_point[16], u32 max_ms)
 {
     char mp[16];
     u8 st[0x78];
     memcpy(mp, mount_point, 16);
     int rc = sd_umount(mp);
-    for (u32 waited = 0; waited < max_ms && k_stat(mp, st) == 0; waited += 10)
+    for (u32 waited = 0; rc == 0 && waited < max_ms && k_stat(mp, st) == 0; waited += 10)
         K.usleep(10000);
     return rc;
 }
@@ -151,6 +163,74 @@ static volatile int g_cont_lock;
 static u32 g_mounted;
 static u64 g_tick, g_mounts, g_evictions;
 
+/* Real slots other HLE code holds for long (the title's mounted saves).  The
+ * first GFS_SPARE fit beside the data containers and <prefix>SAVE; each one
+ * after that lowers the data containers' cap, down to GFS_MIN_DATA. */
+#define GFS_SPARE 2
+#define GFS_MIN_DATA 8
+static u32 g_reserved;
+
+static u32 data_cap(u32 reserved)
+{
+    return GFS_SLOTS - (reserved > GFS_SPARE ? reserved - GFS_SPARE : 0);
+}
+
+/* the least recently used data container no read is using, or NULL */
+static struct cont *lru_idle(void)
+{
+    struct cont *victim = NULL;
+    for (u32 i = 0; i < g_hdr->containers; i++)
+        if (g_cont[i].fd >= 0 && !g_cont[i].busy && (!victim || g_cont[i].last < victim->last))
+            victim = &g_cont[i];
+    return victim;
+}
+
+static void evict(struct cont *victim)
+{
+    k_close(victim->fd);
+    victim->fd = -1;
+    gfs_umount(victim->mp, 2000);
+    g_mounted--;
+    g_evictions++;
+}
+
+/* 0: one more real slot is the caller's until gfs_slot_release (idle data
+ * containers are unmounted to make room); -1: no slot can be spared */
+int gfs_slot_reserve(void)
+{
+    if (!g_active)
+        return 0;
+    for (;;) {
+        lock(&g_cont_lock);
+        if (data_cap(g_reserved + 1) < GFS_MIN_DATA) {
+            unlock(&g_cont_lock);
+            return -1;
+        }
+        struct cont *victim = g_mounted > data_cap(g_reserved + 1) ? lru_idle() : NULL;
+        if (g_mounted <= data_cap(g_reserved + 1)) {
+            g_reserved++;
+            unlock(&g_cont_lock);
+            logf("ghostfs: real slot reserved (%u reserved, %u data containers mounted)", g_reserved, g_mounted);
+            return 0;
+        }
+        if (victim)
+            evict(victim);
+        unlock(&g_cont_lock);
+        if (!victim)
+            K.usleep(1000); /* every data container is mid-read */
+    }
+}
+
+void gfs_slot_release(void)
+{
+    if (!g_active)
+        return;
+    lock(&g_cont_lock);
+    if (g_reserved)
+        g_reserved--;
+    unlock(&g_cont_lock);
+}
+
 /* fd of container k's data.bin, mounting it (and evicting another) if needed */
 static int cont_acquire(u32 k)
 {
@@ -165,21 +245,14 @@ static int cont_acquire(u32 k)
             unlock(&g_cont_lock);
             return c->fd;
         }
-        if (g_mounted >= GFS_SLOTS) {
-            struct cont *victim = NULL;
-            for (u32 i = 0; i < g_hdr->containers; i++)
-                if (g_cont[i].fd >= 0 && !g_cont[i].busy && (!victim || g_cont[i].last < victim->last))
-                    victim = &g_cont[i];
+        if (g_mounted >= data_cap(g_reserved)) {
+            struct cont *victim = lru_idle();
             if (!victim) {                   /* every slot is mid-read: wait */
                 unlock(&g_cont_lock);
                 K.usleep(1000);
                 continue;
             }
-            k_close(victim->fd);
-            victim->fd = -1;
-            gfs_umount(victim->mp, 2000);
-            g_mounted--;
-            g_evictions++;
+            evict(victim);
         }
         char dir[32], path[48];
         fmt(dir, sizeof(dir), "%s%03u", g_hdr->prefix, k);
@@ -344,6 +417,15 @@ const char *gfs_save_name(void)
     if (!name[0] && g_hdr)
         fmt(name, sizeof(name), "%.16sSAVE", g_hdr->prefix);
     return name;
+}
+
+/* the installed title's ID from the index (version 2), or NULL */
+const char *gfs_title(void)
+{
+    static char title[17];
+    if (!title[0] && g_hdr && g_hdr->version >= 2)
+        memcpy(title, g_hdr->title, 16);
+    return title[0] ? title : NULL;
 }
 
 /* ---- open files ---- */

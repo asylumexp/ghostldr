@@ -96,6 +96,16 @@ struct ghost_api {
 
     /* the core's own overrides (an extension function may wrap one) */
     u64 (*hle_lookup)(const char *lib, const char *name);
+
+    /* save data family (ext/src/hle_savedata.c): real save containers for a
+     * given user, real mount slots taken from ghostfs's data containers, the
+     * installed title's ID, and path translations ahead of remap_path's own */
+    int (*gfs_mount_user)(s32 user, const char *dirname, int mode, u64 blocks, char mount_point[16],
+                          u64 *required_blocks);
+    int (*gfs_slot_reserve)(void);
+    void (*gfs_slot_release)(void);
+    const char *(*gfs_title)(void);
+    int (*remap_hook_add)(const char *(*fn)(const char *path, char *buf, size_t size));
 };
 
 /* ---- what the extension registers and returns ---- */

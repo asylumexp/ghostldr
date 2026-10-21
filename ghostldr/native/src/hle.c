@@ -7,11 +7,31 @@ void *host_real(const char *name);
 
 static char g_app_root[256];
 
+/* the extension's path translations (the save data family's /savedataN):
+ * each returns NULL for paths that are not its own */
+typedef const char *(*remap_fn)(const char *path, char *buf, size_t size);
+static remap_fn g_remap_hooks[4];
+
+int remap_hook_add(remap_fn fn)
+{
+    for (u32 i = 0; i < ARRAY_SIZE(g_remap_hooks); i++)
+        if (!g_remap_hooks[i]) {
+            g_remap_hooks[i] = fn;
+            return 0;
+        }
+    return -1;
+}
+
 /* "/app0/x" -> "<app_root>/x".  Other paths pass through. */
 const char *remap_path(const char *path, char *buf, size_t size)
 {
     if (!path)
         return path;
+    for (u32 i = 0; i < ARRAY_SIZE(g_remap_hooks) && g_remap_hooks[i]; i++) {
+        const char *h = g_remap_hooks[i](path, buf, size);
+        if (h)
+            return h;
+    }
     if (!g_app_root[0] && g_ctx && g_ctx->app_root)
         strlcpy(g_app_root, (const char *)g_ctx->app_root, sizeof(g_app_root));
     if (!gfs_active() && strncmp(path, "/app0", 5) == 0 && (path[5] == '/' || path[5] == 0)) {

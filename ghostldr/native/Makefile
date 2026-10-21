@@ -48,7 +48,7 @@ $(OUT)/core.bin: $(OUT)/core.elf
 	$(OBJCOPY) -O binary $< $@
 	@python3 ../tools/core_info.py $< $@
 
-$(OUT)/ext/%.o: ext/src/%.c ext/include/ext.h $(HEADERS)
+$(OUT)/ext/%.o: ext/src/%.c $(wildcard ext/include/*.h) $(HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Iext/include -c $< -o $@
 
