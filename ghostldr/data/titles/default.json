@@ -1,0 +1,10 @@
+{
+ "notes": "Generic values for every title; <TITLE>.json overrides them. See docs/compatibility.md.",
+ "pack": {},
+ "app_params": {"0": 3},
+ "save_blocks": 1024,
+ "features": [],
+ "memory": {"mode": "transparent", "runtime_reserve_mib": 64, "video_reserve_mib": 100, "flex_mib": 0, "min_mib": 1024},
+ "modules": [],
+ "hle": []
+}

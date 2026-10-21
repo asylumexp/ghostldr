@@ -17,6 +17,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "host"))
 import gfs_install as gi  # noqa: E402
 import gfs_pack as gp  # noqa: E402
+import profiles  # noqa: E402
 
 NOT_FOUND = gi.NOT_FOUND
 
@@ -64,7 +65,8 @@ def make_title(root: Path, title: str, files: dict[str, bytes]) -> tuple[dict, b
     for rel, data in files.items():
         (src / rel).parent.mkdir(parents=True, exist_ok=True)
         (src / rel).write_bytes(data)
-    info = gp.pack(src, title, gp.PROFILES.get(title, {}).get("prefix") or "G" + title[4:], root / title / "out")
+    prefix = profiles.load(title).get("pack", {}).get("prefix") or profiles.default_prefix(title)
+    info = gp.pack(src, title, prefix, root / title / "out")
     return info, (root / title / "out/index.bin").read_bytes(), src
 
 
@@ -178,16 +180,17 @@ class SwitchTitleTests(unittest.TestCase):
 
 
 class PackTests(unittest.TestCase):
+    # the layout installed on consoles since 2026-10-20 (GHOST000..055 + GFSINDEX)
+    GHOST_LAYOUT = "e73b4cbf2798a86e"
+
     def test_ghost_layout_is_the_installed_one(self) -> None:
-        ref = Path(__file__).resolve().parents[2] / "build/ghostfs/layout.reference-v1.json"
-        src = gp.PROFILES["CUSA11456"]["src"]
-        if not ref.exists() or not src.exists():
-            self.skipTest("needs the CUSA11456 dump and the reference layout")
-        import json
+        src = profiles.DEFAULT_SRC
+        if not (src / "eboot.bin").exists() or profiles.detect_title(src) != "CUSA11456":
+            self.skipTest("needs the CUSA11456 v2.18 dump in build/ghost/app0")
         with tempfile.TemporaryDirectory() as tmp:
             info = gp.pack(src, "CUSA11456", "GHOST", Path(tmp))
-        old = json.loads(ref.read_text())["containers"]
-        self.assertEqual([c["pieces"] for c in info["containers"]], [c["pieces"] for c in old])
+        self.assertEqual(info["layout_id"], self.GHOST_LAYOUT)
+        self.assertEqual(len(info["containers"]), 56)
 
 
 if __name__ == "__main__":

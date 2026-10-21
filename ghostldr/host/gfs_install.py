@@ -15,8 +15,11 @@ layout and its containers.
 GFSINDEX is written first as a header marked incomplete and replaced by the
 full index last, so an interrupted install is recognised and never booted.
 
-    python3 ghostldr/host/gfs_pack.py [--src DIR --title CUSA12345]
+    python3 ghostldr/host/gfs_pack.py [--src DIR] [--title CUSA12345]
     python3 ghostldr/host/gfs_install.py [--title CUSA12345] [--dry-run] [--force]
+
+Without --title it installs the title packed in build/ghostfs (the newest one
+when there are several).
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from console import console_ip
-from gfs_pack import FLAG_INCOMPLETE, OUT_ROOT, index_header
+from gfs_pack import FLAG_INCOMPLETE, OUT_ROOT, default_title, index_header
 
 ROOT = Path(__file__).resolve().parents[2]
 RECEIVER = ROOT / "ghostldr/lua/gfs_receiver.lua"
@@ -318,7 +321,7 @@ def execute(rx, steps: list[tuple], new: Install, layout: dict, index: bytes, sr
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--title", default="CUSA11456", help="title to install (as packed by gfs_pack.py)")
+    ap.add_argument("--title", help="title to install, as packed by gfs_pack.py (default: the only or newest pack)")
     ap.add_argument("--dry-run", action="store_true", help="only show what is installed and what would change")
     ap.add_argument("--force", action="store_true", help="delete and resend everything")
     ap.add_argument("--host")
@@ -326,7 +329,10 @@ def main() -> int:
     ap.add_argument("--port", type=int, help="reattach to a receiver already listening on this port "
                     "(it holds Luac0re's loader, so a new one cannot start)")
     args = ap.parse_args()
+    args.title = args.title.upper() if args.title else default_title("installing")
     out = OUT_ROOT / args.title
+    if not (out / "layout.json").is_file():
+        raise SystemExit(f"{args.title} is not packed: run gfs_pack.py --src <its app0> first")
     layout = json.loads((out / "layout.json").read_text())
     index = (out / "index.bin").read_bytes()
     src = Path(layout["src"])
