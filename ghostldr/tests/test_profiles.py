@@ -1,7 +1,7 @@
 """Title profiles: parsing, merging and validation (host/profiles.py), the
 compiled blobs, and the core's side of them: native/src/profile.c and
-budget.c built for an x86-64 host process (native_host/profile_host.c,
-Rosetta on Apple silicon) and run against fakes of the console.
+budget.c built for this machine (native_host/profile_host.c) and run
+against fakes of the console.
 
     python3 -m unittest discover -s ghostldr/tests
 """
@@ -9,7 +9,6 @@ Rosetta on Apple silicon) and run against fakes of the console.
 from __future__ import annotations
 
 import copy
-import platform
 import shutil
 import struct
 import subprocess
@@ -182,32 +181,43 @@ def make_sfo(entries: dict) -> bytes:
     return b"\0PSF" + struct.pack("<IIII", 0x101, kt, dt, len(entries)) + index + keys + data
 
 
-def x86_64_cc() -> list[str] | None:
-    """A compiler command whose output this machine can run as x86-64."""
-    if sys.platform == "darwin" and shutil.which("clang"):
-        if platform.machine() == "x86_64" or subprocess.run(["arch", "-x86_64", "/usr/bin/true"]).returncode == 0:
-            return ["clang", "-arch", "x86_64"]
+def host_cc() -> list[str] | None:
+    """A C compiler for this machine whose output runs here (the core's C is
+    portable apart from its x86 entry stubs, which the harnesses avoid)."""
+    cc = shutil.which("clang") or shutil.which("cc") or shutil.which("gcc")
+    if not cc:
         return None
-    if platform.machine() in ("x86_64", "AMD64"):
-        cc = shutil.which("cc") or shutil.which("clang")
-        return [cc] if cc else None
-    return None
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = Path(tmp) / "probe"
+        (Path(tmp) / "probe.c").write_text("int main(void) { return 7; }\n")
+        try:
+            if subprocess.run([cc, str(Path(tmp) / "probe.c"), "-o", str(exe)], capture_output=True).returncode:
+                return None
+            if subprocess.run([str(exe)], timeout=20).returncode != 7:
+                return None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+    return [cc]
+
+
+def build_host(name: str, sources: list[Path], out: Path) -> None:
+    cc = host_cc()
+    if not cc:
+        raise unittest.SkipTest("no C compiler whose programs run on this machine")
+    subprocess.run(cc + ["-std=gnu11", "-O1", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
+                         "-ffreestanding", "-fno-builtin", f"-I{NATIVE / 'include'}", *map(str, sources), "-o",
+                         str(out)], check=True)
 
 
 class CoreProfileTests(unittest.TestCase):
-    """profile.c + budget.c on the host (native_host/profile_host.c)."""
+    """profile.c + budget.c in a host process (native_host/profile_host.c)."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cc = x86_64_cc()
-        if not cc:
-            raise unittest.SkipTest("no x86-64 C compiler that this machine can run")
         cls.tmp = tempfile.TemporaryDirectory()
         cls.exe = Path(cls.tmp.name) / "profile_host"
-        src = [HERE / "native_host/profile_host.c"] + [NATIVE / f"src/{n}.c" for n in ("profile", "budget", "nid")]
-        subprocess.run(cc + ["-std=gnu11", "-O1", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
-                             "-ffreestanding", "-fno-builtin", f"-I{NATIVE / 'include'}", *map(str, src), "-o",
-                             str(cls.exe)], check=True)
+        build_host("profile_host", [HERE / "native_host/profile_host.c"] +
+                   [NATIVE / f"src/{n}.c" for n in ("profile", "budget", "nid")], cls.exe)
         rule_title = profiles.load("CUSA22222")
         rule_title["hle"] = [{"lib": "libSceNpManager", "function": "sceNpGetState", "value": "0x80550001",
                               "fill": [{"arg": 2, "offset": 4, "size": 4, "value": 7},

@@ -1,6 +1,6 @@
 /*
- * Runs the core's profile.c and budget.c (and nid.c) in an x86-64 host
- * process against fakes of what they read on the console: the boot context
+ * Runs the core's profile.c and budget.c (and nid.c) in a host process
+ * (built for this machine) against fakes of what they read on the console: the boot context
  * with a profile bundle, a direct-memory map with the holes a Ghost boot
  * logged (4532 MiB free in 6 holes), and an executable image whose tables
  * hold Ghost 2.18's values.  test_profiles.py builds and drives it:
@@ -80,7 +80,7 @@ int hle_alloc_direct(off_t start, off_t end, size_t len, size_t align, int type,
 u64 direct_block_size(u64 addr) { return 0; }
 void direct_free(void *addr) {}
 u64 c_rule(u32 idx, const u64 *args);
-#ifdef __APPLE__
+#if defined(__APPLE__) && defined(__x86_64__)
 /* profile.c's rule_entry calls the ELF name; Mach-O prefixes C symbols with _ */
 __asm__(".globl c_rule\nc_rule: jmp _c_rule");
 #endif

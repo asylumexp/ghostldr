@@ -182,6 +182,7 @@ COLD u64 c_rule(u32 idx, const u64 *args)
 }
 
 /* eax = rule index; the argument registers become args[6] */
+#if defined(__x86_64__)
 __attribute__((naked, used)) static void rule_entry(void)
 {
     __asm__ volatile(".intel_syntax noprefix\n"
@@ -196,6 +197,9 @@ __attribute__((naked, used)) static void rule_entry(void)
                      "ret\n"
                      ".att_syntax prefix\n");
 }
+#else
+static void rule_entry(void) {} /* host builds of the tests (tests/native_host) call c_rule directly */
+#endif
 
 COLD static u64 rule_stub(u32 idx)
 {
