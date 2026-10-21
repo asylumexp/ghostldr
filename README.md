@@ -12,16 +12,18 @@ The game's files live in SWRR's own save containers, installed once over the net
 
 Start with [docs/ghost-on-stock-ps5.md](docs/ghost-on-stock-ps5.md): triggering Luac0re, the data install, and booting.
 
+To back up and restore saves from a browser, see [docs/manager.md](docs/manager.md): a small web manager that runs on the PS5 through Luac0re.
+
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `ghostldr/native/` | **The loader core** (C, about 6,400 lines). Runs inside SWRR from Luac0re's JIT buffer. |
 | `ghostldr/host/` | **Computer-side tools** (Python). |
-| `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the save resigner, and the sandbox/save probes. |
+| `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the web manager, the save resigner, and the sandbox/save probes. |
 | `ghostldr/tools/` | **Analysis helpers:** ELF/NID parsing, disassembler, cross-references, NID table generator, Luac0re bundler. |
 | `ghostldr/data/` | Ghost's file open order, used to pack the containers (file names only). |
-| `ghostldr/tests/` | Offline tests: the installer against a fake console. |
+| `ghostldr/tests/` | Offline tests: the installer and the web manager against fake consoles (the manager's need a desktop Lua 5.3 or 5.4). |
 | `host/payloads/` | **Dev-only console payloads** (ps5-payload-sdk), for a jailbroken console: launch or close SWRR (US or EU), unjail it, save watcher, ps, df, module dump. |
 | `tools/fetch_deps.sh` | Fetches the public build inputs (see Setup). |
 
@@ -37,6 +39,7 @@ The host tools:
 
 - **`run.py`:** build the core, send it, and log the run.
 - **`gfs_pack.py` and `gfs_install.py`:** lay out and install the ghostfs data, switching titles safely and resuming interrupted installs.
+- **`manager.py`:** start the web manager on the PS5: download, restore, copy and delete saves, and remove installed titles, from a browser.
 - **`resign_save.py`:** make a Luac0re save for another PSN account, for the SWRR region it runs on (US or EU).
 - **`recorder.py`:** crash and klog recorder.
 - **`console.py`:** finds the PS5 on the network.
