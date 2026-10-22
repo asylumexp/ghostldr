@@ -376,15 +376,25 @@ static s64 hle_scePadReadState(s32 handle, u8 *data)
     return rc;
 }
 
+/* The pad handle is SWRR's, and something in SWRR still drains its sample
+ * buffer: a title's buffered scePadRead (Unity reads only this way) kept
+ * finding nothing new and saw no input.  Answer it with the current state as
+ * one sample: scePadReadState consumes nothing. */
 static s64 hle_scePadRead(s32 handle, u8 *data, s32 num)
 {
     static int (*real)(s32, u8 *, s32);
+    static u32 logged;
     if (!real)
         real = (int (*)(s32, u8 *, s32))host_real_in("libScePad", "scePadRead");
-    int rc = real(handle, data, num);
-    for (int i = 0; data && i < rc; i++)
-        *(u32 *)(data + i * PAD_DATA_SIZE) &= ~PAD_INTERCEPTED;
-    return rc;
+    if (!data || num < 1)
+        return real(handle, data, num);
+    if (logged < 6) {
+        int got = real(handle, data, num); /* what the buffer held, for the log */
+        logf("scePadRead(%x, %d): the buffer gave %d; answering with the current state", (u32)handle, num, got);
+        logged++;
+    }
+    s64 rc = hle_scePadReadState(handle, data);
+    return rc == 0 ? 1 : rc;
 }
 TRACE(sceNpCheckNpAvailabilityA, "libSceNpManager", 6)
 TRACE(sceNpGetState, "libSceNpManager", 6)

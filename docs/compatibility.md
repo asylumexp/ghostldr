@@ -271,7 +271,7 @@ A stock 13.60 PS5 with US SWRR, each title installed next to Ghost and booted wi
 | `AUDIO-WAV` (OpenOrbis sample) | It decodes its 27 MiB wav from `/app0` into malloc'd memory and loops it through `sceAudioOutOutput`: the console's HDMI audio carries it (mean -9.7 dB, against -52.9 dB while a silent sample runs). |
 | `EXCEPTIONS` (OpenOrbis sample) | C++ exceptions thrown and caught (`Caught! The exception says: Catch me if you can. :p`, `Testcase PASS`). It crashed in SWRR's `pthread_setspecific` at the first throw until thread-specific data became the extension's. |
 | `HELLO_WORLD` (OpenOrbis sample) | `Hello world! Waiting 2 seconds!`, then two seconds later `Done. Infinitely looping...`. |
-| `LAPY20001` PS4-Xplorer 1.34 (Unity, not OpenOrbis) | Its Unity runtime loads from `Media/Modules`, Mono starts and loads its managed assemblies from `/app0`, its plugins load at run time, and it draws its first menu (SELECT YOUR FIRMWARE). The pad doesn't reach it yet: the selection doesn't move. Its code (34 MiB with the Mono modules) uses multi-buffer placement. |
+| `LAPY20001` PS4-Xplorer 1.34 (Unity, not OpenOrbis) | Its Unity runtime loads from `Media/Modules`, Mono starts and loads its managed assemblies from `/app0`, its plugins load at run time, and the pad drives its menus (firmware, language) into its file browser. With "no unjail" the browser sees only SWRR's sandbox (0 elements). Its 8 MiB save-data memory isn't supported yet, so its choices aren't kept. Its code (34 MiB with the Mono modules) uses multi-buffer placement. |
 
 ### Limits
 
