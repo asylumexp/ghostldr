@@ -63,6 +63,7 @@ def make_elf(path: Path, e_type: int, module: str, needed: list[str], mods: dict
 NAMES = ["sceKernelOpen", "sceKernelGetpid", "sceAppContentFoo", "sceHostFunc", "sceHostStub",
          "scePrivFunc", "sceGoneFunc", "memcpy", "sceExtThing"]
 NO_NAME = NID("notInTheNameDatabase")
+BY_NID = NID("implementedByNidOnly")  # no name; the extension matches it by NID
 
 HLE_C = """\
 #define LK "libkernel"
@@ -72,7 +73,8 @@ static const struct hle_ent g_hle[] = {
 };
 """
 BOOT_C = 'static const char *const BUNDLED[] = {\n    "libc.prx", "libSceFios2.prx",\n};\n'
-EXT_C = 'static const struct ext_ent g_ext[] = {\n    {"libSceExt", "sceExtThing", ext_thing},\n};\n'
+EXT_C = ('#define EX "libSceExt"\nstatic const struct ext_ent g_ext[] = {\n    {"libSceExt", "sceExtThing", ext_thing},\n'
+         '    {EX, NULL, ext_unnamed, "%s"}, /* Func_... */\n};\n' % BY_NID)
 SYSMODULES = """\
 # name size directory
 libkernel.sprx\t100\t/system/common/lib
@@ -121,7 +123,7 @@ class ImportReportTest(unittest.TestCase):
                   (NID("sceAppContentFoo"), 2, 2, func), (NID("sceHostFunc"), 3, 3, func),
                   (NID("sceHostStub"), 3, 3, func), (NO_NAME, 3, 3, func), (NID("scePrivFunc"), 4, 4, func),
                   (NID("sceGoneFunc"), 5, 5, func), (NID("memcpy"), 6, 6, func),
-                  (NID("sceExtThing"), 7, 7, func)], [])
+                  (NID("sceExtThing"), 7, 7, func), (BY_NID, 7, 7, func)], [])
         make_elf(app0 / "sce_module" / "libc.prx", oe.ET_SCE_DYNAMIC, "libc", [], {}, {}, {1: "libc"}, [],
                  [(NID("memcpy"), 1)])
         native = t / "native"
@@ -156,8 +158,15 @@ class ImportReportTest(unittest.TestCase):
             self.assertEqual(self.imp(name)["cls"], cls, name)
         self.assertEqual(self.by_nid[NO_NAME]["cls"], "UNRESOLVED")
         self.assertIn("no name", self.by_nid[NO_NAME]["reason"])
+        # no name, but the extension implements it by NID
+        self.assertEqual(self.by_nid[BY_NID]["cls"], "EXT-HLE")
         self.assertEqual(self.rep["summary"]["functions_by_class"],
-                         {"CORE-HLE": 1, "EXT-HLE": 1, "TITLE": 1, "HOST": 4, "UNRESOLVED": 3})
+                         {"CORE-HLE": 1, "EXT-HLE": 2, "TITLE": 1, "HOST": 4, "UNRESOLVED": 3})
+
+    def test_nid_entries(self) -> None:
+        src = '#define DM "libSceDiscMap"\nx = {\n    {DM, NULL, f, "fJgP+wqifno"},\n    {"libSceX", NULL, g, "ioKMruft1ek"},\n};\n'
+        self.assertEqual(sorted(ir.hle_entries(src, tables_only=False)),
+                         [("libSceDiscMap", ir.NID_KEY + "fJgP+wqifno"), ("libSceX", ir.NID_KEY + "ioKMruft1ek")])
 
     def test_providers(self) -> None:
         self.assertEqual(self.imp("sceKernelOpen")["provider"], "hle.c")
@@ -210,7 +219,7 @@ class ImportReportTest(unittest.TestCase):
         self.assertIn("## UNRESOLVED (3)", md)
         self.assertIn("| HIGH | libSceGone |", md)
         self.assertIn("libSceGone | libSceGone | 1 | 0 |", md)  # missing host modules table
-        self.assertEqual(json.loads((out / "r.json").read_text())["summary"]["functions"], 10)
+        self.assertEqual(json.loads((out / "r.json").read_text())["summary"]["functions"], 11)  # 10 + the one matched by NID
 
 
 if __name__ == "__main__":

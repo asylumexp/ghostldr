@@ -219,18 +219,48 @@ def send_lua(host: str, payload: bytes, port: int = 9026) -> None:
         s.shutdown(socket.SHUT_WR)
 
 
-def preflight(force: bool) -> None:
-    """Coverage-gate a boot against a staged local app0.
+def title_dump(title: str | None, select: bool) -> tuple[Path | None, str]:
+    """The local dump of the title this boot starts, and why that one (or why
+    none): --title's, else the only title with a dump here (packed ones and
+    build/ghost/app0).  A packed title's dump is where gfs_pack.py read it
+    (its layout.json).  Without --title the console boots its only installed
+    title, which needn't be one of these, so several candidates check none."""
+    if select:
+        return None, "the selector picks the title on the console"
+    t = profiles.normalize_title(title) if title else None
+    if not t:
+        here = {f.parent.name for f in profiles.TITLES_OUT.glob("*/layout.json")}
+        default = profiles.detect_title(profiles.DEFAULT_SRC) if (profiles.DEFAULT_SRC / "eboot.bin").exists() else None
+        if default:
+            here.add(default)
+        if len(here) != 1:
+            return None, (f"dumps of {', '.join(sorted(here))} here; pass --title to check one" if here
+                          else "no local dump")
+        t = here.pop()
+    src = profiles.packed(t).get("src")
+    if src:
+        return Path(src), t
+    if profiles.detect_title(profiles.DEFAULT_SRC) == t:
+        return profiles.DEFAULT_SRC, t
+    return None, f"no local dump of {t} (not packed here, and build/ghost/app0 is another title)"
+
+
+def preflight(force: bool, title: str | None, select: bool) -> None:
+    """Coverage-gate a boot against the booted title's local dump.
 
     Skips cleanly when there is nothing to check against (no local
-    app0, or a release tree with no generated name table): the gate
+    dump, or a release tree with no generated name table): the gate
     must never be the reason a boot fails on a tree that cannot run
     the checker.
     """
-    app0 = ROOT / "build/ghost/app0"
-    if not (app0 / "eboot.bin").exists():
-        print("preflight: no local app0 at build/ghost/app0; skipped", flush=True)
+    app0, which = title_dump(title, select)
+    if app0 is None:
+        print(f"preflight: {which}; skipped", flush=True)
         return
+    if not (app0 / "eboot.bin").exists():
+        print(f"preflight: no dump at {app0} ({which}); skipped", flush=True)
+        return
+    print(f"preflight: checking {which} at {app0}", flush=True)
     if not NAMES.exists():
         print("preflight: build/nid/known_names.txt missing (no build in "
               "this tree); skipped", flush=True)
@@ -331,9 +361,11 @@ def doctor(args) -> int:
             f"nothing at {args.host}:9026 ({e}); SWRR up with "
             "Luac0re's loader?")
 
-    app0 = ROOT / "build/ghost/app0"
-    if not (app0 / "eboot.bin").exists():
-        add("WARN", "title dump", "nothing staged at build/ghost/app0")
+    app0, which = title_dump(args.title, args.select)
+    if app0 is None:
+        add("WARN", "title dump", which)
+    elif not (app0 / "eboot.bin").exists():
+        add("WARN", "title dump", f"nothing staged at {app0} ({which})")
     elif not NAMES.exists():
         add("WARN", "title dump",
             "staged, but no name table (build/nid/known_names.txt) "
@@ -353,7 +385,7 @@ def doctor(args) -> int:
                 by = json.loads(out.read_text())["summary"]["functions_by_class"]
                 un = by.get("UNRESOLVED", 0)
                 add("WARN" if un else "PASS", "title dump",
-                    f"{sum(by.values())} functions, {un} unresolved")
+                    f"{which}: {sum(by.values())} functions, {un} unresolved")
 
     for status, label, detail in rows:
         print(f"{status:<4}  {label:<22} {detail}", flush=True)
@@ -432,7 +464,7 @@ def main() -> int:
         print(f"recorder (pid {recorder}) is logging to build/ghostldr/run.log", flush=True)
     if args.mode in ("probe", "boot"):
         if args.mode == "boot":
-            preflight(args.force_preflight)
+            preflight(args.force_preflight, args.title, args.select)
         if args.no_build:
             needed = (CORE, LAYOUT, EXT) if args.mode == "boot" else (CORE, LAYOUT)
             missing = [p.relative_to(ROOT) for p in needed if not p.exists()]

@@ -45,9 +45,7 @@ python3 ghostldr/host/run.py boot --app-root ghostfs --title CUSA12345 --snap
 - run.py sends every profile it knows with the core; the core uses the title's, or the generic default.
 - With a dev setup (`--app-root /data/.../app0`), the title is the one asked for, else the one whose eboot fingerprint matches a profile.
 - `--snap` starts the watchdog (every title thread's location every 20 s): that is what shows where a hang sits.
-- **Preflight:** when a name table exists (`build/nid/known_names.txt`, from `tools/fetch_deps.sh`), `run.py boot` first runs `import_report.py` over `build/ghost/app0` and writes `build/ghostldr/preflight.md`. If any import is unresolved it asks `Boot anyway? [y/N]`; `--force-preflight` boots without asking, and with no terminal to ask on the boot stops. Two limits for now:
-  - it always checks `build/ghost/app0`, whichever title `--title` boots;
-  - it counts functions the runtime extension implements by NID alone (no known name) as unresolved. Ghost and Bloodborne each import one such `libSceDiscMap` function, so for them answer `y` or pass `--force-preflight`.
+- **Preflight:** when a name table exists (`build/nid/known_names.txt`, from `tools/fetch_deps.sh`), `run.py boot` first runs `import_report.py` over the booted title's local dump and writes `build/ghostldr/preflight.md`. The dump is `--title`'s (where `gfs_pack.py` read it), or without `--title` the only title with a dump on this computer; with several, or `--select`, it skips. If any import is unresolved it asks `Boot anyway? [y/N]`; `--force-preflight` boots without asking, and with no terminal to ask on the boot stops. Ghost and Bloodborne have none.
 - `python3 ghostldr/host/run.py doctor` checks the computer and the console before a boot ([host-tooling.md](host-tooling.md)).
 
 ### Memory without a plan

@@ -18,8 +18,8 @@ Doctor sends nothing to the console beyond a TCP connect probe.
 
 ## Boot preflight gate
 
-`run.py boot` now runs `tools/import_report.py` over a staged
-`build/ghost/app0` first (only when `build/nid/known_names.txt`
+`run.py boot` now runs `tools/import_report.py` over the local dump
+of the title it boots first (only when `build/nid/known_names.txt`
 also exists; on trees that cannot run the checker it prints
 "skipped" and boots as before). The summary line prints how the
 title's functions bind — core-HLE, ext-HLE, title, host — and how
@@ -32,13 +32,14 @@ asked:
 
     python3 ghostldr/host/run.py boot --force-preflight
 
-Two limits for now. The check always looks at `build/ghost/app0`,
-whichever title `--title` boots from the save containers. And
-`import_report.py` doesn't read extension entries keyed by NID alone
-(functions with no known name), so it counts them as unresolved even
-though the extension implements them: Ghost of Tsushima and Bloodborne
-each import one (`libSceDiscMap`), so they always ask. A release tree
-ships no name table, so there the check is skipped.
+Which dump: `--title`'s, from where `gfs_pack.py` read it (its
+`build/ghostfs/<TITLE>/layout.json`), or `build/ghost/app0` when that
+is the title. Without `--title`, the only title with a dump on this
+computer. With several, or with `--select` (the console picks), it
+says so and skips. Functions the extension implements by NID alone
+(no known name) count as resolved. A release tree ships no name
+table, so there the check is skipped. `run.py doctor` checks the
+same dump.
 
 ## `tools/stub_report.py`
 

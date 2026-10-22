@@ -18,8 +18,9 @@ system module list (ghostldr/data/ps5_ps4_sysmodules.txt; only
 loads (gen_nids.boot_modules; a BUNDLED[] list in boot.c if one exists). HOST
 only means the module file exists; whether it exports the name isn't checked.
 
-Extension HLE entries are read from C files ({"libX", "name", fn} or
-MACRO("libX", name) entries anywhere in the file) or from text lists
+Extension HLE entries are read from C files ({"libX", "name", fn},
+MACRO("libX", name), or {"libX", NULL, fn, "NID"} for a function with no
+known name, matched by its NID; anywhere in the file) or from text lists
 ("libX name" per line), under native/ext/ or the --ext paths.
 
 It also says whether the title's code fits the executable memory ghostldr
@@ -109,6 +110,9 @@ _HLE_TABLE = re.compile(r"struct\s+hle_ent\s+\w+\s*\[\s*\w*\s*\]\s*=\s*\{(.*?)\n
 _ENTRY = re.compile(r'\{\s*("lib\w*"|[A-Za-z_]\w*)\s*,\s*"(\w+)"\s*,')
 # E("libX", name): a macro that stringifies the function name
 _MACRO_ENTRY = re.compile(r'\b[A-Z_][A-Z0-9_]*\(\s*("lib\w*"|[A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)')
+# {"libX", NULL, fn, "NID"}: a function with no known name, matched by its NID
+_NID_ENTRY = re.compile(r'\{\s*("lib\w*"|[A-Za-z_]\w*)\s*,\s*NULL\s*,\s*\w+\s*,\s*"([A-Za-z0-9+\-]{11})"\s*\}')
+NID_KEY = "nid:"  # table keys (library, NID_KEY + nid) for entries matched by NID
 
 
 def _lib_value(token: str, defines: dict[str, str]) -> str | None:
@@ -117,18 +121,19 @@ def _lib_value(token: str, defines: dict[str, str]) -> str | None:
 
 
 def hle_entries(text: str, tables_only: bool) -> list[tuple[str, str]]:
-    """(library, function) pairs registered in a C file's HLE tables."""
+    """(library, function) pairs registered in a C file's HLE tables; an entry
+    matched by NID alone gives (library, NID_KEY + nid)."""
 
     text = strip_comments(text)
     defines = dict(_DEFINE.findall(text))
     bodies = _HLE_TABLE.findall(text) if tables_only else [text]
     out = []
     for body in bodies:
-        for regex in (_ENTRY, _MACRO_ENTRY):
+        for regex, prefix in ((_ENTRY, ""), (_MACRO_ENTRY, ""), (_NID_ENTRY, NID_KEY)):
             for token, name in regex.findall(body):
                 lib = _lib_value(token, defines)
                 if lib:
-                    out.append((lib, name))
+                    out.append((lib, prefix + name))
     return out
 
 
@@ -551,6 +556,8 @@ def classify(imp: Import, needed: list[str], core: dict, ext: dict,
         imp.host_file = host_file(imp.module, needed, sysmods)[0]
 
     def hle(table: dict) -> str | None:
+        if imp.library and (src := table.get((imp.library, NID_KEY + imp.nid))):
+            return src
         if not imp.name:
             return None
         if imp.library:
