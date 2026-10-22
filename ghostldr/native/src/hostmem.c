@@ -19,11 +19,47 @@ struct vq_info2 {
 
 bool direct_is_ours(u64 addr);
 
+/* SWRR's executable (US and EU are the same code): its 256 MiB libc mspace
+ * (created at eboot+0x9c7cb, handle at +0x3906c0) and its
+ * "SystemServicesThread" (entry +0xabc70, handle at +0x182f330).  That
+ * thread polls system-service events and the companion-app server
+ * (sceCompanionHttpd), whose 10 MiB work buffer (pointer at +0x182f338) it
+ * took from the mspace; it leaves its loop once the word at +0x182f328 is
+ * non-zero (SWRR never sets it), then terminates the server, frees the
+ * buffer, clears the pointer and returns. */
+#define SWRR_HEAP_MSPACE 0x3906c0
+#define SWRR_SYSSVC_QUIT 0x182f328
+#define SWRR_SYSSVC_THREAD 0x182f330
+#define SWRR_SYSSVC_BUFFER 0x182f338
+
+/* PS4: the companion server runs there (apparently not on a PS5) and the
+ * thread writes into its buffer, so the heap cannot go while it runs: on a
+ * PS4 v0.1.1 boot it faulted at once (docs/ps4.md).  Stop it the way SWRR's
+ * own exit path would; true when nothing of it uses the heap any more. */
+__attribute__((minsize, cold)) static bool ps4_stop_system_services(void)
+{
+    u64 eb = g_ctx->eboot_base, thr = *(volatile u64 *)(eb + SWRR_SYSSVC_THREAD);
+    volatile u64 *buf = (volatile u64 *)(eb + SWRR_SYSSVC_BUFFER);
+    int (*kill)(u64, int) = host_dlsym((u32)g_ctx->libkernel_handle, "pthread_kill");
+    bool alive = thr && kill && kill(thr, 0) == 0;
+    u64 b0 = *buf;
+    *(volatile s32 *)(eb + SWRR_SYSSVC_QUIT) = 1;
+    u32 ms = 0;
+    for (; ms < 5000 && (*buf || (alive && kill(thr, 0) == 0)); ms += 20)
+        K.usleep(20000);
+    bool idle = !*buf && !(alive && kill(thr, 0) == 0);
+    logf("hostmem: PS4: SWRR's SystemServicesThread (%s, companion buffer %lx): %s after %u ms",
+         alive ? "running" : "not running", b0, idle ? "stopped" : "still running", ms);
+    return idle;
+}
+
 u64 host_release_emulator_memory(u64 min_size)
 {
     int (*rel)(off_t, size_t) = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelReleaseDirectMemory");
     struct vq_info2 *info = arena_alloc(sizeof(*info) + 16);
     u64 freed = 0, addr = 0x200000000;
+    u64 heap = is_ps4() ? *(volatile u64 *)(g_ctx->eboot_base + SWRR_HEAP_MSPACE) : 0;
+    bool heap_idle = !heap || ps4_stop_system_services();
     for (int i = 0; i < 400 && addr < 0x280000000; i++) {
         memset(info, 0, sizeof(*info));
         if (K.virtual_query((void *)addr, 1, info, 0x48) != 0)
@@ -34,6 +70,11 @@ u64 host_release_emulator_memory(u64 min_size)
             break;
         if (!(info->flags & 2) || size < min_size || direct_is_ours(start))
             continue;
+        if (ps4_keep_heap(start, info->end, heap, heap_idle)) {
+            logf("hostmem: PS4: kept SWRR's heap %lx-%lx (%lu MiB): a thread may still use it", start, info->end,
+                 size >> 20);
+            continue;
+        }
         int urc = K.munmap((void *)start, size);
         int rrc = rel ? rel((off_t)info->offset, size) : -1;
         logf("hostmem: released %lx-%lx (%lu MiB, prot %x type %d phys %lx) munmap %x release %x", start,

@@ -66,6 +66,9 @@ struct boot_ctx {
     u64 ext_fd, ext_size, ext_crc;
     /* game selector (sel.c): the same for its module */
     u64 sel_fd, sel_size, sel_crc;
+    /* the console's firmware from Luac0re's FW_VERSION, as 0xMMmm (12.02 ->
+     * 0x1202); 0: unknown.  The platform is ctx flag CTX_FLAG_PS4. */
+    u64 fw;
 };
 
 /* ---- runtime (rt.c) ---- */
@@ -162,6 +165,20 @@ struct jit_block {
 };
 int jit_block_create(struct jit_block *b, u64 size, u64 want_rx_addr);
 int jit_block_write(struct jit_block *b, u64 offset, const void *src, size_t len);
+void jit_block_destroy(struct jit_block *b); /* unmap and close both sides (needs the compiler's syscall gadget) */
+
+/* One sceKernelVirtualQuery answer (SceKernelVirtualQueryInfo, 0x48 bytes). */
+struct vmq {
+    u64 start, end, offset;
+    s32 prot, type;
+    u8 flags;              /* 1 flexible, 2 direct, 4 stack, 8 pooled, 16 committed */
+    char name[32];
+} __attribute__((packed));
+/* The compiler process's mappings that meet [lo, hi), ascending (at most max).
+ * It lists none of the JIT mappings: only for the diagnostic's log. */
+u32 jit_vmap(u64 lo, u64 hi, struct vmq *out, u32 max);
+int jit_peek(u64 addr, void *out, u32 n); /* compiler reads at addr, here: 0, or -1 (EFAULT, no crash) */
+int jit_stamp(u64 addr);                  /* compiler writes 16 bytes (the time) at addr: 0, or -1 (EFAULT) */
 
 /* mmap constants (FreeBSD / Orbis) */
 #define PROT_NONE 0
@@ -486,6 +503,7 @@ bool arena_is_rx(u64 addr, u64 size);
 u64 arena_small_alloc(u64 size);
 u64 arena_small_alloc_top(u64 size, u64 keep);
 u64 arena_code_alloc(u64 size); /* next 64 KiB-aligned module base in the code region */
+u64 arena_wr(u64 dst, u64 size); /* where the compiler writes [dst, dst+size); 0: it cannot (PS4 only) */
 extern u64 g_punched;           /* bytes arena_punch_rw has mapped */
 int arena_write(u64 dst, const void *src, u64 size);
 int arena_punch_rw(u64 addr, u64 size);
@@ -495,11 +513,26 @@ int arena_punch_rw(u64 addr, u64 size);
 /* ctx flag bits: 1 probe, 2 release host memory, 4 snap, 8 count imports, 16 profile,
  * 32 force title ready, 64 ext in a JIT block, 128 dialog cancel, 256 IME fixed name,
  * 512 keep Remote Play, 1024 start game modules at boot, 2048 show the game selector,
- * 4096 selector: built-in font only (sel_api.h) */
+ * 4096 selector: built-in font only (sel_api.h), 8192 the console is a PS4,
+ * 16384 PS4 diagnostic (diag.c) */
 #define CTX_FLAG_KEEP_REMOTE_PLAY 512 /* the title's sceRemoteplayProhibit is a no-op (run.py --keep-remote-play) */
 #define CTX_FLAG_BOOT_START_ALL 1024 /* start IsGame modules at boot too (run.py --boot-start-modules) */
 #define CTX_FLAG_SELECT 2048           /* game selector: show it even when the title is known (run.py --select) */
 #define CTX_FLAG_SEL_FONT_BUILTIN 4096 /* game selector: never try libSceFont (run.py --select-font builtin) */
+#define CTX_FLAG_PS4 8192              /* Luac0re's PLATFORM is "PS4" (ghostldr.lua; docs/ps4.md) */
+#define CTX_FLAG_DIAG 16384            /* run the PS4 diagnostic instead of booting (run.py probe --diag) */
+static inline bool is_ps4(void) { return (g_ctx->flags & CTX_FLAG_PS4) != 0; }
+int ghost_diag(void);                  /* diag.c */
+
+/* ---- PS4 (ps4.c: decisions without console calls; arena.c, hostmem.c and
+ * diag.c make the calls).  docs/ps4.md.
+ * The first 16 KiB of each emulator JIT program buffer cannot be written
+ * through the compiler: Luac0re puts code at +16 KiB, the core sits at the
+ * IPU buffer's +16 KiB, and a write at the EE buffer's start killed the
+ * compiler on PS5 (the selector) and on PS4 (module text). */
+#define JIT_BUF_HEADER 0x4000
+u64 jv_code_need(const struct module *mods);
+bool ps4_keep_heap(u64 start, u64 end, u64 heap, bool heap_idle);
 int ext_fetch(void);     /* receive and verify ext.bin (the NID table lives there) */
 int ext_start(void);     /* place, relocate and initialize its code */
 void ext_boot_done(void); /* imports resolved: free the blob */

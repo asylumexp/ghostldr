@@ -2,6 +2,7 @@
 """Send the ghostldr bootstrap to Luac0re's remote Lua loader and show logs.
 
     python3 ghostldr/host/run.py probe            # core probe (flags=1)
+    python3 ghostldr/host/run.py probe --diag     # PS4 diagnostic: boots nothing (docs/ps4.md)
     python3 ghostldr/host/run.py boot             # load and start the title
     python3 ghostldr/host/run.py logs             # only listen for UDP logs
 
@@ -202,6 +203,9 @@ def main() -> int:
                         help="selector text: the built-in Noto Sans (default), or try the console's system "
                              "font first (auto; experimental: it crashed SWRR on a 13.60 PS5)")
     parser.add_argument("--no-selector", action="store_true", help="do not serve the game selector")
+    parser.add_argument("--diag", action="store_true",
+                        help="with probe: log what the loader needs to know about this console (PS4 support, "
+                             "docs/ps4.md); boots and releases nothing")
     parser.add_argument("--boot-start-modules", action="store_true",
                         help="start IsGame modules (NpToolkit2, ...) at boot as before, not at the title's "
                              "sceSysmoduleLoadModule")
@@ -215,6 +219,8 @@ def main() -> int:
     parser.add_argument("--file", type=Path, help="raw Lua file for mode=lua")
     parser.add_argument("--log", type=Path, default=ROOT / "build/ghostldr/run.log")
     args = parser.parse_args()
+    if args.diag and args.mode != "probe":
+        raise SystemExit("--diag goes with probe: run.py probe --diag")
     args.host = args.host or console_ip()
 
     recorder = recorder_running()
@@ -237,7 +243,8 @@ def main() -> int:
             | (8 if args.count_imports else 0) | (32 if args.force_title_ready else 0) \
             | (64 if args.ext_jit else 0) | (128 if args.dialog_cancel else 0) | (256 if args.ime_fixed_name else 0) \
             | (512 if args.keep_remote_play else 0) | (1024 if args.boot_start_modules else 0) \
-            | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0)
+            | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0) \
+            | (16384 if args.diag else 0)
         knobs = {"gpu_heap": args.gpu_heap_mib, "slack": args.slack_mib, "pool1": args.pool1_mib,
                  "cpu_heap": args.cpu_heap_mib}
         ext = EXT.read_bytes() if args.mode == "boot" else b""
@@ -268,7 +275,7 @@ def main() -> int:
     elif args.mode == "lua":
         send_lua(args.host, args.file.read_bytes())
     if listener:
-        wait = args.wait if args.wait is not None else (None if args.mode == "boot" else 20.0)
+        wait = args.wait if args.wait is not None else (None if args.mode == "boot" else 90.0 if args.diag else 20.0)
         if wait is None:
             print("listening for the console's log; press Ctrl+C to stop (the game keeps running)", flush=True)
         try:

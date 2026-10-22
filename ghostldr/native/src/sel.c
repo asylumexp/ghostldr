@@ -58,16 +58,19 @@ COLD int sel_run(bool show, char title[16])
         return -1;
     }
     u64 size = h->image_size;
-    /* where boot.c places the first module: the region's first 16 KiB hold
-     * code the exploit still runs (writing there kills the compiler call) */
+    /* where boot.c places the first module (arena_code_region skips the
+     * buffer's first 16 KiB: writing there kills the compiler call) */
     lo = ALIGN_UP(lo, 0x10000);
+    u64 w = arena_wr(lo, size); /* lo, except on a PS4 (arena.c) */
+    if (!w || lo + size > hi)
+        return -1;
     logf("sel: placing %lu KiB at %lx, entry +%lx", size >> 10, lo, (u64)h->entry);
-    jit_call(c->jit_memcpy, 0, lo, (u64)b + h->header_size, size, 0, 0, 0);
+    jit_call(c->jit_memcpy, 0, w, (u64)b + h->header_size, size, 0, 0, 0);
     logf("sel: placed (first qword %lx), calling", *(volatile u64 *)lo);
     memset(title, 0, 16);
     int pick = ((sel_main_fn)(lo + h->entry))(&g_ghost_api, title);
     memset(b, 0, size); /* clear the module's image */
-    jit_call(c->jit_memcpy, 0, lo, (u64)b, size, 0, 0, 0);
+    jit_call(c->jit_memcpy, 0, w, (u64)b, size, 0, 0, 0);
     logf("sel: module at %lx (%lu KiB) cleared; chose %d", lo, size >> 10, pick);
     return pick;
 }

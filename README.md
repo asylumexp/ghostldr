@@ -12,6 +12,8 @@ The game's files live in SWRR's own save containers, installed once over the net
 
 **US and EU SWRR both work.** The two regions run the same executable, so the same core and offsets serve both. Each region keeps its own saved data, though: install the game data from the SWRR you will play it in (an install made in US SWRR doesn't appear in EU SWRR, and vice versa).
 
+**PS4s are experimental.** Luac0re runs there too, but the loader has only booted a title on PS5s. The first PS4 attempt crashed; [docs/ps4.md](docs/ps4.md) explains why, what changed, and the diagnostic to run (`run.py probe --diag`).
+
 **No game files are included.** Bring your own dumps; Ghost's CUSA11456 dump goes in `build/ghost/app0`, which git ignores.
 
 Start with [docs/ghost-on-stock-ps5.md](docs/ghost-on-stock-ps5.md): triggering Luac0re, the data install, and booting. Other titles: [docs/compatibility.md](docs/compatibility.md). Container names and the title catalogue: [docs/ghostfs-catalogue.md](docs/ghostfs-catalogue.md).
@@ -39,7 +41,7 @@ What the core contains:
 - **Title profiles:** the title's memory plan, save size, app parameters and HLE rules, as data; bound to its executable's build.
 - **ghostfs:** serves the chosen title's `/app0` from save containers.
 - **Game selector:** loads, runs and clears the selector module before the title (`sel.c`).
-- **Diagnostics:** a crash handler and watchdog.
+- **Diagnostics:** a crash handler and watchdog, and a PS4 diagnostic (`run.py probe --diag`, [docs/ps4.md](docs/ps4.md)).
 
 The host tools:
 
