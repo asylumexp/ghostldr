@@ -5,4 +5,4 @@ subprocess).  It runs the existing host scripts as background jobs and reads
 their output; it never reimplements what they do.  See app/README.md.
 """
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"

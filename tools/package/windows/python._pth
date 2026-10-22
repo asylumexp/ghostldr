@@ -1,0 +1,9 @@
+python{xy}.zip
+.
+..\ghostldr\host
+..\ghostldr\tools
+
+# ghostldr: Python's embeddable package doesn't put a script's own folder on
+# the path, and the scripts in ghostldr\host and ghostldr\tools import their
+# neighbours, so both folders are here.
+import site

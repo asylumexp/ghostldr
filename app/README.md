@@ -8,7 +8,20 @@ A desktop app for everything in [using-the-release.md](../docs/using-the-release
 
 It follows the system's light or dark mode.
 
-## Starting it
+## Installing it
+
+Each release has an installer per system: see [tools/package](../tools/package/README.md). All but the `.deb` bring their own Python.
+
+| System | File | Then |
+|---|---|---|
+| macOS 10.15 or later (Apple silicon and Intel) | `ghostldr-<version>-macos-universal.dmg` | Drag **ghostldr** to Applications. |
+| Windows 10 or 11 (x64) | `ghostldr-<version>-windows-x64-setup.exe` | Run it: it installs for you only, no administrator needed. |
+| Debian 12, Ubuntu 24.04 or later | `ghostldr_<version>_all.deb` | `sudo apt install ./ghostldr_<version>_all.deb` (it uses the system's Python 3.11+). |
+| Any Linux (x86-64, ARM64) | `ghostldr-<version>-<arch>.AppImage` | `chmod +x` it and run it. |
+
+They start the same app as below, in your browser.
+
+## Starting it from the release folder
 
 It needs Python 3.11 or newer and nothing else.
 
@@ -23,6 +36,7 @@ It needs Python 3.11 or newer and nothing else.
 - **Starting it again** while it runs opens the running app.
 - **Without the launchers:** `python3 app/launch.py`, with `--browser` to skip pywebview or `--no-open` to only print the address.
 - **Folder:** keep `app/` inside the unpacked release. The app uses the release's `ghostldr/` tools and its prebuilt `build/ghostldr` files.
+- **Read-only copies:** the scripts write `build/` next to themselves, so where the release can't be written (the installers' copies, or with `--workspace`), the app runs them from a copy in your data folder: see [What it stores](#what-it-stores).
 
 ## How it works
 
@@ -67,7 +81,13 @@ The last game folder, the chosen console and the logs of each run. They are kept
 | Windows | `%APPDATA%\ghostldr` |
 | Linux | `~/.config/ghostldr` |
 
-The scripts still write `build/` in the release folder, as on the command line.
+The scripts still write `build/` in the release folder, as on the command line. Where the release folder can't be written (an installed copy: the macOS app, the `.deb` in `/opt/ghostldr`, an AppImage), they run from a copy of `ghostldr/` and the prebuilt files, a few MB, kept up to date with the installed version. Its `build/` holds what they write:
+
+| System | Folder |
+|---|---|
+| macOS | `~/Library/Application Support/ghostldr/workspace` |
+| Windows | not needed: the installer's folder can be written |
+| Linux | `~/.local/share/ghostldr/workspace` |
 
 ## Tests
 

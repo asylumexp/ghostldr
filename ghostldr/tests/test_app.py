@@ -35,6 +35,7 @@ from ghostapp import parsers as P  # noqa: E402
 from ghostapp import problems  # noqa: E402
 from ghostapp import settings as ST  # noqa: E402
 from ghostapp import trackers as T  # noqa: E402
+from ghostapp import workspace as W  # noqa: E402
 from ghostapp.server import AppServer  # noqa: E402
 from ghostapp.service import AppError, Service  # noqa: E402
 
@@ -135,7 +136,7 @@ class ServerTest(TempDirs):
         self.assertEqual(self.request("GET", "/api/state", token=self.server.token[:-1])[0], 401)
         status, data = self.request("GET", "/api/state")
         self.assertEqual(status, 200)
-        self.assertEqual(data["version"], "0.3.0")
+        self.assertEqual(data["version"], "0.4.0")
 
     def test_every_api_route_checks_the_token(self) -> None:
         from ghostapp.server import ROUTES
@@ -776,6 +777,103 @@ class SettingsTest(unittest.TestCase):
             text = f.read_text(encoding="utf-8")
             for ip in re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text):
                 self.assertTrue(ip in allowed or ip.startswith("192.0.2."), f"{f.name}: {ip}")
+
+
+# ---------------------------------------------------------------- workspace (installed copies)
+
+class WorkspaceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.src = self.tmp / "installed"
+        self.dest = self.tmp / "data/workspace"
+        write(self.src / "ghostldr/host/run.py", "print('run')\n")
+        write(self.src / "ghostldr/host/old.py", "print('old')\n")
+        write(self.src / "ghostldr/data/titles/CUSA00900.json", "{}")
+        write(self.src / "ghostldr/host/__pycache__/run.cpython-311.pyc", "x")
+        write(self.src / "LICENSE", "MIT")
+        for n in ("core.bin", "core.json", "ext.bin", "selector.bin"):
+            write(self.src / "build/ghostldr" / n, f"{n} 1")
+        write(self.src / "app/launch.py", "")
+
+    def tearDown(self) -> None:
+        for d, _, _ in os.walk(self.tmp):
+            os.chmod(d, 0o755)
+        self._tmp.cleanup()
+
+    def readonly(self) -> None:
+        for d, dirs, files in os.walk(self.src):
+            for f in files:
+                os.chmod(os.path.join(d, f), 0o444)
+            os.chmod(d, 0o555)
+
+    def test_copies_the_tools_and_keeps_build(self) -> None:
+        if os.name != "nt":
+            self.readonly()
+        self.assertTrue(W.prepare(self.src, self.dest))
+        self.assertEqual((self.dest / "ghostldr/host/run.py").read_text(), "print('run')\n")
+        self.assertEqual((self.dest / "build/ghostldr/ext.bin").read_text(), "ext.bin 1")
+        self.assertTrue((self.dest / "LICENSE").is_file())
+        self.assertFalse((self.dest / "ghostldr/host/__pycache__").exists())
+        self.assertFalse((self.dest / "app").exists())                  # the app itself runs from where it is
+        self.assertTrue(os.access(self.dest / "ghostldr/host/run.py", os.W_OK))
+        # the user's own files in build/
+        write(self.dest / "build/ghostfs/CUSA00900/layout.json", "{}")
+        write(self.dest / "build/ghostldr/run.log", "log")
+        self.assertFalse(W.prepare(self.src, self.dest))                # unchanged: nothing copied
+        # a new version: changed, added and removed files
+        for d, _, _ in os.walk(self.src):
+            os.chmod(d, 0o755)
+        (self.src / "ghostldr/host/old.py").unlink()
+        write(self.src / "ghostldr/host/new.py", "")
+        (self.src / "build/ghostldr/ext.bin").chmod(0o644)
+        write(self.src / "build/ghostldr/ext.bin", "ext.bin 2")
+        self.assertTrue(W.prepare(self.src, self.dest))
+        self.assertFalse((self.dest / "ghostldr/host/old.py").exists())
+        self.assertTrue((self.dest / "ghostldr/host/new.py").exists())
+        self.assertEqual((self.dest / "build/ghostldr/ext.bin").read_text(), "ext.bin 2")
+        self.assertEqual((self.dest / "build/ghostfs/CUSA00900/layout.json").read_text(), "{}")
+        self.assertEqual((self.dest / "build/ghostldr/run.log").read_text(), "log")
+        self.assertEqual([p.name for p in self.dest.iterdir() if p.name.startswith((".new-", ".old-"))], [])
+
+    def test_a_copy_cut_short_is_redone(self) -> None:
+        W.prepare(self.src, self.dest)
+        (self.dest / W.STAMP).unlink()
+        (self.dest / ".new-x").mkdir()
+        self.assertTrue(W.prepare(self.src, self.dest))
+        self.assertFalse((self.dest / ".new-x").exists())
+
+    def test_default_dir(self) -> None:
+        with mock.patch.dict(os.environ, {"GHOSTLDR_APP_WORKSPACE": "/tmp/ws"}):
+            self.assertEqual(W.default_dir(), Path("/tmp/ws"))
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("GHOSTLDR_APP_WORKSPACE", "XDG_DATA_HOME", "LOCALAPPDATA")}
+        home = Path("/home/someone")
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(Path, "home", return_value=home):
+            with mock.patch.object(W.sys, "platform", "darwin"):
+                self.assertEqual(W.default_dir(), home / "Library/Application Support/ghostldr/workspace")
+            with mock.patch.object(W.sys, "platform", "linux"):
+                self.assertEqual(W.default_dir(), home / ".local/share/ghostldr/workspace")
+            with mock.patch.object(W.sys, "platform", "win32"):
+                self.assertEqual(W.default_dir(), home / "AppData/Local/ghostldr/workspace")
+        with mock.patch.dict(os.environ, {**env, "XDG_DATA_HOME": "/xdg"}, clear=True), \
+                mock.patch.object(W.sys, "platform", "linux"):
+            self.assertEqual(W.default_dir(), Path("/xdg/ghostldr/workspace"))
+
+    @unittest.skipIf(os.name == "nt" or getattr(os, "geteuid", lambda: 1)() == 0, "POSIX permissions, not root")
+    def test_launch_picks_the_tools_folder(self) -> None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ghostldr_launch", ROOT / "app/launch.py")
+        launch = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launch)
+        release = self.src
+        with mock.patch.object(launch, "ROOT", release), \
+                mock.patch.dict(os.environ, {"GHOSTLDR_APP_WORKSPACE": str(self.dest)}):
+            self.assertEqual(launch.tools_root(None), release)                    # an unpacked zip
+            self.assertEqual(launch.tools_root(""), self.dest)                    # --workspace
+            self.assertEqual(launch.tools_root(str(self.tmp / "x")), (self.tmp / "x").resolve())
+            self.readonly()
+            self.assertEqual(launch.tools_root(None), self.dest)                  # read-only: a workspace
 
 
 if __name__ == "__main__":

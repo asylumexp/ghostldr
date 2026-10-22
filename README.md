@@ -20,7 +20,7 @@ You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your o
 
 Download the [latest release](https://github.com/asylumexp/ghostldr/releases/latest) and follow [docs/using-the-release.md](docs/using-the-release.md).
 
-Prefer not to use a terminal? The desktop app in [`app/`](app/README.md) (macOS, Linux and Windows, Python 3.11+ only) walks through the same steps: find the console, check the setup, prepare and install a game, and play.
+Prefer not to use a terminal? The [desktop app](app/README.md) walks through the same steps: find the console, check the setup, prepare and install a game, and play. The release page has an installer for macOS, Windows and Linux with Python included, and the release zip has it in `app/` (with Python 3.11+).
 
 Quick start, from the release folder: start Luac0re in SWRR until its loader listens on port 9026, then check the setup.
 

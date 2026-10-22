@@ -4,10 +4,13 @@
     python3 app/launch.py              # a window (pywebview, if installed) or the default browser
     python3 app/launch.py --browser    # always the browser
     python3 app/launch.py --no-open    # print the address only
+    python3 app/launch.py --workspace  # run the tools from a copy in the user's data folder
 
 Needs only Python 3.11+.  The launchers next to this file (ghostldr.command,
 ghostldr.sh, ghostldr.bat) find Python and run this.  A second launch while
-the app runs opens the running one instead of starting another.
+the app runs opens the running one instead of starting another.  Installed
+copies (the packages in tools/package) pass --workspace, and a release folder
+that can't be written gets one too: see ghostapp/workspace.py.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ APP = Path(__file__).resolve().parent
 ROOT = APP.parent
 sys.path.insert(0, str(APP))
 
-from ghostapp import APP_VERSION  # noqa: E402
+from ghostapp import APP_VERSION, workspace  # noqa: E402
 from ghostapp.server import AppServer  # noqa: E402
 from ghostapp.service import Service  # noqa: E402
 from ghostapp.settings import config_dir  # noqa: E402
@@ -52,11 +55,11 @@ def instance_file() -> Path:
     return config_dir() / "instance.json"
 
 
-def running_instance() -> str | None:
+def running_instance(root: Path = ROOT) -> str | None:
     """The address (with its token) of an app already running from this folder."""
     try:
         info = json.loads(instance_file().read_text(encoding="utf-8"))
-        if info.get("root") != str(ROOT):
+        if info.get("root") != str(root):
             return None
         req = urllib.request.Request(f"http://127.0.0.1:{int(info['port'])}/api/ping",
                                      headers={"X-Ghostldr-Token": info["token"],
@@ -69,13 +72,13 @@ def running_instance() -> str | None:
     return None
 
 
-def write_instance(server: AppServer) -> None:
+def write_instance(server: AppServer, root: Path = ROOT) -> None:
     f = instance_file()
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(f), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump({"port": server.port, "token": server.token, "pid": os.getpid(), "root": str(ROOT)}, out)
+            json.dump({"port": server.port, "token": server.token, "pid": os.getpid(), "root": str(root)}, out)
     except OSError:
         pass
 
@@ -95,6 +98,14 @@ def check_tree() -> None:
                  "keep the app/ folder inside the unpacked ghostldr folder.")
 
 
+def tools_root(option: str | None) -> Path:
+    """The folder the scripts run from: the release itself, or a workspace
+    (--workspace [DIR], or the release can't be written: an installed copy)."""
+    if option is None and workspace.writable(ROOT):
+        return ROOT
+    return Path(option).expanduser().resolve() if option else workspace.default_dir()
+
+
 def main() -> int:
     # Started in the background by a shell, SIGINT arrives ignored, and the
     # scripts would inherit that: Cancel (Ctrl+C to the script) needs it back.
@@ -103,10 +114,14 @@ def main() -> int:
     ap.add_argument("--browser", action="store_true", help="open in the default browser even if pywebview is installed")
     ap.add_argument("--no-open", action="store_true", help="don't open anything; print the address")
     ap.add_argument("--port", type=int, default=0, help="local port (default: a free one)")
+    ap.add_argument("--workspace", nargs="?", const="", default=None, metavar="DIR",
+                    help="run the tools from a copy in DIR (default: the user's data folder), as installed "
+                         "copies do; automatic when this folder can't be written")
     args = ap.parse_args()
     check_tree()
+    root = tools_root(args.workspace)
 
-    url = running_instance()
+    url = running_instance(root)
     if url:
         say(f"ghostldr is already running: {url}")
         if not args.no_open:
@@ -120,9 +135,15 @@ def main() -> int:
         except Exception:
             webview = None
 
-    service = Service(ROOT, webview=webview is not None)
+    if root != ROOT:
+        try:
+            if workspace.prepare(ROOT, root):
+                say(f"Copied ghostldr's tools to {root}")
+        except OSError as e:
+            sys.exit(f"Couldn't copy ghostldr's tools to {root}: {e}")
+    service = Service(root, webview=webview is not None)
     server = AppServer(service, args.port)
-    write_instance(server)
+    write_instance(server, root)
     url = f"{server.url}#t={server.token}"
     # Closing the terminal window (SIGHUP; on Windows the console's close
     # event arrives as SIGBREAK) or a plain kill: stop the jobs first, as Quit does.
