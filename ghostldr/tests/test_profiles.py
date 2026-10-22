@@ -9,6 +9,7 @@ against fakes of the console.
 from __future__ import annotations
 
 import copy
+import os
 import shutil
 import struct
 import subprocess
@@ -292,8 +293,9 @@ class CoreProfileTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.tmp.cleanup()
 
-    def run_host(self, *args: str) -> list[str]:
-        out = subprocess.run([str(self.exe), str(self.bundle), *args], capture_output=True, text=True, timeout=60)
+    def run_host(self, *args: str, env: dict[str, str] | None = None) -> list[str]:
+        out = subprocess.run([str(self.exe), str(self.bundle), *args], capture_output=True, text=True, timeout=60,
+                             env={**os.environ, **(env or {})})
         self.assertEqual(out.returncode, 0, out.stderr)
         return out.stdout.splitlines()
 
@@ -306,6 +308,12 @@ class CoreProfileTests(unittest.TestCase):
         self.assertIn("patch rc 0 reported 4520 MiB, stream table 588 MiB, cpu heap 320 MiB", lines)
         self.assertIn("lazy site 0x896126 1, gate 0, flex gate 0", lines)     # no plan-free gates
         self.assertIn("neo host, available direct ffffffff: 0 + 0 MiB", lines)  # host answers kept
+
+    def test_free_walk_steps_over_a_failing_query(self) -> None:
+        # find-next fails inside the 0x13e00000-0x50080000 hole: the walk must
+        # still find the allocations after it and count the same 4532 MiB
+        lines = self.run_host("plan", GHOST_FP, "CUSA11456", env={"GHOSTLDR_TEST_DMQ_GAP": "0x13e00000-0x50080000"})
+        self.assertEqual([ln for ln in lines if ln.startswith("budget:")], ghost_lines())
 
     def test_ghost_is_found_by_fingerprint_without_ghostfs(self) -> None:
         lines = self.run_host("select", GHOST_FP)

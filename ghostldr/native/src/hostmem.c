@@ -131,11 +131,13 @@ void host_dmem_census(void)
         int type;
     } q;
     int (*dmq)(off_t, int, void *, size_t) = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelDirectMemoryQuery");
-    u64 total = 0, off = 0;
-    for (int i = 0; dmq && i < 256; i++) {
+    u64 total = 0, off = 0, real = K.direct_size();
+    for (int i = 0; dmq && i < 16384 && off < real; i++) {
         memset(&q, 0, sizeof(q));
-        if (dmq((off_t)off, 1 /* find next */, &q, sizeof(q)) != 0)
-            break;
+        if (dmq((off_t)off, 1 /* find next */, &q, sizeof(q)) != 0) {
+            off = ALIGN_DOWN(off, 1UL << 20) + (1UL << 20); /* see budget.c free_holes */
+            continue;
+        }
         u64 size = (u64)(q.end - q.start);
         total += size;
         if (size >= 0x100000)

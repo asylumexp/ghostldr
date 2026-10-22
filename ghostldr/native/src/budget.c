@@ -65,10 +65,16 @@ COLD static u32 free_holes(struct hole *h, u64 *total)
     int (*dmq)(off_t, int, void *, size_t) = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelDirectMemoryQuery");
     u64 real = K.direct_size(), cur = 0, off = 0;
     u32 n = 0;
-    for (int i = 0; dmq && i < 512 && n < MAX_HOLES; i++) {
+    /* find-next can fail from inside a range released earlier although
+     * allocations follow it (seen after freeing GPU-mapped memory): step on
+     * 1 MiB instead of ending the walk, which would count everything past
+     * that point as free */
+    for (int i = 0; dmq && i < 16384 && off < real && n < MAX_HOLES; i++) {
         memset(&q, 0, sizeof(q));
-        if (dmq((off_t)off, 1, &q, sizeof(q)) != 0)
-            break;
+        if (dmq((off_t)off, 1, &q, sizeof(q)) != 0) {
+            off = ALIGN_DOWN(off, MiB) + MiB;
+            continue;
+        }
         if ((u64)q.start > cur)
             h[n++] = (struct hole){cur, (u64)q.start};
         cur = off = (u64)q.end;
