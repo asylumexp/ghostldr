@@ -147,6 +147,10 @@ int jit_copy_to(u64 dst, const void *src, size_t len)
 int jit_recv_fd(int compiler_fd)
 {
     u64 ctl = priv(0x000), data = priv(0x040), iov = priv(0x060), msg = priv(0x080);
+    if (!g_ctx->jit_syscall) { /* an old ghostldr.lua on a PS4: Luac0re has no syscall address there */
+        logf("jit_recv_fd: no syscall gadget in the compiler (ghostldr.lua predates PS4 support)");
+        return -1;
+    }
     memset((void *)priv(0), 0, 0x100);
     *(u32 *)(ctl + 0) = 20;
     *(u32 *)(ctl + 4) = SOL_SOCKET;
@@ -184,21 +188,22 @@ int jit_recv_fd(int compiler_fd)
 int jit_block_create(struct jit_block *b, u64 size, u64 want_rx)
 {
     memset(b, 0, sizeof(*b));
+    b->base_fd = b->rw_fd = b->rx_fd_compiler = b->rx_fd = -1;
     size = ALIGN_UP(size, 0x4000);
     b->size = size;
     u64 name = priv(0x200), out = priv(0x240);
     strcpy((char *)name, "ghostldr");
-    w64(out, 0);
+    w64(out, (u64)-1);
     int rc = (int)jit_call(g_ctx->jit_shm_create, 0, name, size, 7, out, 0, 0);
-    b->base_fd = (int)r64(out);
+    b->base_fd = rc == 0 ? (int)r64(out) : -1;
     if (rc != 0) {
         logf("jit_block: create(%lx) rc=%x", size, rc);
         return -1;
     }
     rc = (int)jit_call(g_ctx->jit_shm_alias, 0, (u64)b->base_fd, 3, out, 0, 0, 0);
-    b->rw_fd = (int)r64(out);
+    b->rw_fd = rc == 0 ? (int)r64(out) : -1;
     int rc2 = (int)jit_call(g_ctx->jit_shm_alias, 0, (u64)b->base_fd, 5, out, 0, 0, 0);
-    b->rx_fd_compiler = (int)r64(out);
+    b->rx_fd_compiler = rc2 == 0 ? (int)r64(out) : -1;
     if (rc || rc2) {
         logf("jit_block: alias rc=%x/%x", rc, rc2);
         return -1;
@@ -215,6 +220,8 @@ int jit_block_create(struct jit_block *b, u64 size, u64 want_rx)
         return -1;
     void *addr = (void *)want_rx;
     if (want_rx) {
+        /* only there: sceKernelJitMapSharedMemory places it at its home
+         * address over whatever is mapped there */
         void *res = NULL;
         rc = K.mmap(addr, size, PROT_READ | PROT_EXEC, MAP_SHARED | MAP_FIXED, b->rx_fd, 0, &res);
         logf("jit_block: mmap fixed %lx rc=%x res=%p", want_rx, rc, res);
@@ -222,7 +229,7 @@ int jit_block_create(struct jit_block *b, u64 size, u64 want_rx)
             b->rx = want_rx;
             return 0;
         }
-        addr = (void *)want_rx;
+        return -1;
     }
     rc = K.jit_map(b->rx_fd, 5, &addr);
     logf("jit_block: jit_map rc=%x addr=%p (wanted %lx)", rc, addr, want_rx);
@@ -237,4 +244,81 @@ int jit_block_write(struct jit_block *b, u64 offset, const void *src, size_t len
     if (offset + len > b->size)
         return -1;
     return jit_copy_to(b->rw + offset, src, len);
+}
+
+#define SYS_write 4
+#define SYS_close 6
+#define SYS_munmap 73
+#define SYS_clock_gettime 232
+
+/* Reads and writes in the compiler that cannot crash it: a system call
+ * that meets an address it may not touch returns EFAULT instead.
+ * sceKernelVirtualQuery cannot answer this: in the compiler it lists none
+ * of the JIT mappings (a 13.60 PS5 shows 25 entries, no bridge, no buffer).
+ *
+ * jit_peek: the compiler write()s n bytes at addr into its end of the
+ * socket pair Luac0re connected; they are read here.  0, or -1. */
+__attribute__((minsize, cold)) int jit_peek(u64 addr, void *out, u32 n)
+{
+    if (!g_ctx->jit_syscall)
+        return -1;
+    if ((s64)jit_call(g_ctx->jit_syscall, SYS_write, g_ctx->new_jit_sock, addr, n, 0, 0, 0) != (s64)n)
+        return -1;
+    for (u32 got = 0; got < n;) {
+        ssize_t r = K.read((int)g_ctx->new_main_sock, (u8 *)out + got, n - got);
+        if (r <= 0)
+            return -1;
+        got += (u32)r;
+    }
+    return 0;
+}
+
+/* jit_stamp: the compiler's clock_gettime() writes 16 bytes (the time) at
+ * addr.  0 when it could write there, else -1. */
+__attribute__((minsize, cold)) int jit_stamp(u64 addr)
+{
+    if (!g_ctx->jit_syscall)
+        return -1;
+    return (s64)jit_call(g_ctx->jit_syscall, SYS_clock_gettime, 0 /* CLOCK_REALTIME */, addr, 0, 0, 0, 0) == 0 ? 0
+                                                                                                           : -1;
+}
+
+/* Undo jit_block_create, also a partial one: the RX view and descriptor
+ * here, the RW view and the three descriptors in the compiler. */
+__attribute__((minsize, cold)) void jit_block_destroy(struct jit_block *b)
+{
+    if (b->rx)
+        K.munmap((void *)b->rx, b->size);
+    if (b->rx_fd >= 0)
+        K.close(b->rx_fd);
+    if (g_ctx->jit_syscall) {
+        if (b->rw)
+            jit_call(g_ctx->jit_syscall, SYS_munmap, b->rw, b->size, 0, 0, 0, 0);
+        int fds[3] = {b->rx_fd_compiler, b->rw_fd, b->base_fd};
+        for (int i = 0; i < 3; i++)
+            if (fds[i] >= 0)
+                jit_call(g_ctx->jit_syscall, SYS_close, (u64)fds[i], 0, 0, 0, 0, 0);
+    } else if (b->rw || b->base_fd >= 0) {
+        logf("jit_block: no syscall gadget: the compiler keeps %lx bytes at %lx", b->size, b->rw);
+    }
+    memset(b, 0, sizeof(*b));
+    b->base_fd = b->rw_fd = b->rx_fd_compiler = b->rx_fd = -1;
+}
+
+/* The compiler process's own map: sceKernelVirtualQuery run there (ctx
+ * reserved[0]), find-next from lo, each answer copied out of the shared
+ * scratch.  Only reads. */
+__attribute__((minsize, cold)) u32 jit_vmap(u64 lo, u64 hi, struct vmq *out, u32 max)
+{
+    struct vmq *q = (struct vmq *)priv(0x1000);
+    u32 n = 0;
+    for (u64 addr = lo; g_ctx->reserved[0] && n < max && addr < hi;) {
+        memset(q, 0, sizeof(*q));
+        if ((int)jit_call(g_ctx->reserved[0], 0, addr, 1 /* find next */, (u64)q, sizeof(*q), 0, 0) != 0 ||
+            q->start >= hi || q->end <= addr)
+            break;
+        out[n++] = *q;
+        addr = q->end;
+    }
+    return n;
 }

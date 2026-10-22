@@ -4,13 +4,18 @@
 --   GHOSTLDR_TEXT_SIZE  bytes of code placed in JIT RX memory (16 KiB aligned)
 --   GHOSTLDR_IMAGE_SIZE total image size including bss
 --   GHOSTLDR_LOG_IP / GHOSTLDR_LOG_PORT   UDP log sink
---   GHOSTLDR_FLAGS      1 = probe only
+--   GHOSTLDR_FLAGS      1 = probe only (ctx flags in native/include/ghost.h);
+--                       this script adds 8192 on a PS4 (Luac0re's PLATFORM)
 --   GHOSTLDR_APP_ROOT   path of the title's app0 directory
 --   GHOSTLDR_EXT_PORT / GHOSTLDR_EXT_SIZE / GHOSTLDR_EXT_CRC
 --                       the runtime extension (build/ghostldr/ext.bin, with the
 --                       NID table): run.py serves it over TCP on the log IP;
 --                       size 0 = none.  This script only connects the socket:
 --                       the core reads the blob itself and checks size and CRC.
+--   GHOSTLDR_SEL_PORT / GHOSTLDR_SEL_SIZE / GHOSTLDR_SEL_CRC
+--                       the same for the game selector (build/ghostldr/selector.bin)
+--   GHOSTLDR_PROFILE_HEX  the title profiles (host/profiles.py boot_bundle); the
+--                       core finds them through the last u64 of the context
 
 local function fail(msg)
     send_notification("ghostldr: " .. msg)
@@ -75,30 +80,48 @@ write8(log_addr + 1, AF_INET)
 write16(log_addr + 2, ((GHOSTLDR_LOG_PORT << 8) | (GHOSTLDR_LOG_PORT >> 8)) & 0xFFFF)
 write32(log_addr + 4, u32le_ip(GHOSTLDR_LOG_IP))
 
--- 6. extension socket (created through the compiler like the log socket)
-local ext_fd = -1
-if (GHOSTLDR_EXT_SIZE or 0) > 0 then
+-- 6. extension and selector sockets (created through the compiler like the log socket)
+local function blob_socket(port, size, what)
+    if (size or 0) <= 0 then return -1 end
     local sa, tv = malloc(16), malloc(16)
     for i = 0, 15 do write8(sa + i, 0) end
     write8(sa + 1, AF_INET)
-    write16(sa + 2, ((GHOSTLDR_EXT_PORT << 8) | (GHOSTLDR_EXT_PORT >> 8)) & 0xFFFF)
+    write16(sa + 2, ((port << 8) | (port >> 8)) & 0xFFFF)
     write32(sa + 4, u32le_ip(GHOSTLDR_LOG_IP))
     write64(tv, 15)     -- SO_RCVTIMEO: a stalled transfer fails instead of hanging the core
     write64(tv + 8, 0)
-    ext_fd = create_socket(AF_INET, SOCK_STREAM, 0)
-    if ext_fd >= 0 then
-        syscall.setsockopt(ext_fd, SOL_SOCKET, 0x1006, tv, 16)
-        local rc = syscall.connect(ext_fd, sa, 16)
+    local fd = create_socket(AF_INET, SOCK_STREAM, 0)
+    if fd >= 0 then
+        syscall.setsockopt(fd, SOL_SOCKET, 0x1006, tv, 16)
+        local rc = syscall.connect(fd, sa, 16)
         if rc ~= 0 then
-            send_notification(string.format("ghostldr: extension server %s:%d: connect failed (%s)",
-                GHOSTLDR_LOG_IP, GHOSTLDR_EXT_PORT, get_error_string()))
-            syscall.close(ext_fd)
-            ext_fd = -1
+            send_notification(string.format("ghostldr: %s server %s:%d: connect failed (%s)",
+                what, GHOSTLDR_LOG_IP, port, get_error_string()))
+            syscall.close(fd)
+            fd = -1
         end
     end
+    return fd
 end
+local ext_fd = blob_socket(GHOSTLDR_EXT_PORT, GHOSTLDR_EXT_SIZE, "extension")
+local sel_fd = blob_socket(GHOSTLDR_SEL_PORT, GHOSTLDR_SEL_SIZE, "selector")
 
 -- 7. boot context (field order must match struct boot_ctx in ghost.h)
+-- A syscall instruction in the compiler (jitrpc.c moves descriptors and
+-- frees JIT blocks with it).  PS5: Luac0re's own (getpid + 7).  PS4: Luac0re
+-- keeps one libkernel wrapper per syscall, "mov rax, N; mov r10, rcx;
+-- syscall"; 7 bytes in, any of them takes the number from rax.
+local function compiler_syscall()
+    if jit_syscall.syscall_address then return jit_syscall.syscall_address end
+    local w = jit_syscall.syscall_wrapper and jit_syscall.syscall_wrapper[SYSCALL_TABLE.getpid]
+    if w and (jit_read64(w + 7) & 0xFFFFFFFFFF) == 0x050FCA8949 then return w + 7 end
+    return 0
+end
+local function fw_number()
+    local major, minor = tostring(FW_VERSION or ""):match("(%d+)%.(%d+)")
+    return major and tonumber(major, 16) * 0x100 + tonumber(minor, 16) or 0
+end
+local flags = GHOSTLDR_FLAGS | (PLATFORM == "PS4" and 8192 or 0)
 local fields = {
     0x3130305244484c47, 0, EBOOT_BASE, SCE_KERNEL_DLSYM, EBOOT_BASE + 0x31aa9,
     LIBKERNEL_HANDLE, 0, log_fd, log_addr,
@@ -109,17 +132,17 @@ local fields = {
     JIT_ROP.MOV_R8_RBX_RET, JIT_ROP.MOV_R9_RBX_RET,
     LEAK_RBX, LEAK_RBP, LEAK_R12, LEAK_R13, LEAK_R14, LEAK_R15,
     FAKE_RSP, OOB_SCRATCH_BASE, JIT_ROP_CHAIN_START, JIT_ROP_CHAIN_END,
-    jit_memcpy_addr, jit_calloc_addr, jit_syscall.syscall_address or 0, jit_libc_error_addr,
+    jit_memcpy_addr, jit_calloc_addr, compiler_syscall(), jit_libc_error_addr,
     jit_sceKernelJitCreateSharedMemory_addr, jit_sceKernelJitCreateAliasOfSharedMemory_addr,
     jit_sceKernelJitMapSharedMemory_addr,
     NEW_JIT_SOCK, NEW_MAIN_SOCK,
     SHELLCODE_SCRATCH, 0x400000,
-    0, GHOSTLDR_FLAGS,
+    0, flags,
 }
 local ctx = malloc(0x200)
 for i = 0, 0x1F8, 8 do write64(ctx + i, 0) end
 for i, v in ipairs(fields) do write64(ctx + (i - 1) * 8, v) end
-write64(ctx + 8, #fields * 8 + 8 * 8 + 3 * 8)    -- fields, reserved[8], ext_fd/size/crc
+write64(ctx + 8, #fields * 8 + 8 * 8 + 7 * 8)    -- fields, reserved[8], ext_fd/size/crc, sel_fd/size/crc, fw
 local app_root = malloc(#GHOSTLDR_APP_ROOT + 1)
 write_string(app_root, GHOSTLDR_APP_ROOT)
 write64(ctx + (#fields - 2) * 8, app_root)
@@ -134,6 +157,21 @@ write64(ctx + #fields * 8 + 0x38, GHOSTLDR_CPU_HEAP_MIB or 0)
 write64(ctx + #fields * 8 + 0x40, ext_fd)
 write64(ctx + #fields * 8 + 0x48, GHOSTLDR_EXT_SIZE or 0)
 write64(ctx + #fields * 8 + 0x50, GHOSTLDR_EXT_CRC or 0)
+-- the selector's fields and fw end at +0x78: they must stay below the profile slot (0x1F8)
+if #fields * 8 + 0x78 > 0x1F8 then fail("the boot context reaches the profile slot") end
+write64(ctx + #fields * 8 + 0x58, sel_fd)
+write64(ctx + #fields * 8 + 0x60, GHOSTLDR_SEL_SIZE or 0)
+write64(ctx + #fields * 8 + 0x68, GHOSTLDR_SEL_CRC or 0)
+write64(ctx + #fields * 8 + 0x70, fw_number())   -- "12.02" -> 0x1202
+-- title profiles: blobs ended by 8 zero bytes, pointed to by the context's last
+-- u64 (profile.c PROFILE_SLOT); without them the core uses its generic defaults
+if GHOSTLDR_PROFILE_HEX and #GHOSTLDR_PROFILE_HEX > 0 then
+    local prof = hex_to_binary(GHOSTLDR_PROFILE_HEX)
+    local prof_mem = malloc(#prof + 8)
+    write_buffer(prof_mem, prof)
+    write64(prof_mem + #prof, 0)
+    write64(ctx + 0x1F8, prof_mem)
+end
 
 send_notification(string.format("ghostldr: core at %x, calling", rx))
 local ret = func_wrap(rx)(ctx)

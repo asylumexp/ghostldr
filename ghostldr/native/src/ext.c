@@ -85,11 +85,23 @@ static int nid_key(const char *nid, u64 *key)
     return 0;
 }
 
+/* Names kept past ext_boot_done for modules loaded at run time (nid_keep):
+ * the imports of the title's sce_module files the boot did not load. */
+static u64 *g_kept;
+static const char **g_kept_name;
+static u32 g_nkept, g_kept_cap;
+
 const char *nid_to_name(const char *nid)
 {
     u64 key;
-    if (!g_nid_keys || nid_key(nid, &key) != 0)
+    if (nid_key(nid, &key) != 0)
         return NULL;
+    if (!g_nid_keys) {
+        for (u32 i = 0; i < g_nkept; i++)
+            if (g_kept[i] == key)
+                return g_kept_name[i];
+        return NULL;
+    }
     u32 lo = 0, hi = g_nid_count;
     while (lo < hi) {
         u32 mid = lo + (hi - lo) / 2;
@@ -101,6 +113,34 @@ const char *nid_to_name(const char *nid)
             hi = mid;
     }
     return NULL;
+}
+
+__attribute__((minsize, cold)) void nid_keep(const char *nid)
+{
+    u64 key;
+    const char *name = g_nid_keys ? nid_to_name(nid) : NULL;
+    if (!name || nid_key(nid, &key) != 0)
+        return;
+    for (u32 i = 0; i < g_nkept; i++)
+        if (g_kept[i] == key)
+            return;
+    if (g_nkept == g_kept_cap) {
+        u32 cap = g_kept_cap ? g_kept_cap * 2 : 256;
+        u64 *k = arena_alloc(cap * sizeof(*k));
+        const char **n = arena_alloc(cap * sizeof(*n));
+        if (!k || !n)
+            return;
+        memcpy(k, g_kept, g_nkept * sizeof(*k));
+        memcpy(n, g_kept_name, g_nkept * sizeof(*n));
+        g_kept = k, g_kept_name = n, g_kept_cap = cap;
+    }
+    size_t len = strlen(name) + 1;
+    char *copy = arena_alloc(len);
+    if (!copy)
+        return;
+    memcpy(copy, name, len);
+    g_kept_name[g_nkept] = copy;
+    g_kept[g_nkept++] = key;
 }
 
 /* The blob lives only until the imports are resolved.  It goes in app
@@ -244,35 +284,13 @@ const struct ext_lib *ext_lib_policy(const char *lib)
     return g_exp && lib ? g_exp->lib_policy(lib) : NULL;
 }
 
-/* sceKernelDlsym on a host module (hle.c): 0 = the extension's function in
- * *out, 1 = ask the host, -1 = refused (the module's library has no host
- * fallback and the extension lacks the function).  No library is known for
- * a dlsym, so the extension matches by NID alone. */
-int ext_dlsym(u32 handle, const char *name, void **out)
+/* A sysmodule load the title asked for failed (hle.c): families that keep a
+ * library's mode switch it to their virtual implementation. */
+void ext_note_sysmodule(u32 id, s32 rc)
 {
-    if (!g_exp || !name)
-        return 1;
-    char nid[12];
-    compute_nid(name, nid);
-    u64 fn = g_exp->lookup(NULL, nid);
-    if (fn) {
-        *out = (void *)fn;
-        return 0;
-    }
-    struct sce_module_info info;
-    memset(&info, 0, sizeof(info));
-    info.size = sizeof(info);
-    if (!K.module_info || K.module_info(handle, &info) != 0)
-        return 1;
-    char *dot = (char *)strrchr_c(info.name, '.');
-    if (dot)
-        *dot = 0; /* libSceNpTrophy.sprx -> libSceNpTrophy */
-    const struct ext_lib *pol = g_exp->lib_policy(info.name);
-    if (pol && (pol->flags & EXT_LIB_NO_HOST)) {
-        *out = NULL;
-        return -1;
-    }
-    return 1;
+    if (g_exp && g_exp->size >= __builtin_offsetof(struct ext_exports, sysmodule_failed) + sizeof(void *) &&
+        g_exp->sysmodule_failed)
+        g_exp->sysmodule_failed(id, rc);
 }
 
 static int ext_selftest(void)
@@ -351,6 +369,7 @@ int ext_start(void)
 
 void ext_boot_done(void)
 {
-    logf("ext: %u imports bound to the extension; NID table freed (%lu KiB)", g_ext_hits, g_blob_size >> 10);
+    logf("ext: %u imports bound to the extension; NID table freed (%lu KiB), %u names kept for run-time loads",
+         g_ext_hits, g_blob_size >> 10, g_nkept);
     ext_release();
 }

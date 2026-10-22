@@ -96,6 +96,38 @@ struct ghost_api {
 
     /* the core's own overrides (an extension function may wrap one) */
     u64 (*hle_lookup)(const char *lib, const char *name);
+
+    /* the title's identity and path namespace */
+    const char *(*title_id)(void); /* "CUSA11456" from the ghostfs index, "" when unknown */
+    /* remap_path asks fn about title paths starting with prefix; fn returns
+     * the host path (in buf) or NULL.  Only during ext_init (a family's init). */
+    int (*path_remap_add)(const char *prefix, const char *(*fn)(const char *path, char *buf, size_t size));
+    /* save data family (ext/src/hle_savedata.c): real save containers for a
+     * given user, real mount slots taken from ghostfs's data containers, the
+     * installed title's ID, and path translations ahead of remap_path's own */
+    int (*gfs_mount_user)(s32 user, const char *dirname, int mode, u64 blocks, char mount_point[16],
+                          u64 *required_blocks);
+    int (*gfs_slot_reserve)(void);
+    void (*gfs_slot_release)(void);
+    const char *(*gfs_title)(void);
+    int (*remap_hook_add)(const char *(*fn)(const char *path, char *buf, size_t size));
+    /* the title's modules after boot: load a prx (loader.c; *err an SCE
+     * kernel error) and start one at most once (modules.c) */
+    struct module *(*module_load_runtime)(const char *path, int *err);
+    int (*module_start)(struct module *m, u64 argc, const void *argp);
+    void (**thread_dtors)(void); /* the title libc's thread-exit hook (tls.c) */
+    /* a title thread created through real (a host function with
+     * scePthreadCreate's arguments), with its TLS block */
+    int (*ghost_thread_start)(void *real, void *thr, const void *attr, void *(*fn)(void *), void *arg,
+                              const char *name);
+    u32 (*profile_has)(u32 mask); /* the title profile's PF_* flags (profile.c) */
+    void (*tls_thread_exit)(void); /* a title thread ends: its TLS blocks go back (tls.c) */
+    u64 (*tls_thunk)(u64 fn);      /* fn behind a stub that gives the calling thread its TLS block */
+    /* flexible memory as the title gets it (budget.c): mapped from direct
+     * memory within the title's flexible budget, and a whole mapping given
+     * back (its budget too) */
+    int (*flex_map)(void **addr, size_t len, int prot, int flags);
+    int (*flex_unmap)(void *addr, size_t len);
 };
 
 /* ---- what the extension registers and returns ---- */
@@ -132,6 +164,8 @@ struct ext_family {
     u32 nhle, nlibs;
     const struct ext_lib *libs;
     int (*init)(void); /* optional; nonzero: the family's functions and policies are not used */
+    /* optional (EXT_FAMILY_HOOKS): a sysmodule load the title asked for failed */
+    void (*sysmodule_failed)(u32 id, s32 rc);
 };
 
 #define EXT_EXPORTS_MAGIC 0x32505845u /* "EXP2" */
@@ -144,6 +178,9 @@ struct ext_exports {
     /* everything registered, for logs and tools: nid filled in */
     const struct ext_hle_ent *hle;
     u32 nhle, nfamilies, nlibs;
+    /* Tells the families that a sysmodule load the title asked for failed
+     * (hle.c; the core checks size before calling it). */
+    void (*sysmodule_failed)(u32 id, s32 rc);
 };
 
 typedef const struct ext_exports *(*ext_init_fn)(const struct ghost_api *api);

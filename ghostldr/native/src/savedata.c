@@ -60,7 +60,7 @@ static s64 k_size(const char *p)
 }
 
 /* With ghostfs (no kernel exploit) /data is out of reach: the title's saves
- * live in the SWRR save container <prefix>SAVE (GHOSTSAVE for CUSA11456),
+ * live in the SWRR save container <prefix>SAVE (GHOSTSAVE for Ghost),
  * mounted read/write for the length of one call and unmounted (= committed)
  * after it. */
 #define ERR_SAVE_NOT_FOUND 0x809f0008
@@ -75,7 +75,7 @@ static bool save_begin(void)
         K.usleep(1000);
     int rc = gfs_mount(gfs_save_name(), 2, 0, g_save_mp);
     if (rc == (int)ERR_SAVE_NOT_FOUND)
-        rc = gfs_mount(gfs_save_name(), 6, 256, g_save_mp);   /* 8 MiB: save memory is 0x87800 */
+        rc = gfs_mount(gfs_save_name(), 6, profile_hdr()->save_blocks, g_save_mp); /* Ghost: 256 (8 MiB) */
     if (rc != 0) {
         logf("savedata: %s mount -> %x", gfs_save_name(), rc);
         __atomic_store_n(&g_save_lock, 0, __ATOMIC_RELEASE);
@@ -391,9 +391,13 @@ s64 hle_save_dir_search(const struct search_cond *c, struct search_result *r)
     int fd = k_open(save_root(), O_RDONLY | O_DIRECTORY, 0);
     if (fd < 0)
         return 0;
-    static u8 buf[4096];
+    static u8 *buf; /* page_alloc'd: keeps the core image small */
+    if (!buf && !(buf = page_alloc(4096))) {
+        k_close(fd);
+        return 0;
+    }
     s64 n;
-    while ((n = ((int (*)(int, void *, u64))host_real("sceKernelGetdents"))(fd, buf, sizeof(buf))) > 0) {
+    while ((n = ((int (*)(int, void *, u64))host_real("sceKernelGetdents"))(fd, buf, 4096)) > 0) {
         for (s64 off = 0; off < n;) {
             u16 reclen = *(u16 *)(buf + off + 4);
             u8 type = buf[off + 6], nlen = buf[off + 7];

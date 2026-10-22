@@ -89,16 +89,47 @@ extern const struct ghost_api *G HIDDEN;
 #define arena_write G->arena_write
 #define stub_alloc_code G->stub_alloc_code
 #define hle_lookup G->hle_lookup
+/* not a bare `title_id` macro: families have struct fields of that name */
+#define ext_title_id G->title_id
+#define path_remap_add G->path_remap_add
+#define gfs_mount_user G->gfs_mount_user
+#define gfs_slot_reserve G->gfs_slot_reserve
+#define gfs_slot_release G->gfs_slot_release
+#define gfs_title G->gfs_title
+#define remap_hook_add G->remap_hook_add
+#define module_load_runtime G->module_load_runtime
+#define module_start G->module_start
+#define g_thread_dtors (*G->thread_dtors)
+#define ghost_thread_start G->ghost_thread_start
+#define profile_has G->profile_has
+#define tls_thread_exit G->tls_thread_exit
+#define tls_thunk G->tls_thunk
+#define flex_map G->flex_map
+#define flex_unmap G->flex_unmap
+
+/* the extension's own tables (ext_main.c): the function registered for an
+ * import of nid from lib (NULL: any library), and a library's policy */
+u64 ext_find(const char *lib, const char *nid) HIDDEN;
+const struct ext_lib *ext_find_policy(const char *lib) HIDDEN;
 
 /* One family per file: its HLE table, its library policies and an optional
- * int init(void), run by ext_init first (nonzero: the family is skipped). */
-#define EXT_FAMILY_LIBS(family, table, lib_table, init_fn)                                       \
+ * int init(void), run by ext_init first (nonzero: the family is skipped).
+ * EXT_FAMILY_HOOKS adds sysmodule_fn(id, rc), which hears of every sysmodule
+ * load the title asked for that failed. */
+#define EXT_FAMILY_HOOKS(family, table, lib_table, init_fn, sysmodule_fn)                         \
     static const struct ext_family ext_family_ = {family, table, ARRAY_SIZE(table),              \
-                                                  ARRAY_SIZE(lib_table), lib_table, init_fn};   \
+                                                  ARRAY_SIZE(lib_table), lib_table, init_fn,        \
+                                                  sysmodule_fn};                                    \
     static const struct ext_family *const ext_family_ref_                                       \
         __attribute__((used, section("ext_families"))) = &ext_family_
 
+#define EXT_FAMILY_LIBS(family, table, lib_table, init_fn) EXT_FAMILY_HOOKS(family, table, lib_table, init_fn, NULL)
+
 #define EXT_FAMILY(family, table, init_fn)                                                        \
-    static const struct ext_family ext_family_ = {family, table, ARRAY_SIZE(table), 0, NULL, init_fn}; \
+    static const struct ext_family ext_family_ = {family, table, ARRAY_SIZE(table), 0, NULL, init_fn, NULL}; \
     static const struct ext_family *const ext_family_ref_                                       \
         __attribute__((used, section("ext_families"))) = &ext_family_
+
+/* A family that replaces sceSysmoduleLoadModule reports failed loads here
+ * (the core's own version does: hle.c); every family's hook hears of them. */
+void ext_sysmodule_failed(u32 id, s32 rc) HIDDEN;

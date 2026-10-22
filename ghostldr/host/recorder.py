@@ -174,7 +174,7 @@ def udp_logs(session: Session, events: Events) -> None:
 def klog_follow(events: Events) -> None:
     while not STOP.is_set():
         try:
-            ip = console.console_ip()
+            ip = console.console_ip(quiet=True)
             with socket.create_connection((ip, 3232), timeout=5) as s, KLOG.open("a") as log:
                 s.settimeout(1)
                 # a console that dies sends no FIN: let keepalives end the connection
@@ -215,10 +215,10 @@ def health(session: Session, events: Events) -> None:
     while not STOP.is_set():
         STOP.wait(10)
         cached = console.CACHE.read_text().strip() if console.CACHE.exists() else ""
-        up = bool(cached) and console._ask(cached)
+        up = bool(cached) and console.probe(cached) is not None
         if not up:
             try:
-                up = bool(console.console_ip())
+                up = bool(console.console_ip(quiet=True))
             except SystemExit:
                 up = False
         misses = 0 if up else misses + 1
@@ -245,6 +245,10 @@ def main() -> int:
     PID_FILE.write_text(str(os.getpid()))
     signal.signal(signal.SIGTERM, lambda *_: STOP.set())
 
+    try:
+        console.console_ip()        # once, visibly: lists several consoles, asks if none stands out
+    except SystemExit as e:
+        say(f"console not chosen yet ({e}); retrying in the background")
     events = Events()
     session = Session()
     for target, targs in ((udp_logs, (session, events)), (klog_follow, (events,)), (health, (session, events))):

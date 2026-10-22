@@ -5,6 +5,7 @@
 #define DT_NULL 0
 #define DT_INIT 12
 #define DT_FINI 13
+#define DT_SCE_FINGERPRINT 0x61000007
 #define DT_SCE_MODULE_INFO 0x6100000D
 #define DT_SCE_NEEDED_MODULE 0x6100000F
 #define DT_SCE_EXPORT_LIB 0x61000013
@@ -84,7 +85,7 @@ int module_parse(struct module *m, u8 *file, u64 size)
     }
 
     const u64 *dyn = NULL;
-    u64 ndyn = 0;
+    u64 ndyn = 0, dynlib_size = 0, fingerprint = ~0UL;
     for (u32 i = 0; i < m->phnum; i++) {
         struct elf_phdr *p = &m->phdrs[i];
         if (p->type == PT_DYNAMIC && m->seg_data[i]) {
@@ -92,6 +93,7 @@ int module_parse(struct module *m, u8 *file, u64 size)
             ndyn = p->filesz / 16;
         } else if (p->type == PT_SCE_DYNLIBDATA) {
             m->dynlib = m->seg_data[i];
+            dynlib_size = p->filesz;
         } else if (p->type == PT_TLS) {
             m->tls_vaddr = p->vaddr;
             m->tls_filesz = p->filesz;
@@ -99,6 +101,8 @@ int module_parse(struct module *m, u8 *file, u64 size)
             m->tls_align = p->align;
         } else if (p->type == PT_SCE_PROCPARAM) {
             m->proc_param = p->vaddr; /* rebased in module_map */
+        } else if (p->type == PT_GNU_EH_FRAME) {
+            m->eh_frame_hdr = p->vaddr, m->eh_frame_hdr_size = p->memsz;
         }
     }
     if (!dyn || !m->dynlib) {
@@ -119,10 +123,16 @@ int module_parse(struct module *m, u8 *file, u64 size)
         case DT_SCE_RELASZ: relasz = val; break;
         case DT_SCE_JMPREL: jmprel = val; break;
         case DT_SCE_PLTRELSZ: pltrelsz = val; break;
-        case DT_INIT: m->init = val; break;
+        case DT_INIT: m->init = val, m->has_init = true; break;
         case DT_FINI: m->fini = val; break;
+        case DT_SCE_FINGERPRINT: fingerprint = val; break;
         }
     }
+    /* (fingerprint + 20 would wrap when the tag is missing) */
+    bool has_fp = fingerprint < dynlib_size && dynlib_size - fingerprint >= 20;
+    /* the build of the executable: title profiles are bound to it (profile.c) */
+    if (m->is_main)
+        profile_bind(has_fp ? m->dynlib + fingerprint : NULL);
     m->strtab = (const char *)(m->dynlib + strtab);
     m->symtab = (const struct elf_sym *)(m->dynlib + symtab);
     m->nsyms = symtabsz / sizeof(struct elf_sym);
@@ -130,6 +140,8 @@ int module_parse(struct module *m, u8 *file, u64 size)
     m->nrela = relasz / sizeof(struct elf_rela);
     m->jmprel = (const struct elf_rela *)(m->dynlib + jmprel);
     m->njmprel = pltrelsz / sizeof(struct elf_rela);
+    if (has_fp) /* for the module queries (the extension's module family) */
+        memcpy(m->fingerprint, m->dynlib + fingerprint, sizeof(m->fingerprint));
 
     for (u64 i = 0; i < ndyn; i++) {
         u64 tag = dyn[i * 2], val = dyn[i * 2 + 1];
@@ -153,6 +165,11 @@ int module_parse(struct module *m, u8 *file, u64 size)
         struct elf_phdr *p = &m->phdrs[i];
         if (p->type != PT_LOAD && p->type != PT_SCE_RELRO)
             continue;
+        if (m->nsegs < ARRAY_SIZE(m->segs)) {
+            m->segs[m->nsegs].vaddr = p->vaddr;
+            m->segs[m->nsegs].size = (u32)ALIGN_UP(p->memsz, 0x4000);
+            m->segs[m->nsegs++].prot = (s32)p->flags;
+        }
         if (p->vaddr < lo)
             lo = p->vaddr;
         if (p->vaddr + p->memsz > hi)

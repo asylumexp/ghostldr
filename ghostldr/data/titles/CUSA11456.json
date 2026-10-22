@@ -1,0 +1,49 @@
+{
+ "title": "CUSA11456",
+ "name": "Ghost of Tsushima",
+ "version": "02.18",
+ "status": "playable",
+ "notes": "Needs a memory plan: its mode-0 plan wants ~5.07 GiB, SWRR has 4.5. The texture streaming pool absorbs the shortfall (~590 MiB); the planner heaps and the 64 KiB-page pool are backed lazily.",
+ "eboot": {"fingerprint": "3afb932d5171d24cc9f3d536dedfaf6900000000"},
+ "pack": {
+  "prefix": "GHOST",
+  "order": "CUSA11456-open-order.txt",
+  "late": ["cache/psarc/"],
+  "exclude": "^(eboot\\.bin\\.xref|cache/psarc/lang_(french|latino|brazilian|japanese)_audio\\.psarc)$",
+  "groups": [
+   ["^(sce_sys|sce_module|ui)/|^[^/]+$", 0],
+   ["^cache/(?i:izu[^/]*|[^/]*[_.#&-]izu(?:[_.#&-][^/]*)?)$", 12],
+   ["^cache/(?i:toy[^/]*|[^/]*[_.#&-]toy(?:[_.#&-][^/]*)?)$", 13],
+   ["^cache/(?i:kam[^/]*|[^/]*[_.#&-]kam(?:[_.#&-][^/]*)?)$", 14],
+   ["^cache/(?i:iki[^/]*|[^/]*[_.#&-]iki(?:[_.#&-][^/]*)?)$", 15],
+   ["^cache/[^/]+$", 11],
+   ["^cache/psarc/", 20],
+   ["^cache/meshes/", 30],
+   ["^cache/bitmaps/", 40],
+   ["^cache/", 50],
+   ["^movies/", 60],
+   ["", 70]
+  ]
+ },
+ "app_params": {"0": 3, "1": 11456},
+ "save_blocks": 256,
+ "features": ["ghost_hooks", "ghost_diagnostics"],
+ "tls_sites": {"eboot.bin": "CUSA11456-tls-eboot.txt"},
+ "memory": {
+  "mode": "plan",
+  "runtime_reserve_mib": 32,
+  "video_reserve_mib": 100,
+  "plan": {
+   "title_fixed_mib": 3996,
+   "overcommit_mib": 120,
+   "lazy_sites": ["0x896126", "0x89614a", "0xeee2cf"],
+   "tables": [
+    {"table": "0x111cd50", "role": "absorb", "what": "streaming pool", "min_mib": 128,
+     "expect": ["0x46000000", "0x46000000", "0x46000000", "0x84800000", "0x125800000", "0x125800000"]},
+    {"table": "0x111ce10", "role": "set", "what": "general GPU heap", "knob": "gpu_heap"},
+    {"table": "0x111cde0", "role": "set", "what": "type-0 engine heap", "knob": "pool1"},
+    {"table": "0x111cd20", "role": "set", "what": "CPU malloc heap", "knob": "cpu_heap", "mib": 320}
+   ]
+  }
+ }
+}

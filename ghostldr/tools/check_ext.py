@@ -317,8 +317,12 @@ def unresolved_in_log(log: Path) -> set[tuple[str, str]]:
 
 
 def check_title(app0: Path, by_nid: dict[str, str], db: dict[str, str], ext: ExtModel, core_elf: Path,
-                old_core_elf: Path | None, log: Path | None, r: Report) -> None:
+                old_core_elf: Path | None, log: Path | None, r: Report, base_core_elf: Path | None = None) -> None:
     core = core_hle(core_elf)
+    # "before" binds with the base core's override tables (default: this core's)
+    base = core_hle(base_core_elf) if base_core_elf else core
+    if base_core_elf:
+        r.ok(f"before = {base_core_elf} without the extension: {len(base)} core overrides, now {len(core)}")
     if old_core_elf:
         old_names = old_core_names(old_core_elf)
         old_core = core_hle(old_core_elf)
@@ -337,14 +341,14 @@ def check_title(app0: Path, by_nid: dict[str, str], db: dict[str, str], ext: Ext
         libs = {lib.name for lib in img.export_libs.values()}
         exports.append((libs, {s.nid for s in img.exports()}))
 
-    def core_hit(lib, name) -> bool:
-        return any(n == name and (lib is None or l == lib) for l, n in core)
+    def core_hit(lib, name, table) -> bool:
+        return any(n == name and (lib is None or l == lib) for l, n in table)
 
     def stage(lib, nid, name, with_ext: bool) -> str:
         """resolve_import's choice, before (no extension) and after."""
         if with_ext and ext.lookup(lib, nid):
             return "extension HLE"
-        if name and core_hit(lib, name):
+        if name and core_hit(lib, name, core if with_ext else base):
             return "core HLE"
         if lib and any(lib in libs and nid in nids for libs, nids in exports):
             return "title module"
@@ -406,6 +410,9 @@ def main() -> int:
                     help="a title's app0 to compare resolution against (skipped if missing)")
     ap.add_argument("--log", type=Path, help="run log: imports it reports as unresolved count as stubs")
     ap.add_argument("--old-core-elf", type=Path, help="a core.elf built before the extension, to compare with")
+    ap.add_argument("--base-core-elf", type=Path,
+                    help="compare with this core's override tables (e.g. the integration branch's core.elf) instead "
+                         "of the current core's, so imports moved out of the core are listed")
     ap.add_argument("--verbose", action="store_true", help="list every import an extension family took over")
     args = ap.parse_args()
     global VERBOSE
@@ -418,7 +425,7 @@ def main() -> int:
     by_nid = check_nids(b, db, r)
     model = check_families(b, r)
     if (args.app0 / "eboot.bin").exists():
-        check_title(args.app0, by_nid, db, model, args.core_elf, args.old_core_elf, args.log, r)
+        check_title(args.app0, by_nid, db, model, args.core_elf, args.old_core_elf, args.log, r, args.base_core_elf)
     else:
         r.warn(f"{args.app0}/eboot.bin missing: title resolution not compared")
     print("FAILED" if r.failures else "all checks passed")

@@ -1,29 +1,37 @@
 # ghostldr
 
-Runs a PS4 game backup, Ghost of Tsushima (CUSA11456 v2.18), inside *Star Wars Racer Revenge* (SWRR, PS4 US CUSA03474 or EU CUSA03492) on a PS5. It goes through [Luac0re](https://github.com/Gezine/Luac0re)'s userland JIT exploit, with no kernel exploit and no jailbreak.
+Runs PS4 game backups and homebrew inside *Star Wars Racer Revenge* (SWRR, PS4 US CUSA03474 or EU CUSA03492) on a PS5. It goes through [Luac0re](https://github.com/Gezine/Luac0re)'s userland JIT exploit, with no kernel exploit and no jailbreak.
+
+**Ghost of Tsushima (CUSA11456 v2.18) is the only game tested so far.** The loader itself is title-agnostic: what Ghost needs beyond the defaults is in its profile. Another title boots as far as its imports and memory needs allow; [docs/compatibility.md](docs/compatibility.md) is how to bring one up.
+
+**Homebrew** built with the [OpenOrbis PS4 toolchain](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain) runs with no profile: its stdout goes to the log, its files come from the save containers, and it gets its framebuffers, the pad and its malloc memory. See [Homebrew](docs/compatibility.md#homebrew) for packing and booting it, and what doesn't work yet.
 
 [![Ghost of Tsushima gameplay running inside SWRR on a stock PS5 (click for the full video)](docs/media/ghostldr-demo-preview.gif)](docs/media/ghostldr-demo.mp4?raw=true)
 
 [Full demo, 3½ minutes (MP4)](docs/media/ghostldr-demo.mp4?raw=true): Luac0re's loader, the ghostldr send, then Ghost booting from the save containers into gameplay on a stock 13.60 PS5.
 
-The game's files live in SWRR's own save containers, installed once over the network ("ghostfs").
+The game's files live in SWRR's own save containers, installed once over the network ("ghostfs"). Several titles can be installed side by side.
 
 **US and EU SWRR both work.** The two regions run the same executable, so the same core and offsets serve both. Each region keeps its own saved data, though: install the game data from the SWRR you will play it in (an install made in US SWRR doesn't appear in EU SWRR, and vice versa).
 
-**No game files are included.** Bring your own CUSA11456 dump; it goes in `build/ghost/app0`, which git ignores.
+**PS4s are experimental.** Luac0re runs there too, but the loader has only booted a title on PS5s. The first PS4 attempt crashed; [docs/ps4.md](docs/ps4.md) explains why, what changed, and the diagnostic to run (`run.py probe --diag`).
 
-Start with [docs/ghost-on-stock-ps5.md](docs/ghost-on-stock-ps5.md): triggering Luac0re, the data install, and booting.
+**No game files are included.** Bring your own dumps; Ghost's CUSA11456 dump goes in `build/ghost/app0`, which git ignores.
+
+Start with [docs/ghost-on-stock-ps5.md](docs/ghost-on-stock-ps5.md): triggering Luac0re, the data install, and booting. Other titles: [docs/compatibility.md](docs/compatibility.md). Container names and the title catalogue: [docs/ghostfs-catalogue.md](docs/ghostfs-catalogue.md).
+
+To back up and restore saves from a browser, see [docs/manager.md](docs/manager.md): a small web manager that runs on the PS5 through Luac0re.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `ghostldr/native/` | **The loader core** (C, about 6,400 lines). Runs inside SWRR from Luac0re's JIT buffer. Its runtime extension (`ext/`, see [ext/README.md](ghostldr/native/ext/README.md)) carries the NID table and more HLE code, and is fetched from the computer at boot. |
+| `ghostldr/native/` | **The loader core** (C, about 6,400 lines). Runs inside SWRR from Luac0re's JIT buffer. Its runtime extension (`ext/`, see [ext/README.md](ghostldr/native/ext/README.md)) carries the NID table and more HLE code, and is fetched from the computer at boot. The game selector (`selector/`, see [docs/selector.md](docs/selector.md)) is a second module that picks the title to boot and is gone before it loads. |
 | `ghostldr/host/` | **Computer-side tools** (Python). |
-| `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the save resigner, and the sandbox/save probes. |
+| `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the web manager, the save resigner, and the sandbox/save probes. |
 | `ghostldr/tools/` | **Build and analysis helpers:** ELF/NID parsing, the extension packer and its offline checker (`mkext.py`, `check_ext.py`), the import coverage report (`import_report.py`), disassembler, cross-references, Luac0re bundler. |
-| `ghostldr/data/` | Ghost's file open order, used to pack the containers (file names only), and the system modules a PS4 app can load on a 13.60 PS5. |
-| `ghostldr/tests/` | Offline tests: the installer against a fake console, the extension loader run on the built `ext.bin`, and the import report against a synthetic title. |
+| `ghostldr/data/` | Title profiles (`titles/<TITLE>.json` over `titles/default.json`), Ghost's file open order (file names only), and the system modules a PS4 app can load on a 13.60 PS5. |
+| `ghostldr/tests/` | Offline tests: the installer and the web manager against fake consoles (the manager's need a desktop Lua 5.3 or 5.4), profiles, the pack order, the core's profile, memory-budget, ghostfs and module-loading code built for the computer, the extension loader run on the built `ext.bin`, the homebrew families built for the computer, the import report against a synthetic title, and the game selector (screenshots of its UI, and the built `selector.bin` against a fake console). `tests/homebrew/` is a small test homebrew (needs the OpenOrbis toolchain). |
 | `host/payloads/` | **Dev-only console payloads** (ps5-payload-sdk), for a jailbroken console: launch or close SWRR (US or EU), unjail it, save watcher, ps, df, module dump. |
 | `tools/fetch_deps.sh` | Fetches the public build inputs (see Setup). |
 
@@ -31,27 +39,31 @@ What the core contains:
 
 - **Loading:** a SELF/ELF loader with relocation and NID resolution, and static TLS.
 - **System-call replacements:** file I/O, memory, video decoder, save data, dialogs, user service.
-- **Memory:** a virtual direct-memory manager that fits Ghost's memory plan into SWRR's 4.5 GiB.
-- **ghostfs:** serves `/app0` from save containers.
-- **Diagnostics:** a crash handler and watchdog.
+- **Memory:** a stable direct-memory budget every title gets without a plan, per-title memory plans (Ghost's fits its ~5 GiB plan into SWRR's 4.5 GiB), and allocations scattered over the free holes.
+- **Title profiles:** the title's memory plan, save size, app parameters and HLE rules, as data; bound to its executable's build.
+- **ghostfs:** serves the chosen title's `/app0` from save containers.
+- **Game selector:** loads, runs and clears the selector module before the title (`sel.c`).
+- **Diagnostics:** a crash handler and watchdog, and a PS4 diagnostic (`run.py probe --diag`, [docs/ps4.md](docs/ps4.md)).
 
 The host tools:
 
 - **`run.py`:** build the core, send it, and log the run.
-- **`gfs_pack.py` and `gfs_install.py`:** lay out and install the ghostfs data, switching titles safely and resuming interrupted installs.
+- **`gfs_pack.py` and `gfs_install.py`:** lay out and install titles side by side, checking free space and resuming interrupted installs (`--list`, `--remove TITLE`).
+- **`profiles.py`:** check and inspect title profiles. **`capture_order.py`:** turn a boot log into a title's file open order.
+- **`manager.py`:** start the web manager on the PS5: download, restore, copy and delete saves, and remove installed titles, from a browser.
 - **`resign_save.py`:** make a Luac0re save for another PSN account, for the SWRR region it runs on (US or EU).
 - **`recorder.py`:** crash and klog recorder.
 - **`console.py`:** finds the PS5 on the network.
 
 ## Releases
 
-A release zip is this repo plus a prebuilt core and extension (`build/ghostldr/core.bin`, `core.json`, `ext.bin`, all from one build); [docs/using-the-release.md](docs/using-the-release.md) walks through it from download to gameplay. With it, booting needs only Python 3, no LLVM or symbol list:
+A release zip is this repo plus a prebuilt core and extension (`build/ghostldr/core.bin`, `core.json`, `ext.bin`, all from one build; `selector.bin`, the game selector, is optional and must come from the same build); [docs/using-the-release.md](docs/using-the-release.md) walks through it from download to gameplay. With it, booting needs only Python 3, no LLVM or symbol list:
 
 ```bash
 python3 ghostldr/host/run.py boot --app-root ghostfs --no-build
 ```
 
-The core's memory plan and patches are built for CUSA11456 v2.18; the symbol table in `ext.bin` holds every known PS4 name. The dev payloads are a separate zip; extract it into the same folder (`build/payloads/`).
+The symbol table in `ext.bin` holds every known PS4 name. Ghost's memory plan and diagnostics come from its profile and apply only to its v2.18 executable. The dev payloads are a separate zip; extract it into the same folder (`build/payloads/`).
 
 ## Setup
 
@@ -63,7 +75,7 @@ The core's memory plan and patches are built for CUSA11456 v2.18; the symbol tab
   ```
 
   This downloads the PS4 symbol names (idc/ps4libdoc) to `build/nid/` and clones Luac0re 2.4b to `build/luac0re-src/`.
-- **Game dump:** your CUSA11456 v2.18 dump goes in `build/ghost/app0/`. The build doesn't need it; `ghostldr/tools/check_ext.py` uses its imports to check that the extension resolves them as before.
+- **Game dump:** your CUSA11456 v2.18 dump goes in `build/ghost/app0/`. The build doesn't need it; `ghostldr/tools/check_ext.py` uses its imports to check that the extension resolves them as before. Other dumps can be anywhere (`gfs_pack.py --src`).
 - **Tests:**
 
   ```bash
@@ -81,13 +93,13 @@ python3 ghostldr/tools/import_report.py build/ghost/app0 --shadps4 /path/to/shad
 
 ## Choosing a console
 
-The host tools find the PS5 with the PlayStation discovery protocol:
+The host tools find the console with the PlayStation discovery protocol, PS5s on UDP 9302 and PS4s on UDP 987:
 
 ```bash
 python3 ghostldr/host/console.py --list
 ```
 
-Set `PS5_HOST_ID` (follows DHCP moves) or `PS5_HOST` (a fixed address) when more than one console answers.
+The list shows each console's type, name, host-id, firmware, whether it's on or in rest mode, the running app (PS4s report it; SWRR is marked), and whether Luac0re's loader is listening on 9026. Whenever more than one console answers, every tool prints this numbered list and marks the one it uses: the one running SWRR or the loader. If none stands out, it asks which to use (or stops with the list when not run from a terminal). Set `PS_HOST_ID` (follows DHCP moves) or `PS_HOST` (a fixed address) to choose one yourself; the older `PS5_HOST_ID` and `PS5_HOST` still work.
 
 ## Dev setup (optional)
 
@@ -104,7 +116,8 @@ The dev setup is a jailbroken console with elfldr, FTP and klog, plus `/data` fo
 - mast1c0re, by CTurt and McCaulay.
 - PS4 symbol names from idc/ps4libdoc.
 - ps5-payload-sdk, by John Törnblom.
+- Noto Sans, by the Noto Project Authors (SIL Open Font License 1.1): the game selector's built-in font.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). This covers ghostldr's own code only: no game files are included, and Luac0re, ps4libdoc and ps5-payload-sdk keep their own licenses.
+MIT, see [LICENSE](LICENSE). This covers ghostldr's own code only: no game files are included, and Luac0re, ps4libdoc and ps5-payload-sdk keep their own licenses. The selector's built-in font (`ghostldr/native/selector/font/`, also inside `selector.bin`) is under the SIL Open Font License 1.1, in `OFL.txt` there.

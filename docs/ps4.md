@@ -1,0 +1,191 @@
+# ghostldr on a PS4
+
+Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions.
+
+**Status: experimental and unverified on a PS4.** Everything below was worked out from one kernel log, Luac0re's source and SWRR's executable. No PS4 has run the new code yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
+
+## What differs on a PS4
+
+| | PS5 (13.60) | PS4 (12.02) |
+|---|---|---|
+| Luac0re's `PLATFORM` | `"PS5"` | `"PS4"` |
+| Emulator bridge memory (`BRIDGE_BASE`) | `0x900000000` | `0x914104000` |
+| Core (IPU buffer + 16 KiB) | `0x9009d8000` | `0x914adc000` |
+| EE program buffer (`ps2_prog_ee_exec`, 32 MiB) | `0x900a1c000`: 16 KiB below a 64 KiB boundary | `0x914b20000`: on a 64 KiB boundary |
+| A syscall instruction in the compiler process | Luac0re's `jit_syscall.syscall_address` | none: Luac0re keeps one libkernel wrapper per syscall (`syscall_wrapper[n]`) |
+| SWRR's companion-app server (`sceCompanionHttpd`) | not running, as far as we know | running |
+| Direct memory free after the release | 3292 MiB | 3292 MiB |
+| Also loaded in SWRR | | `libSceSsl2.sprx` |
+
+The buffers are laid out the same way relative to the bridge on both consoles: the IPU buffer at +0x9d4000 (16 KiB header, then 256 KiB), the EE buffer at +0xa1c000, then IOP, VU0 and VU1, each after a 16 KiB gap. Only the base address differs. The compiler process maps the buffers at the same addresses as SWRR's main process does: its own log on the PS4 says `jitmem ... R59 Binary Cache @ 0x00000009:14B20000 -> 0x00000009:16B20000`, which matches the main process's `ps2_prog_ee_exec 914b20000-916b20000`.
+
+## The fatal crash: code written into the EE buffer's first 16 KiB
+
+From the kernel's report:
+
+```
+# thread name: Compile_VU0
+# proc name: ps2-emu-compiler.self
+# reason: page fault (user write data, page not present)
+# fault address: 0000000914b20000
+# rsi: 00000009141c4000  rdi: 0000000914b20000  rdx: 0000000000060000
+```
+
+This is ghostldr's `jit_memcpy` of `libSceFios2.prx`'s text (0x60000 bytes, from the staging buffer in the bridge) to `0x914b20000`, the first byte of the EE buffer. The core's log just before it says `libSceFios2.prx: placed at 914b20000`.
+
+**Why only the PS4.** Modules are placed from the code region's start, rounded up to 64 KiB:
+
+- On the PS5 the EE buffer starts at `0x900a1c000`, so rounding up skips its first 16 KiB, and the first module lands at `0x900a20000`.
+- On the PS4 the buffer starts at `0x914b20000`, which is already on a 64 KiB boundary, so the first module landed at the buffer's very start.
+
+**The first 16 KiB of each buffer can't be written through the compiler.** The evidence:
+
+- The core itself goes at the IPU buffer's +16 KiB.
+- Luac0re notes "Safe write address = +0x4000" for the EE and IOP buffers, and +0x8000 for VU0 and VU1.
+- On a PS5, writing the game selector at the EE buffer's start "killed the compiler call". sel.c has rounded it up since then, but the boot's module placement only got that 16 KiB skip by luck.
+- On the PS4 the fault came at exactly that spot.
+
+**Measured on a 13.60 PS5 (the diagnostic, below):** the compiler can neither read nor write the first bytes of any buffer (EFAULT both ways), so nothing is mapped there in its address space. That fits the PS4's "page not present" at the EE buffer's first byte. Past the header it writes every buffer at the same address: the EE and IOP buffers past 16 KiB, VU0 and VU1 past 32 KiB. A probe on a PS5 also found that a fresh read-write alias of an emulator buffer, mapped in the compiler, writes the whole buffer, header included. Whether a PS4's compiler writes the rest of the EE buffer is still unproven, although its own log points that way.
+
+## The earlier, non-fatal fault: SWRR's companion-app thread
+
+```
+hostmem: released 201014000-211014000 (256 MiB, prot 3 type 0 phys 10000) munmap 0 release 0
+CRASH sig 11 fault addr 20581c5b8 rip 800a2fceb = ?+800a2fceb rsp 7eed27d30
+  code+000: c5 fc 11 80 58 02 00 00 c5 fc 11 80 38 02 00 00 ...
+  #00 8009d9bdc = ?+8009d9bdc
+  #01 4ac126 = ?+4ac126
+```
+
+What SWRR's executable shows (US and EU run the same code, loaded at `0x400000`):
+
+- **The 256 MiB mapping is SWRR's libc heap.** At eboot+0x9c76c SWRR allocates 256 MiB of direct memory and maps it read-write. At eboot+0x9c7cb it calls `sceLibcMspaceCreate` on it; the handle goes to eboot+0x3906c0.
+- **The faulting thread is SWRR's `SystemServicesThread`.** Return address eboot+0xac126 follows `call sceCompanionHttpdGetEvent` in that thread's entry, eboot+0xabc70, created at eboot+0xa670d with its handle at eboot+0x182f330.
+- **What the thread does.** It calls `sceCompanionHttpdInitialize2` with a 10 MiB work buffer that it takes from that heap (`sceLibcMspaceMalloc(heap, 0xa00000)`; the pointer is at eboot+0x182f338). Then it loops: it polls system-service events every ~110 ms and calls `sceCompanionHttpdGetEvent`. The fault is the companion library's AVX memset into its own work buffer, which ghostldr had just released.
+- **The server is up on a PS4.** SWRR logs `sceCompanionHttpdInitialize2() failed` (channel `x-srvc`) on failure; the PS4 log has no such line.
+- **On a PS5 the same thread runs too,** and its 10 MiB buffer is in the heap (the diagnostic on a 13.60 PS5). Every PS5 boot has nonetheless released the heap without a fault: there, `sceCompanionHttpdGetEvent` doesn't touch the buffer.
+- **The thread can be stopped.** The loop leaves when the word at eboot+0x182f328 is non-zero. SWRR never sets it. On leaving, the thread calls `sceCompanionHttpdTerminate`, frees the buffer, clears the pointer and returns.
+
+The crash handler parked the thread, so the boot went on. That's why the fatal crash came later.
+
+## Other things the log and the code show
+
+- **No compiler syscall gadget on a PS4.** `ghostldr.lua` passed `jit_syscall.syscall_address or 0`, and that's 0 on a PS4. `jit_recv_fd` would have called address 0 in the compiler. That happens whenever a new JIT block is made: the current extension (320 KiB) always gets one, so today's build would have crashed even earlier on a PS4, at `ext_start`. Fixed: see below.
+- **The GS SubmitDone thread keeps running.** `gsthread [  80.413sec] WARN: SubmitDone: 5923ms since last call!` comes after the crash. It's SWRR's "GS SubmitDone" thread (eboot+0x15e0f0), which only calls `sceGnmSubmitDone`, never touches the released buffers, and isn't cancelled by Luac0re on either console. It isn't a problem.
+- **The `i-spu2 ... Abort received` lines** are from the PS2 game, 8–33 s into SWRR, before Luac0re ran. They're not related.
+- **Luac0re's thread cancels.** Luac0re cancels the GS, IOP/SPU2 and Runtime Bridge threads, using `scePthreadSelf + 0x10` as `scePthreadCancel`.
+  - On a 13.60 PS5 that is the real export, but only the Runtime Bridge thread is gone. GS and IOP/SPU2 are still alive, presumably blocked without reaching a cancellation point. So are VU1, GsCheck, CDVD, AudioOut, VideoRecording, TrophyPump and the dialog thread.
+  - Whether the offset holds in a 12.02 libkernel is unverified; the diagnostic checks.
+- **`libSceSsl2.sprx` is loaded in SWRR on the PS4.** Host modules are looked up by name, so this changes nothing for the loader.
+- **`libSceNpScore.sprx`** fails to load (0x80020002) and is found as `libSceNpScoreRanking`, as the PS5 does.
+- **Memory.** Direct memory free after the release was 3292 MiB, as on the PS5. SWRR runs in base mode on a Pro as well, so a Pro shouldn't differ, but no Pro has been tested.
+
+## What changed
+
+Each change is either unconditional but address-neutral on a PS5, or gated on the PS4 flag.
+
+1. **The platform reaches the core.** `ghostldr.lua` sets ctx flag 8192 (`CTX_FLAG_PS4`) when Luac0re's `PLATFORM` is `"PS4"`. It also writes the firmware (`FW_VERSION` "12.02" → `0x1202`) in a new last context field, `fw`. The core logs both.
+2. **A compiler syscall gadget on a PS4.** The script takes Luac0re's `getpid` wrapper in the compiler plus 7 bytes, which is the "mov r10, rcx; syscall" that Luac0re's PS5 address also points at. It checks those bytes through the compiler first. `jit_recv_fd` now refuses, with a log line, instead of calling 0. On a PS5 the context gets the same value as before.
+3. **The code region starts after the buffer's first 16 KiB, on every console** (`arena_code_region`, `JIT_BUF_HEADER`). On a PS5 this moves nothing: rounding up already skipped those 16 KiB, and the tests check Ghost's four module addresses against the 13.60 log. On a PS4 the first module moves from `0x914b20000` to `0x914b30000`.
+4. **PS4 only: no compiler write without proof** (arena.c, ps4.c).
+   - `arena_init` probes each executable region past its header, at both ends, plus the small area. A probe uses two system calls that the compiler runs on the address and that return EFAULT instead of crashing it:
+     - `write()` sends 16 bytes from the address down Luac0re's socket pair, so this process can read the compiler's own bytes;
+     - `clock_gettime()` writes 16 bytes there.
+
+     The region counts as writable only when the written bytes show up here. The compiler's original bytes are then put back.
+   - The header is 16 KiB, or 32 KiB when +16 KiB isn't writable (the VU buffers).
+   - `sceKernelVirtualQuery` can't answer this: run in the compiler on a PS5, it lists none of the JIT mappings, not even the bridge memory the compiler uses.
+   - `arena_write` refuses anything outside the verified parts and reads every write back. The selector's writes now go through the same check (`arena_wr`).
+   - If no verified region can hold the title's code, the part it needs (Ghost: 25 MiB) is backed by a new JIT block, mapped over the EE buffer's start at that fixed address only. If that also fails, the boot stops with `the title's code has nowhere to go` and nothing is written.
+   - That fallback only helps small titles. A 13.60 PS5 creates at most 768 KiB of new JIT memory; the emulator's own buffers use the rest of the budget. A PS4 is probably similar. A better fallback, not implemented, follows a probe on a PS5: open the emulator's own EE object from the compiler's descriptors, and map a fresh read-write alias of it in the compiler. That alias writes the whole object, the first 16 KiB included, and costs no budget.
+5. **PS4 only: SWRR's heap is released only once nothing uses it** (hostmem.c). Before the release, the core sets the thread's quit word and waits, up to 5 s, until the work buffer is freed and the thread has ended. If it doesn't stop, the 256 MiB heap is kept.
+   - **Cost:** nothing when the thread stops (the expected case). Otherwise 256 MiB of the 3292 MiB. For Ghost that comes out of the texture streaming pool: about 588 MiB becomes about 332 MiB, below the ~550 MiB at which loading a save was seen to stall on a PS5.
+   - The title then gets the system-service events that thread used to consume.
+6. **The diagnostic**, below. It also adds `jit_block_destroy`. `jit_block_create` given an address now maps only there; it no longer falls back to `sceKernelJitMapSharedMemory`, which places the block at its home address over whatever is mapped there. The extension's block, which asks for no address, is made as before.
+
+Placement on a PS5 is unchanged: no probes, no test writes, no readback. The only new bytes in the context are `fw` and a larger `size`, and the core reads them only for its log. On a 13.60 PS5, Ghost booted with these changes as before (see What is verified).
+
+## The diagnostic
+
+`run.py probe --diag` sends the core with ctx flag 16384. It logs and then returns to Luac0re's loader. It boots nothing, releases no memory and closes nothing. It runs the PS4 boot's own checks, also on a PS5.
+
+What it logs:
+
+1. **Platform:** Luac0re's platform and firmware, the system software version, Neo (Pro) mode, direct and flexible memory, the addresses Luac0re gave, and the compiler's syscall gadget. Its bytes aren't read here: on a PS5, system code in the compiler is execute-only and reading it kills SWRR. On a PS4, `ghostldr.lua` checks them.
+2. **SWRR's threads:** for 13 of them (EE, IOP/SPU2, GS, Runtime Bridge, VU1, SubmitDone, GsCheck, CDVD, AudioOut, SystemServicesThread, VideoRecording, TrophyPump, dialog), whether each is alive (a blocked thread counts) and its name. Also Luac0re's `scePthreadCancel` guess against the real export.
+3. **Memory:** SWRR's heap, the companion buffer and the quit word. What a boot would release (only listed). The direct and flexible memory census.
+4. **The JIT buffers:**
+   - the compiler process's map as its `sceKernelVirtualQuery` lists it (without the JIT mappings, on a PS5);
+   - this process's map from the bridge to the VU heaps;
+   - per buffer, whether the compiler writes it past its header (the boot's own probes), and where a boot would put the first module.
+5. **Writes through the compiler:** each one is put back. They go to the shared scratch, the free small area after the core, and the ends of each buffer.
+6. **New JIT blocks** of 64 KiB, 768 KiB, 1, 4, 16 and 32 MiB, each mapped here at a fixed address inside a reserved range. Mapping a JIT object without an address puts it at its "home" address, over whatever is there; on a PS5 that once replaced the core's data and crashed SWRR. Each block is created, has a function written into its last page, is called, then destroyed. This step stops at the first failure: a 13.60 PS5 makes at most 768 KiB of new JIT memory (0x8002000c past it). Only one page is written, so a block that works here shows it can be created and mapped, not that all of it can be filled.
+7. **Last, each buffer's first 16 bytes,** read and written through the compiler by the same probes. On a 13.60 PS5 both give EFAULT.
+
+It changes nothing a boot depends on. The test writes are restored and the JIT blocks are destroyed. Afterwards SWRR is in the same state as after Luac0re's loader, so `run.py boot` can follow in the same session. Restart SWRR for normal play.
+
+### How to run it
+
+On the PS4: start SWRR and go to OPTIONS → HALL OF FAME until Luac0re's "Remote Lua Loader" is listening on TCP 9026, as for a boot. Then, on the computer:
+
+```bash
+python3 ghostldr/host/run.py probe --diag --log build/ghostldr/ps4-diag.log
+```
+
+- With a release zip, add `--no-build`.
+- Add `--host <the PS4's address>` if the console isn't found by itself; `console.py --list` shows PS4s too.
+- The run listens for 90 s. The diagnostic itself takes a few seconds; it ends with `diag: done`, and Luac0re shows "core returned 0".
+
+If you can, also run the boot once in the same or a fresh session, and keep its log. It now logs its PS4 checks (lines with `PS4:`) before writing anything:
+
+```bash
+python3 ghostldr/host/run.py boot --log build/ghostldr/ps4-boot.log
+```
+
+### What to send back
+
+- `build/ghostldr/ps4-diag.log` (and `ps4-boot.log` if you ran the boot).
+- If SWRR or the console crashed: the kernel log of that moment (a klog capture as before) and the last `diag:` line in the log.
+- If the console stops responding during the JIT block step, power it off and on. Tell us the last `diag: JIT block` line.
+
+Before posting the logs anywhere public, remove user IDs and names from the kernel log. ghostldr's own log has none, apart from the ghostfs user ID line of a boot.
+
+## What is verified
+
+- From the log and SWRR's executable:
+  - the address and size of the fatal write;
+  - the identity of the faulting SWRR thread, its quit word, and the heap it allocates from;
+  - that its server is up on the PS4;
+  - the missing syscall gadget.
+- Offline (`ghostldr/tests/test_ps4.py`):
+  - The real `arena.c` and `ps4.c`, against the PS5 and PS4 layouts from the logs and a fake compiler process:
+    - the PS5 placement is unchanged;
+    - the v0.1.1 rule faults exactly where the PS4 did;
+    - the new rule doesn't;
+    - with a compiler that writes nothing, other memory, or only VU1, the boot uses a JIT block or VU1 (for a small title), or stops cleanly.
+  - `ghostldr.lua` under a fake Luac0re: the PS4 flag, the firmware and the gadget at the offsets `ghost.h` has, and the PS5 values unchanged.
+  - `run.py probe --diag`'s flags.
+- On a 13.60 PS5, with these changes (2026-10-22):
+  - `run.py probe --diag` ran to the end without crashing SWRR.
+    - Buffers: as above.
+    - JIT blocks: 64 KiB and 768 KiB work at a fixed address; 1 MiB is refused.
+    - Threads: as above.
+    - The PS4 checks pick the address a PS5 boot uses for the first module (`0x900a20000`).
+  - A Ghost boot on a fresh SWRR placed and planned exactly as before the change:
+    - libSceFios2, libc, NpToolkit2 and eboot.bin at `0x900a20000`, `0x900bb0000`, `0x900cd0000` and `0x900d90000`;
+    - the extension at `0x904f34000`;
+    - 4532 MiB free, reporting 4520 MiB;
+    - 8 logging stubs.
+
+    The only difference is the stub area, now at `0x900a0c000` because the core grew to 208 KiB. Ghost reached the title screen, and CONTINUE loaded into controllable gameplay. No unresolved or denied calls; no crash in the core's log or the kernel log.
+  - A boot through the selector (`--select`) placed it at `0x900a20000`, cleared it, then placed Ghost as above, and Ghost reached its title screen.
+
+## What is not verified
+
+- That the compiler writes the EE buffer past its first 16 KiB on a PS4.
+- That a new JIT block can be made on a PS4 at all, even the extension's 320 KiB. A 13.60 PS5 allows 768 KiB in all; a PS4's limit is unknown. The PS4 compiler process's flexible memory was 248.1 of 249.6 MiB. A 25 MiB fallback block is very unlikely to work.
+- That the SystemServicesThread stops when asked on a PS4, and that no other SWRR thread uses the released buffers there.
+- That Luac0re's thread cancels work on a PS4.
+- That a new JIT block maps at a fixed address on a PS4. On a 13.60 PS5, read-only views of the emulator's own JIT objects map with MAP_FIXED anywhere, but this hasn't been checked for new blocks. The fallback needs one over the EE buffer.
+- Everything after the code is written: TLS, the title's start, graphics, audio, saves and input on a PS4.
+- A 14.10 or 14.20 PS5 with these changes. Only a 13.60 PS5 was booted.

@@ -4,9 +4,14 @@
  * Without a kernel exploit SWRR's sandbox sees nothing but its own app0,
  * save data and a ~1 GiB temp folder, but it can own many save containers
  * of up to 1 GiB each and mount 15 of them at a time.  gfs_pack.py lays the
- * title's files end to end over containers GHOST000.. (data.bin each, `cap`
- * bytes) and writes a sorted index (GHOSTIDX/index.bin); gfs_install.py puts
+ * title's files end to end over containers <prefix>000.. (data.bin each,
+ * `cap` bytes) and writes a sorted index (index.bin); gfs_install.py puts
  * them on the console over the network.
+ *
+ * Several titles can be installed side by side, each with its own prefix
+ * and index container <prefix>INDEX, listed in GFSCATALOG
+ * (docs/ghostfs-catalogue.md); only the booted title's containers are
+ * mounted.
  *
  * Here: the index is loaded at boot; opening /app0/... gives the caller a
  * real placeholder fd (so calls not routed here fail harmlessly) that maps to
@@ -26,15 +31,17 @@ void *host_real_in(const char *modname, const char *name);
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define GFS_DIR 1
 #define GFS_MAX_CONT 96
-#define GFS_SLOTS 12          /* of /savedata1..15: leave room for GHOSTSAVE and a spare */
+#define GFS_SLOTS 12          /* of /savedata1..15: leave room for <prefix>SAVE and a spare */
 #define GFS_FILES 512
 #define SWRR_SAVEDATA_MOUNT 0x3893F0  /* sceSaveDataMount import slot (SWRR US and EU: same executable) */
-#define E_NOENT 0x80020002
-#define E_BADF 0x80020009
-#define E_ISDIR 0x80020015
-#define E_INVAL 0x80020016
-#define E_ROFS 0x8002001e
-#define E_NOMEM 0x8002000c
+/* signed, so they stay negative in the s64 results */
+#define E_NOENT ((s32)0x80020002)
+#define E_BADF ((s32)0x80020009)
+#define E_ISDIR ((s32)0x80020015)
+#define E_INVAL ((s32)0x80020016)
+#define E_ROFS ((s32)0x8002001e)
+#define E_NOMEM ((s32)0x8002000c)
+#define COLD __attribute__((minsize, cold)) /* boot-time code: small beats fast */
 
 /* gfs_pack.py: version 2 has a 128-byte header (title, layout id, flags);
  * version 1 (GHOSTIDX until 2026-10-21) stops at prefix, 64 bytes */
@@ -89,15 +96,19 @@ static void unlock(volatile int *l) { __atomic_store_n(l, 0, __ATOMIC_RELEASE); 
 
 /* ---- save containers ---- */
 
-int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16])
+/* user < 0: the initial user.  required_blocks (may be NULL) gets what a
+ * NO_SPACE_FS (0x809F000A) result says the create needs. */
+int gfs_mount_user(s32 user, const char *dirname, int mode, u64 blocks, char mount_point[16], u64 *required_blocks)
 {
     u8 params[128], result[64];
     char dir[32];
+    if (!sd_mount)
+        return (int)0x809F000B; /* SCE_SAVE_DATA_ERROR_INTERNAL: no save service (not ghostfs) */
     memset(params, 0, sizeof(params));
     memset(result, 0, sizeof(result));
     memset(dir, 0, sizeof(dir));
     strlcpy(dir, dirname, sizeof(dir));
-    *(u32 *)(params + 0x00) = g_user;
+    *(u32 *)(params + 0x00) = user < 0 ? g_user : (u32)user;
     *(u64 *)(params + 0x10) = (u64)dir;
     *(u64 *)(params + 0x20) = blocks;
     *(u32 *)(params + 0x28) = (u32)mode;
@@ -106,17 +117,25 @@ int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16])
         memcpy(mount_point, result, 16);
         mount_point[15] = 0;
     }
+    if (required_blocks)
+        *required_blocks = *(u64 *)(result + 0x10);
     return rc;
 }
 
-/* the unmount is the commit (and asynchronous): wait until the point is gone */
+int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16])
+{
+    return gfs_mount_user(-1, dirname, mode, blocks, mount_point, NULL);
+}
+
+/* the unmount is the commit (and asynchronous): wait until the point is gone.
+ * A refused unmount (BUSY: files still open) returns at once. */
 int gfs_umount(const char mount_point[16], u32 max_ms)
 {
     char mp[16];
     u8 st[0x78];
     memcpy(mp, mount_point, 16);
     int rc = sd_umount(mp);
-    for (u32 waited = 0; waited < max_ms && k_stat(mp, st) == 0; waited += 10)
+    for (u32 waited = 0; rc == 0 && waited < max_ms && k_stat(mp, st) == 0; waited += 10)
         K.usleep(10000);
     return rc;
 }
@@ -151,6 +170,74 @@ static volatile int g_cont_lock;
 static u32 g_mounted;
 static u64 g_tick, g_mounts, g_evictions;
 
+/* Real slots other HLE code holds for long (the title's mounted saves).  The
+ * first GFS_SPARE fit beside the data containers and <prefix>SAVE; each one
+ * after that lowers the data containers' cap, down to GFS_MIN_DATA. */
+#define GFS_SPARE 2
+#define GFS_MIN_DATA 8
+static u32 g_reserved;
+
+static u32 data_cap(u32 reserved)
+{
+    return GFS_SLOTS - (reserved > GFS_SPARE ? reserved - GFS_SPARE : 0);
+}
+
+/* the least recently used data container no read is using, or NULL */
+static struct cont *lru_idle(void)
+{
+    struct cont *victim = NULL;
+    for (u32 i = 0; i < g_hdr->containers; i++)
+        if (g_cont[i].fd >= 0 && !g_cont[i].busy && (!victim || g_cont[i].last < victim->last))
+            victim = &g_cont[i];
+    return victim;
+}
+
+static void evict(struct cont *victim)
+{
+    k_close(victim->fd);
+    victim->fd = -1;
+    gfs_umount(victim->mp, 2000);
+    g_mounted--;
+    g_evictions++;
+}
+
+/* 0: one more real slot is the caller's until gfs_slot_release (idle data
+ * containers are unmounted to make room); -1: no slot can be spared */
+int gfs_slot_reserve(void)
+{
+    if (!g_active)
+        return 0;
+    for (;;) {
+        lock(&g_cont_lock);
+        if (data_cap(g_reserved + 1) < GFS_MIN_DATA) {
+            unlock(&g_cont_lock);
+            return -1;
+        }
+        struct cont *victim = g_mounted > data_cap(g_reserved + 1) ? lru_idle() : NULL;
+        if (g_mounted <= data_cap(g_reserved + 1)) {
+            g_reserved++;
+            unlock(&g_cont_lock);
+            logf("ghostfs: real slot reserved (%u reserved, %u data containers mounted)", g_reserved, g_mounted);
+            return 0;
+        }
+        if (victim)
+            evict(victim);
+        unlock(&g_cont_lock);
+        if (!victim)
+            K.usleep(1000); /* every data container is mid-read */
+    }
+}
+
+void gfs_slot_release(void)
+{
+    if (!g_active)
+        return;
+    lock(&g_cont_lock);
+    if (g_reserved)
+        g_reserved--;
+    unlock(&g_cont_lock);
+}
+
 /* fd of container k's data.bin, mounting it (and evicting another) if needed */
 static int cont_acquire(u32 k)
 {
@@ -165,21 +252,14 @@ static int cont_acquire(u32 k)
             unlock(&g_cont_lock);
             return c->fd;
         }
-        if (g_mounted >= GFS_SLOTS) {
-            struct cont *victim = NULL;
-            for (u32 i = 0; i < g_hdr->containers; i++)
-                if (g_cont[i].fd >= 0 && !g_cont[i].busy && (!victim || g_cont[i].last < victim->last))
-                    victim = &g_cont[i];
+        if (g_mounted >= data_cap(g_reserved)) {
+            struct cont *victim = lru_idle();
             if (!victim) {                   /* every slot is mid-read: wait */
                 unlock(&g_cont_lock);
                 K.usleep(1000);
                 continue;
             }
-            k_close(victim->fd);
-            victim->fd = -1;
-            gfs_umount(victim->mp, 2000);
-            g_mounted--;
-            g_evictions++;
+            evict(victim);
         }
         char dir[32], path[48];
         fmt(dir, sizeof(dir), "%s%03u", g_hdr->prefix, k);
@@ -283,18 +363,13 @@ static bool app0_rel(const char *path, char *out, size_t size)
     return true;
 }
 
-int gfs_init(void)
+/* load an index container's index.bin and serve its title as /app0 */
+COLD static int load_index(const char *name, const char *want_title, const char *want_prefix)
 {
-    if (!sd_ready())
-        return -1;
     char mp[16], path[48];
-    int rc = gfs_mount("GFSINDEX", 1, 0, mp);
+    int rc = gfs_mount(name, 1, 0, mp);
     if (rc != 0)
-        rc = gfs_mount("GHOSTIDX", 1, 0, mp);       /* installs before 2026-10-21 */
-    if (rc != 0) {
-        logf("ghostfs: no GFSINDEX or GHOSTIDX (%x): nothing installed", rc);
         return rc;
-    }
     fmt(path, sizeof(path), "%s/index.bin", mp);
     u8 st[0x78];
     int fd = k_open(path, 0, 0);
@@ -312,7 +387,14 @@ int gfs_init(void)
     u32 hsize = got >= 64 && g_hdr->version >= 2 ? g_hdr->header_size : 64;
     if (got != (s64)size || size < 64 || memcmp(g_hdr->magic, "GFS1", 4) != 0 || g_hdr->containers > GFS_MAX_CONT ||
         hsize < 64 || hsize > size) {
-        logf("ghostfs: bad index (%ld of %lu bytes)", got, size);
+        logf("ghostfs: %s: bad index (%ld of %lu bytes)", name, got, size);
+        return -1;
+    }
+    const char *title = g_hdr->version >= 2 ? g_hdr->title : "";
+    if ((want_title && g_hdr->version >= 2 && strncmp(title, want_title, 16) != 0) ||
+        (want_prefix && strncmp(g_hdr->prefix, want_prefix, 16) != 0)) {
+        logf("ghostfs: %s holds %.16s (%.16s000..), not %s", name, title, g_hdr->prefix,
+             want_title ? want_title : want_prefix);
         return -1;
     }
     if (g_hdr->version >= 2 && (g_hdr->flags & GFS_INCOMPLETE)) {
@@ -330,6 +412,9 @@ int gfs_init(void)
         g_cont[i].fd = -1;
     for (u32 i = 0; i < GFS_FILES; i++)
         g_files[i].fd = -1;
+    char t[17];
+    strlcpy(t, want_title && !title[0] ? want_title : title, sizeof(t));
+    profile_select(t);
     g_active = true;
     logf("ghostfs: %.16s, %u entries, %lu MiB in %u containers of %lu MiB (%.16s000..), user %x",
          g_hdr->version >= 2 ? g_hdr->title : "index v1", g_hdr->entries, g_hdr->total >> 20, g_hdr->containers,
@@ -337,13 +422,147 @@ int gfs_init(void)
     return 0;
 }
 
-/* the title's progress container: <prefix>SAVE (GHOSTSAVE for CUSA11456) */
+/* ---- the catalogue of installed titles (GFSCATALOG/catalog.bin) ---- */
+struct gfs_cat_header {
+    char magic[4];
+    u32 version, header_size, entry_size, count, flags;
+    u64 generation;
+};
+static const u8 *g_cat;
+static u32 g_cat_n, g_cat_hsize, g_cat_esize;
+static bool g_cat_read;
+
+COLD u32 gfs_titles(void)
+{
+    if (g_cat_read || !sd_ready())
+        return g_cat_n;
+    g_cat_read = true;
+    char mp[16], path[48];
+    u8 st[0x78];
+    if (gfs_mount("GFSCATALOG", 1, 0, mp) != 0)
+        return 0;
+    fmt(path, sizeof(path), "%s/catalog.bin", mp);
+    int fd = k_open(path, 0, 0);
+    u64 size = fd >= 0 && k_stat(path, st) == 0 ? *(u64 *)(st + 0x48) : 0;
+    u8 *buf = size >= sizeof(struct gfs_cat_header) && size < (1 << 20) ? page_alloc(size) : NULL;
+    s64 got = buf ? k_pread(fd, buf, size, 0) : -1;
+    if (fd >= 0)
+        k_close(fd);
+    gfs_umount(mp, 2000);
+    const struct gfs_cat_header *h = (const struct gfs_cat_header *)buf;
+    if (got != (s64)size || !buf || memcmp(h->magic, "GFSC", 4) != 0 || h->header_size < sizeof(*h) ||
+        h->entry_size < sizeof(struct gfs_cat_entry) || h->count > 256 ||
+        (u64)h->header_size + (u64)h->count * h->entry_size > size) {
+        logf("ghostfs: GFSCATALOG: damaged catalogue (%ld of %lu bytes): ignored", got, size);
+        return 0;
+    }
+    g_cat = buf, g_cat_n = h->count, g_cat_hsize = h->header_size, g_cat_esize = h->entry_size;
+    return g_cat_n;
+}
+
+COLD const struct gfs_cat_entry *gfs_title_at(u32 i)
+{
+    return i < gfs_titles() ? (const struct gfs_cat_entry *)(g_cat + g_cat_hsize + i * g_cat_esize) : NULL;
+}
+
+COLD int gfs_mount_title(const char *title)
+{
+    const struct gfs_cat_entry *e = NULL;
+    for (u32 i = 0; i < gfs_titles() && !e; i++)
+        if (strncmp(gfs_title_at(i)->title, title, 16) == 0)
+            e = gfs_title_at(i);
+    if (!e || (e->flags & GFS_CAT_INCOMPLETE)) {
+        logf("ghostfs: %s is %s", title, e ? "not completely installed: rerun gfs_install.py" : "not installed");
+        return -1;
+    }
+    char index[33], prefix[17];
+    strlcpy(index, e->index, sizeof(index));
+    strlcpy(prefix, e->prefix, sizeof(prefix));
+    int rc = load_index(index, title, prefix);
+    if (rc != 0 && rc != -1)
+        logf("ghostfs: %s: no index %s (%x): reinstall it, or gfs_install.py --remove %s", title, index, rc, title);
+    return rc;
+}
+
+/* The title to serve: the one run.py --title asked for, else the only one
+ * installed.  Installs from before the catalogue have GFSINDEX (GHOSTIDX
+ * until 2026-10-21) only. */
+COLD int gfs_init(void)
+{
+    if (!sd_ready())
+        return -1;
+    const char *want = profile_requested();
+    u32 n = gfs_titles(), ready = 0;
+    if (!n) {
+        int rc = load_index("GFSINDEX", want, NULL);
+        if (rc > 0 || rc < -1)
+            rc = load_index("GHOSTIDX", want, NULL);     /* installs before 2026-10-21 */
+        if (rc > 0 || rc < -1)
+            logf("ghostfs: no GFSCATALOG, GFSINDEX or GHOSTIDX (%x): nothing installed", rc);
+        return rc ? -1 : 0;
+    }
+    char list[400];
+    int len = 0;
+    list[0] = 0;
+    for (u32 i = 0; i < n; i++) {
+        const struct gfs_cat_entry *e = gfs_title_at(i);
+        if (len < (int)sizeof(list) - 80)
+            len += fmt(list + len, sizeof(list) - len, "%s%.16s (%.40s%s)", i ? ", " : "", e->title, e->name,
+                       (e->flags & GFS_CAT_INCOMPLETE) ? ", incomplete" : "");
+        if (!(e->flags & GFS_CAT_INCOMPLETE))
+            ready++;
+    }
+    logf("ghostfs: installed: %s", list);
+    /* game selector: several titles and none asked for, or run.py --select;
+     * boot.c runs it once SWRR's memory is free, then calls gfs_pick */
+    if (ready && ((g_ctx->flags & CTX_FLAG_SELECT) || (!want && ready > 1)))
+        return 1;
+    return gfs_pick(NULL);
+}
+
+/* Serve title (the selector's choice); NULL: the one run.py --title asked
+ * for, else the only complete one. */
+COLD int gfs_pick(const char *title)
+{
+    if (!title)
+        title = profile_requested();
+    const struct gfs_cat_entry *only = NULL;
+    u32 ready = 0;
+    for (u32 i = 0; i < gfs_titles() && !title; i++)
+        if (!(gfs_title_at(i)->flags & GFS_CAT_INCOMPLETE))
+            ready++, only = gfs_title_at(i);
+    if (!title && ready != 1) {
+        logf("ghostfs: %s: pick one with run.py boot --title TITLE", ready ? "several titles" : "none is complete");
+        return -1;
+    }
+    char t[17];
+    strlcpy(t, title ? title : only->title, sizeof(t));
+    return gfs_mount_title(t);
+}
+
+/* the title's progress container: <prefix>SAVE (GHOSTSAVE for Ghost of Tsushima) */
 const char *gfs_save_name(void)
 {
     static char name[32];
     if (!name[0] && g_hdr)
         fmt(name, sizeof(name), "%.16sSAVE", g_hdr->prefix);
     return name;
+}
+
+/* the title ID gfs_pack.py wrote in the index (version 2), "" when unknown */
+const char *title_id(void)
+{
+    static char id[17];
+    if (!id[0] && g_hdr && g_hdr->version >= 2)
+        memcpy(id, g_hdr->title, sizeof(g_hdr->title));
+    return id;
+}
+
+/* the same, or NULL when unknown */
+const char *gfs_title(void)
+{
+    const char *t = title_id();
+    return t[0] ? t : NULL;
 }
 
 /* ---- open files ---- */
@@ -395,12 +614,24 @@ int gfs_open(const char *path, int flags, int *fd_out)
         *fd_out = (int)E_NOENT;
         return 0;
     }
-    /* SWRR's own eboot.bin: a harmless real fd (its sandbox refuses
+    /* A real fd, so the title's fd numbers and their limit stay the
+     * kernel's: SWRR's /app0 directory, so a call that misses the wrappers
+     * fails (EISDIR, EBADF) instead of reading SWRR's files; SWRR's
+     * eboot.bin if the sandbox refuses the directory (its sandbox refuses
      * /app0/sce_sys).  The path is copied to the stack first, as kernel paths
      * are everywhere else; literals live in the core's JIT (RX) image */
+    static int dir_ok = -1;
     char placeholder[32];
-    strlcpy(placeholder, "/app0/eboot.bin", sizeof(placeholder));
+    strlcpy(placeholder, dir_ok ? "/app0" : "/app0/eboot.bin", sizeof(placeholder));
     int fd = k_open(placeholder, 0, 0);
+    if (dir_ok == -1) {
+        dir_ok = fd >= 0;
+        logf("ghostfs: placeholder fds are %s (%x)", dir_ok ? "SWRR's /app0 directory" : "SWRR's eboot.bin", fd);
+        if (!dir_ok) {
+            strlcpy(placeholder, "/app0/eboot.bin", sizeof(placeholder));
+            fd = k_open(placeholder, 0, 0);
+        }
+    }
     if (fd < 0) {
         *fd_out = fd;
         return 0;
@@ -559,6 +790,12 @@ int vfs_open(const char *path, int flags, int mode)
 s64 vfs_read(int fd, void *buf, u64 n) { return gfs_owns(fd) ? gfs_read(fd, buf, n) : K.read(fd, buf, n); }
 s64 vfs_lseek(int fd, s64 off, int whence) { return gfs_owns(fd) ? gfs_lseek(fd, off, whence) : K.lseek(fd, off, whence); }
 int vfs_close(int fd) { return gfs_close(fd) == 0 ? 0 : K.close(fd); }
+int vfs_getdents(int fd, void *buf, int size)
+{
+    if (gfs_owns(fd))
+        return gfs_getdents(fd, buf, size);
+    return ((int (*)(int, void *, int))host_real("sceKernelGetdents"))(fd, buf, size);
+}
 int vfs_stat(const char *path, void *st)
 {
     int rc;

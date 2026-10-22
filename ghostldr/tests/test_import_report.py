@@ -179,6 +179,16 @@ class ImportReportTest(unittest.TestCase):
         self.assertEqual((host["shadps4"]["impl"], host["shadps4"]["stub"]), (1, 1))
         self.assertEqual(self.rep["libraries"][-1]["risk"], "LOW")
 
+    def test_homebrew_routes(self) -> None:
+        # resolve.c loads module libSceFreeType from libSceFreeTypeOl.sprx (OpenOrbis links "libSceFreeType")
+        self.assertEqual(ir.MODULE_FILES.get("libSceFreeType"), "libSceFreeTypeOl")
+        sysmods = {"libSceFreeTypeOl.sprx": [ir.SysModule("libSceFreeTypeOl.sprx", 1, "/system/common/lib")]}
+        self.assertEqual(ir.host_file("libSceFreeType", ["libSceFreeType.prx"], sysmods)[0], "libSceFreeTypeOl.sprx")
+        # budget.c's plan-free memory calls: anonymous mmap is the title's flexible memory
+        core = ir.load_core_hle(Path(ir.__file__).resolve().parents[1] / "native")
+        self.assertIn(("libkernel", "mmap"), core)
+        self.assertIn(("libkernel", "munmap"), core)
+
     def test_body_classifier(self) -> None:
         self.assertEqual(ir.classify_body('{\n    LOG_ERROR(Lib_X, "(STUBBED) called");\n'
                                           '    if (!out) {\n        return -1;\n    }\n    *out = 0;\n'

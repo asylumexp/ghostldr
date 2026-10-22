@@ -50,11 +50,11 @@ static s32 hle_sceAppContentInitialize(const void *a, void *b)
 
 static s32 hle_sceAppContentAppParamGetInt(u32 id, s32 *value)
 {
-    /* 0 = SKU flag: 3 = full game.  USER_DEFINED_PARAM_1 is the number the
-     * title uses to find its package metadata, cache/t%05d.dat (content id,
-     * versions, text/audio languages): CUSA11456 ships t11456.dat. */
+    /* 0 = SKU flag: 3 = full game; 1-4 = USER_DEFINED_PARAM_1-4 of the
+     * title's param.sfo, or its profile's (Ghost of Tsushima finds its
+     * package metadata, cache/t%05d.dat, with param 1: t11456.dat) */
     if (value)
-        *value = id == 0 ? 3 : id == 1 ? 11456 : 0;
+        *value = profile_app_param(id);
     logf("sceAppContentAppParamGetInt(%u) -> %d", id, value ? *value : -1);
     return 0;
 }
@@ -73,7 +73,6 @@ static s32 hle_sceAppContentGetAddcontInfoList(u32 label, void *list, u32 n, u32
 INIT_OK(sceGameLiveStreamingInitialize, "libSceGameLiveStreaming")
 INIT_OK(sceShareUtilityInitializeEx2, "libSceShareUtility")
 INIT_OK(sceShareUtilityAdvanceInitialize, "libSceShareUtility")
-INIT_OK(sceNpGameIntentInitialize, "libSceNpGameIntent")
 INIT_OK(sceAudio3dInitialize, "libSceAudio3d")
 
 static s32 hle_sceSaveDataTerminate(void)
@@ -660,7 +659,6 @@ static const struct hle_ent g_sys[] = {
     E("libSceGameLiveStreaming", sceGameLiveStreamingInitialize),
     E("libSceShareUtility", sceShareUtilityInitializeEx2),
     E("libSceShareUtility", sceShareUtilityAdvanceInitialize),
-    E("libSceNpGameIntent", sceNpGameIntentInitialize),
     E("libSceAudio3d", sceAudio3dInitialize),
     E("libSceVideoOut", sceVideoOutOpen),
     E("libSceVideoOut", sceVideoOutRegisterBuffers),

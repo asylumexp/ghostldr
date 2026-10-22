@@ -57,6 +57,9 @@ static void on_signal(int sig, void *info, void *ucv)
     }
     logf("CRASH sig %d fault addr %lx rip %lx = %s+%lx rsp %lx (info %p uc %p)", sig, fault, rip, mod, off,
          rsp, info, ucv);
+    for (struct module *m = g_modules; m; m = m->next)
+        if (m->bx && rip >= m->base && rip - m->base < m->text_size && !bx_in_view(m, rip))
+            logf("CRASH: rip is in %s's text but in none of its JIT views: code its code map missed", m->name);
     if (readable(rsp)) {
         u64 ret = *(u64 *)rsp;
         mod = describe(ret, &off);
@@ -135,12 +138,14 @@ const char *g_snap_name;
 
 u32 import_counts_top(u32 *idx_out, u64 *delta_out, u32 max, u64 *prev);
 const char *import_name(u32 idx);
-static u64 g_count_prev[512];
+static u64 *g_count_prev; /* page_alloc'd: keeps the core image small */
 
 static void log_busiest_imports(void)
 {
     u32 idx[64];
     u64 delta[64];
+    if (!g_count_prev && !(g_count_prev = page_alloc(512 * sizeof(u64))))
+        return;
     u32 n = import_counts_top(idx, delta, 64, g_count_prev);
     /* file I/O and sleeps, whatever their rank */
     char io[400];
@@ -164,10 +169,14 @@ static void log_busiest_imports(void)
 /* 200 samples of the main thread's stack, 50 ms apart, grouped */
 static void profile_main(int (*kill)(u64, int), u64 tid)
 {
-    static u64 stacks[64][PROF_DEPTH];
-    static u32 counts[64];
+    static u64 (*stacks)[PROF_DEPTH]; /* page_alloc'd: keeps the core image small */
+    static u32 *counts;
+    if (!stacks && !(stacks = page_alloc(64 * sizeof(*stacks))))
+        return;
+    if (!counts && !(counts = page_alloc(64 * sizeof(*counts))))
+        return;
     u32 nstacks = 0, total = 0;
-    memset(counts, 0, sizeof(counts));
+    memset(counts, 0, 64 * sizeof(*counts));
     for (int i = 0; i < 200; i++) {
         __atomic_store_n(&g_prof_on, 1, __ATOMIC_SEQ_CST);
         kill(tid, 30);
@@ -222,8 +231,11 @@ static void *watchdog(void *arg)
                 len += fmt(line + len, sizeof(line) - len, " %s", names[i]);
             logf("%s", line);
         }
+        /* reads of Ghost of Tsushima 2.18's globals: only on that build (profile ghost_diagnostics) */
+        bool diag = profile_has(PF_DIAG) != 0;
         if (g_main_mod) {
             u64 b = g_main_mod->base;
+            if (diag) {
             union {
                 u32 u;
                 float f;
@@ -246,9 +258,10 @@ static void *watchdog(void *arg)
                  "3d46630=%lx",
                  *(s32 *)(b + 0x3bbb310), *(s32 *)(b + 0x16d28fc), *(s32 *)(b + 0x16d289c), *(s32 *)(b + 0x3ba42fc),
                  *(s32 *)(b + 0x3d4653c), *(u8 *)(b + 0x16d28a0), *(u64 *)(b + 0x3d46630));
+            }
             logf("watchdog: lazy reservations committed %u MiB", vdm_lazy_committed_mib());
             vdm_log_lazy();
-            for (u32 slot = 0; slot < 3; slot++) {
+            for (u32 slot = 0; diag && slot < 3; slot++) {
                 const u64 *mp = (const u64 *)(b + 0x288ae60 + 0x220 + slot * 0x70);
                 logf("watchdog: movie pools slot %u: cpu limit %lx used %lx | cpu-gpu limit %lx used %lx | gpu limit %lx "
                      "used %lx | owner %lx",
@@ -256,11 +269,11 @@ static void *watchdog(void *arg)
             }
             /* experiment (ctx flag 32): signal the title world's "ready" flag
              * that boot-flow state 8 (WarpForTitleWorld) waits for */
-            if ((g_ctx->flags & 32) && *(u8 *)(b + 0x1a83739) == 0) {
+            if (diag && (g_ctx->flags & 32) && *(u8 *)(b + 0x1a83739) == 0) {
                 *(volatile u8 *)(b + 0x1a83739) = 1;
                 logf("watchdog: forced title-ready flag (eboot+0x1a83739)");
             }
-            {
+            if (diag) {
                 u64 want = *(u64 *)(b + 0x3d46630);
                 s32 cnt = *(s32 *)(b + 0x3d46548);
                 u64 list = *(u64 *)(b + 0x3d46540);
@@ -279,7 +292,7 @@ static void *watchdog(void *arg)
                          g_dm_usage[i].type, g_dm_usage[i].len >> 20, g_dm_usage[i].mapped >> 20);
             /* the CPU malloc mspace (handle at eboot+0x28b1690), via the title's own libc */
             static u64 (*mstats)(u64, u64 *);
-            if (!mstats) {
+            if (diag && !mstats) {
                 char nid[12];
                 void compute_nid(const char *name, char out[12]);
                 compute_nid("sceLibcMspaceMallocStats", nid);
@@ -288,15 +301,15 @@ static void *watchdog(void *arg)
                         mstats = (u64 (*)(u64, u64 *))module_export(m, nid);
             }
             /* SceLibcMallocManagedSize: u16 size, u16 version, u32 reserved, then 4 x size_t */
-            u64 msp = *(u64 *)(b + 0x28b1690), st[5] = {0x28 | (1UL << 16), 0, 0, 0, 0};
+            u64 msp = diag ? *(u64 *)(b + 0x28b1690) : 0, st[5] = {0x28 | (1UL << 16), 0, 0, 0, 0};
             if (mstats && msp) {
                 u64 rc = mstats(msp, st);
                 logf("watchdog: CPU mspace %lx rc %lx: max system %lu MiB, system %lu MiB, max in use %lu MiB, in use "
                      "%lu MiB",
                      msp, rc, st[1] >> 20, st[2] >> 20, st[3] >> 20, st[4] >> 20);
             }
-            u32 nq = *(u32 *)(b + 0x3cc5810);
-            u64 *q = *(u64 **)(b + 0x3cc5808);
+            u32 nq = diag ? *(u32 *)(b + 0x3cc5810) : 0;
+            u64 *q = diag ? *(u64 **)(b + 0x3cc5808) : NULL;
             for (u32 i = 0; i < nq && i < 4 && q; i++) {
                 u64 t = q[i], vt = t ? *(u64 *)t : 0, off;
                 const char *vm = describe(vt, &off);
@@ -310,7 +323,7 @@ static void *watchdog(void *arg)
         }
         if (g_ctx->flags & 8)
             log_busiest_imports();
-        {
+        if (profile_has(PF_HOOKS)) {
             extern u64 g_heap_live[3], g_heap_peak[3];
             logf("watchdog: engine heaps (>=64K allocs) type-0 pool live %lu MiB peak %lu; GPU heap live %lu MiB "
                  "peak %lu; other live %lu MiB",

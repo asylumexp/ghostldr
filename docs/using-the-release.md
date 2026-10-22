@@ -1,6 +1,6 @@
 # Using the prebuilt release
 
-This walks through running Ghost of Tsushima from a ghostldr release on a stock PS5: no jailbreak, no compiler, no build step. It covers download to gameplay. [ghost-on-stock-ps5.md](ghost-on-stock-ps5.md) has the background and more troubleshooting.
+This walks through running Ghost of Tsushima from a ghostldr release on a stock PS5: no jailbreak, no compiler, no build step. It covers download to gameplay. [ghost-on-stock-ps5.md](ghost-on-stock-ps5.md) has the background and more troubleshooting. Other games and OpenOrbis homebrew follow the same steps with their own dump; [compatibility.md](compatibility.md) says what is known to work.
 
 ## What you need
 
@@ -10,11 +10,11 @@ This walks through running Ghost of Tsushima from a ghostldr release on a stock 
 - **A computer on the same network as the PS5** with Python 3.11 or newer.
   - macOS and Linux work; Windows is untested.
   - A wired or fast Wi-Fi connection helps.
-- **The computer's firewall must let Python receive** on UDP port 18194 (the game's log) and TCP port 18195 (the loader fetches its extension from the computer). On macOS, click Allow when asked.
+- **The computer's firewall must let Python receive** on UDP port 18194 (the game's log), TCP port 18195 (the loader fetches its extension from the computer) and TCP port 18196 (the game selector, when more than one title is installed). On macOS, click Allow when asked.
 
 ## 1. Download and unpack
 
-From the release page, download `ghostldr-v0.2.0.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
+From the release page, download `ghostldr-v0.3.0.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
 
 ```bash
 shasum -a 256 --ignore-missing -c SHA256SUMS.txt
@@ -23,11 +23,11 @@ shasum -a 256 --ignore-missing -c SHA256SUMS.txt
 Unpack it and work from inside the folder; every command below runs there:
 
 ```bash
-unzip ghostldr-v0.2.0.zip
+unzip ghostldr-v0.3.0.zip
 ```
 
 ```bash
-cd ghostldr-v0.2.0
+cd ghostldr-v0.3.0
 ```
 
 ## 2. Put the game files in place
@@ -53,10 +53,10 @@ Check it: `ls build/ghost/app0` should list `eboot.bin`, `sce_module`, `cache` a
 3. **Find the PS5's address:** **Settings → Network → Connection Status → View Connection Status → IPv4 Address**. Then on the computer:
 
    ```bash
-   export PS5_HOST=192.168.1.123
+   export PS_HOST=192.168.1.123
    ```
 
-   With a single PS5 on the network you can skip this; the tools find it themselves. `python3 ghostldr/host/console.py --list` shows what they see.
+   You can usually skip this: the tools find the console themselves, and with several on they pick the one where Luac0re's loader is listening. `python3 ghostldr/host/console.py --list` shows what they see.
 
 ## 4. Pack the game data (on the computer, a few minutes)
 
@@ -80,7 +80,10 @@ python3 ghostldr/host/gfs_install.py
 - **`no space left on the console's storage`:** free space on the PS5 and run it again.
 - **A slow default network link** on the computer: `--interface en0` sends through a chosen interface (macOS).
 
-The data lands in SWRR's saved data under the signed-in user, as about 57 entries named `GHOST000`…`GHOST055` and `GFSINDEX`. It belongs to the SWRR region you installed from: US and EU SWRR each keep their own saved data, so install from the one you will play in.
+The data lands in SWRR's saved data under the signed-in user, as 58 entries: `GHOST000`…`GHOST055`, `GHOSTINDEX` and `GFSCATALOG` (an install made with v0.1 has `GFSINDEX` instead of `GHOSTINDEX`, and keeps working). It belongs to the SWRR region you installed from: US and EU SWRR each keep their own saved data, so install from the one you will play in.
+
+- **Not enough space:** the installer checks before sending and stops without changing anything. Free space on the PS5 and run it again.
+- **Other titles** can be installed next to Ghost; none but Ghost has been tested ([compatibility.md](compatibility.md)).
 
 ## 6. Play
 
@@ -93,21 +96,39 @@ The data lands in SWRR's saved data under the signed-in user, as about 57 entrie
 
 The first boot takes a minute or two. On a new save Ghost goes through brightness, audio output, difficulty and experience (keep Standard: only English audio is installed), then the opening. Its saves go into a separate entry, `GHOSTSAVE`, and SWRR's own save is never touched.
 
-The computer logs the session to `build/ghostldr/run.log`. That file is what to look at, or share, if something goes wrong.
+`run.py` keeps printing the console's log until you press Ctrl+C; stopping it doesn't stop the game. The session is also written to `build/ghostldr/run.log`. That file is what to look at, or share, if something goes wrong.
 
 **Every later session:** close SWRR, start it again, open HALL OF FAME, and run the same `run.py` command. The install is only needed once per PSN user.
+
+## Names and pictures in the game selector (optional)
+
+With more than one title installed, or with `run.py boot --select`, ghostldr shows a game picker in the style of the PS4 home screen before the game loads ([selector.md](selector.md)). A dump without `sce_sys` (Ghost's usually has none) shows its name from ghostldr's profile and a tile drawn in its colour. To show the game's official icon and background instead, with SWRR at the Luac0re loader:
+
+```bash
+python3 ghostldr/host/gfs_install.py --update-meta --title CUSA11456 --fetch-art
+```
+
+This downloads the art from the PlayStation Store's public pages into `build/ghostfs/CUSA11456/art` and writes one small entry, `GHOSTMETA` (about 3 MB), to the PS5. The game data, its progress and SWRR's own save are not touched, and nothing is reinstalled. Your own pictures work too: `--icon tile.png --backdrop background.png`. Restart SWRR before the next `run.py boot`, as after an install.
 
 ## Troubleshooting
 
 - **`receiver did not come up` or `is SWRR at the Luac0re loader?`:** the loader isn't listening. Open HALL OF FAME again, or restart SWRR first.
 - **`building the core failed`:** add `--no-build`. The release's core is already built.
 - **The boot command times out while sending:** restart SWRR, open HALL OF FAME, and send again.
-- **Black screen with no log lines on the computer:** the firewall is blocking UDP 18194, or `PS5_HOST` points at another device.
+- **Black screen with no log lines on the computer:** the firewall is blocking UDP 18194, or `PS_HOST` points at another device.
 - **`extension: the console did not fetch it`, or the log stops at `ext: no extension from the computer`:** the firewall is blocking TCP 18195. Nothing was started: allow it and run the same command again.
 - **The PS5 asks for the disc:** the SWRR disc must be in the console that runs it.
 
 ## Removing it
 
-Delete Ghost's data from **Settings → Saved Data and Game/App Settings → Saved Data (PS4) → Console Storage → Star Wars Racer Revenge**. The entries are `GHOST000`…`GHOST055` and `GFSINDEX`.
+With Luac0re's loader listening:
+
+```bash
+python3 ghostldr/host/gfs_install.py --remove CUSA11456
+```
+
+This deletes Ghost's data and index and keeps its progress, `GHOSTSAVE` (add `--remove-saves` to delete that too). Other installed titles and SWRR's own save are not touched.
+
+Or delete the entries by hand in **Settings → Saved Data and Game/App Settings → Saved Data (PS4) → Console Storage → Star Wars Racer Revenge**: `GHOST000`…`GHOST055` and `GHOSTINDEX` (or `GFSINDEX`).
 
 Keep `GHOSTSAVE` (Ghost's progress) and the Luac0re save (`SLUS-20268` on US SWRR, `SLES-50366` on EU) unless you mean to remove those too.

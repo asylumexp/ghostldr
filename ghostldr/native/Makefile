@@ -1,5 +1,6 @@
 # ghostldr core: freestanding x86-64 blob for the PS4 process inside SWRR,
-# and its runtime extension (ext/, served by run.py at boot).
+# its runtime extension (ext/) and the game selector (selector/), both served
+# by run.py at boot.
 # LLVM 18's bin directory (Homebrew's llvm@18 unless given: make LLVM=/path/to/llvm/bin)
 LLVM ?= /opt/homebrew/opt/llvm@18/bin
 export LLVM
@@ -29,7 +30,7 @@ EXT_OBJS := $(patsubst ext/src/%.c,$(OUT)/ext/%.o,$(EXT_SRCS)) $(OUT)/ext/rt.o
 NAMES := ../../build/nid/known_names.txt
 EXTRA_NAMES := $(wildcard ../data/extra_names.txt)
 
-all: $(OUT)/core.bin $(OUT)/ext.bin
+all: $(OUT)/core.bin $(OUT)/ext.bin $(OUT)/selector.bin
 
 $(OUT)/obj/%.o: src/%.c $(HEADERS)
 	@mkdir -p $(dir $@)
@@ -48,9 +49,10 @@ $(OUT)/core.bin: $(OUT)/core.elf
 	$(OBJCOPY) -O binary $< $@
 	@python3 ../tools/core_info.py $< $@
 
-$(OUT)/ext/%.o: ext/src/%.c ext/include/ext.h $(HEADERS)
+# EXT_CFLAGS: build switches for extension families (e.g. -DNPO_PERSONA_A=1)
+$(OUT)/ext/%.o: ext/src/%.c $(wildcard ext/include/*.h) $(wildcard ext/src/*.h) $(HEADERS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -Iext/include -c $< -o $@
+	$(CC) $(CFLAGS) $(EXT_CFLAGS) -Iext/include -c $< -o $@
 
 $(OUT)/ext/rt.o: src/rt.c $(HEADERS)
 	@mkdir -p $(dir $@)
@@ -65,6 +67,8 @@ $(OUT)/ext.bin: $(OUT)/ext.elf ../tools/mkext.py ../tools/elf64.py ../tools/gen_
 
 $(NAMES):
 	@echo "missing $@: run tools/fetch_deps.sh" >&2; exit 1
+
+include selector/selector.mk
 
 clean:
 	rm -rf $(OUT)

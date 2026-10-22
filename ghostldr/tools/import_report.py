@@ -14,14 +14,17 @@ ghostldr's resolver (native/src/resolve.c) would bind it, in its order:
 
 Inputs: the NID name lists (build/nid/known_names.txt), the HLE tables, the
 system module list (ghostldr/data/ps5_ps4_sysmodules.txt; only
-/system/common/lib is visible to a PS4 app), and boot.c's BUNDLED list. HOST
+/system/common/lib is visible to a PS4 app), and the sce_module files the boot
+loads (gen_nids.boot_modules; a BUNDLED[] list in boot.c if one exists). HOST
 only means the module file exists; whether it exports the name isn't checked.
 
 Extension HLE entries are read from C files ({"libX", "name", fn} or
 MACRO("libX", name) entries anywhere in the file) or from text lists
 ("libX name" per line), under native/ext/ or the --ext paths.
 
-It also counts, per library, how many of the imported functions shadPS4
+It also says whether the title's code fits the executable memory ghostldr
+has inside SWRR (tools/exec_fit.py: the EE buffer, several buffers, or not at
+all), and counts, per library, how many of the imported functions shadPS4
 registers and whether its version is a real implementation or a stub. shadPS4
 is only read for data (its LIB_FUNCTION lines and function bodies).
 
@@ -41,6 +44,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import exec_fit  # noqa: E402
 import orbis_elf as oe  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -128,14 +132,37 @@ def hle_entries(text: str, tables_only: bool) -> list[tuple[str, str]]:
     return out
 
 
+# budget.c's plan-free memory calls ({"name", fn} in k_mem[]): resolved by NID
+# ahead of everything else when the title has no memory plan (the default)
+_PLAN_FREE_TABLE = re.compile(r"\bk_mem\s*\[\s*\]\s*=\s*\{(.*?)\n\s*\}\s*;", re.S)
+_PLAN_FREE_ENTRY = re.compile(r'\{\s*"(\w+)"\s*,\s*\w+\s*\}')
+
+
 def load_core_hle(native: Path) -> dict[tuple[str, str], str]:
-    """Core HLE entries: every struct hle_ent table in native/src/*.c."""
+    """Core HLE entries: every struct hle_ent table in native/src/*.c, and
+    budget.c's plan-free memory calls (libkernel)."""
 
     table: dict[tuple[str, str], str] = {}
     for path in sorted((native / "src").glob("*.c")):
-        for key in hle_entries(path.read_text(errors="replace"), tables_only=True):
+        text = path.read_text(errors="replace")
+        for key in hle_entries(text, tables_only=True):
             table.setdefault(key, path.name)
+        for body in _PLAN_FREE_TABLE.findall(strip_comments(text)):
+            for name in _PLAN_FREE_ENTRY.findall(body):
+                table.setdefault(("libkernel", name), f"{path.name} (plan-free)")
     return table
+
+
+def load_module_files(native: Path) -> dict[str, str]:
+    """resolve.c's k_module_files: modules a sysmodule file of another name
+    provides (libSceFreeType in libSceFreeTypeOl.sprx)."""
+
+    try:
+        text = strip_comments((native / "src/resolve.c").read_text(errors="replace"))
+    except OSError:
+        return {}
+    m = re.search(r"k_module_files\s*\[\s*\]\s*\[\s*2\s*\]\s*=\s*\{(.*?)\}\s*;", text, re.S)
+    return dict(re.findall(r'\{\s*"(\w+)"\s*,\s*"(\w+)"\s*\}', m.group(1))) if m else {}
 
 
 def load_ext_hle(paths: list[Path]) -> dict[tuple[str, str], str]:
@@ -209,6 +236,9 @@ def shares_prefix(base: str, modname: str) -> bool:
     return n >= 8 and base[:n] == modname[:n] and base != modname
 
 
+MODULE_FILES = load_module_files(ROOT / "ghostldr/native")
+
+
 def host_file(modname: str | None, needed: list[str], sysmods: dict[str, list[SysModule]]) -> tuple[str | None, str]:
     """The system file resolve.c would load for a module, and how it got it."""
 
@@ -223,6 +253,9 @@ def host_file(modname: str | None, needed: list[str], sysmods: dict[str, list[Sy
         base = dep[:-4] if dep.endswith(".prx") else dep
         if shares_prefix(base, modname) and app_visible(sysmods, base + ".sprx"):
             return base + ".sprx", f"DT_NEEDED {dep}"
+    alias = MODULE_FILES.get(modname)
+    if alias and app_visible(sysmods, alias + ".sprx"):
+        return alias + ".sprx", "resolve.c's module files"
     return None, "missing"
 
 
@@ -534,7 +567,7 @@ def classify(imp: Import, needed: list[str], core: dict, ext: dict,
         if imp.library in tm.export_libs and imp.nid in tm.exports:
             imp.cls, imp.provider = "TITLE", tm.file
             if tm.loaded_by_boot is False:
-                imp.reason = f"{tm.file} isn't in boot.c's BUNDLED list"
+                imp.reason = f"{tm.file} isn't loaded at boot (no import needs it)"
             return
     if not imp.library:
         imp.cls, imp.reason = "UNRESOLVED", "unknown library id"
@@ -715,6 +748,8 @@ def render_markdown(rep: dict, title: str | None = None) -> str:
                f"Extension HLE entries: {inp['ext_hle_entries']}.")
     out.append(f"- System modules a PS4 app can load: {inp['system_modules_visible']} "
                f"(in {', '.join(APP_LIB_DIRS)}).")
+    if rep.get("executable_memory", {}).get("verdict"):
+        out.append(f"- Executable memory: {exec_fit.summary(rep['executable_memory'])}.")
     if inp["shadps4"]:
         sh = inp["shadps4"]
         out.append(f"- shadPS4: {sh['registrations']} registered functions"
@@ -738,6 +773,14 @@ def render_markdown(rep: dict, title: str | None = None) -> str:
         out.append(f"| {m['file']} | {m['module'] or '?'} | {m['imports']} | {m['exports']} | "
                    f"{', '.join(m['export_libs']) or '-'} | {loaded} |")
     out.append("")
+
+    fit = rep.get("executable_memory")
+    if fit:
+        out += ["## Executable memory", "",
+                "Where the title's code would run inside SWRR on a PS5 (`tools/exec_fit.py`, the loader's own "
+                "rules: arena.c, bigexec.c and bxplan.c).", ""]
+        out += [f"**{exec_fit.summary(fit)}**", ""] if "verdict" in fit else [f"**not checked**: {fit['error']}", ""]
+        out += ["```", *exec_fit.lines(fit)[1:], "```", ""] if "verdict" in fit else []
 
     out += ["## Libraries by risk", "",
             "HIGH: some imports resolve to nothing. MEDIUM: some imports bind to the console's own module. "
@@ -848,6 +891,15 @@ def render_markdown(rep: dict, title: str | None = None) -> str:
 
 # ---------------------------------------------------------------- main
 
+def executable_memory(app0: Path) -> dict:
+    """exec_fit's verdict (with the title profile's code ranges when they
+    apply), or {"error": why}."""
+    try:
+        return exec_fit.fit(app0, exec_fit.profile_exec(app0))
+    except Exception as e:  # a module the core could not parse either
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("app0", type=Path, help="the title's app0 directory (eboot.bin, sce_module/)")
@@ -876,7 +928,13 @@ def main(argv: list[str] | None = None) -> int:
     shad = ShadPS4(args.shadps4) if (args.shadps4 / "src" / "core" / "libraries").is_dir() else None
     if shad is None:
         print(f"note: no shadPS4 tree at {args.shadps4}; skipping its column", file=sys.stderr)
-    rep = build_report(args.app0, names, core, ext, sysmods, shad, load_bundled(args.native))
+    bundled = load_bundled(args.native)
+    if bundled is None and (args.app0 / "eboot.bin").is_file():
+        import gen_nids  # the boot's own choice (modules.c): Fios2, libc and what the imports need
+        bundled = [f.name for f in gen_nids.boot_modules(args.app0)]
+    rep = build_report(args.app0, names, core, ext, sysmods, shad, bundled)
+    if (args.app0 / "eboot.bin").is_file():
+        rep["executable_memory"] = executable_memory(args.app0)
     md = render_markdown(rep, args.title)
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -889,6 +947,10 @@ def main(argv: list[str] | None = None) -> int:
     s = rep["summary"]
     print("functions: " + ", ".join(f"{c} {s['functions_by_class'][c]}" for c in CLASSES)
           + f" (total {s['functions']}, {s['import_sites']} sites)", file=sys.stderr)
+    fit = rep.get("executable_memory")
+    if fit:
+        print("executable memory: " + (exec_fit.summary(fit) if "verdict" in fit else f"not checked ({fit['error']})"),
+              file=sys.stderr)
     return 0
 
 

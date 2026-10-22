@@ -26,6 +26,7 @@ ROOT = HERE.parents[1]
 EXT = ROOT / "build/ghostldr/ext.bin"
 sys.path.insert(0, str(ROOT / "ghostldr/tools"))
 sys.path.insert(0, str(ROOT / "ghostldr/host"))
+sys.path.insert(0, str(HERE))
 
 
 def x86_64_cc() -> list[str] | None:
@@ -54,15 +55,22 @@ class ExtensionOnHost(unittest.TestCase):
         out = Path(cls.tmp.name) / "ext_host"
         flags = ["-O1", "-std=gnu11", "-fno-builtin", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Werror",
                  f"-I{ROOT / 'ghostldr/native/include'}", f"-DGHOST_ABI={abi}u"]
-        objs = []
         core = ROOT / "ghostldr/native/src"
-        sources = [(core / f"{name}.c", flags) for name in ("ext", "resolve", "elf", "nid")]
-        for src, extra in sources + [(HERE / "ext_host/env.c", flags), (HERE / "ext_host/sys.c", ["-O1"])]:
-            obj = Path(cls.tmp.name) / (src.stem + ".o")
-            subprocess.run(cc + extra + ["-c", str(src), "-o", str(obj)], check=True)
-            objs.append(str(obj))
-        subprocess.run(cc + objs + ["-o", str(out)], check=True)
+        base = [(core / f"{name}.c", flags) for name in ("ext", "resolve", "elf", "nid")] + \
+            [(HERE / "ext_host/sys.c", ["-O1"])]
+        # ext_host: the extension's boot; kernel_host: the loader, TLS and the kernel families too
+        loader = [(core / f"{name}.c", flags) for name in ("loader", "modules")] + \
+            [(core / "tls.c", flags + ["-DTLS_SLOT=g_tls_slot"])]  # a variable stands in for fs:[-8]
+        for exe, sources in (("ext_host", base + [(HERE / "ext_host/env.c", flags)]),
+                             ("kernel_host", base + loader + [(HERE / "ext_host/kernel.c", flags)])):
+            objs = []
+            for src, extra in sources:
+                obj = Path(cls.tmp.name) / f"{exe}_{src.stem}.o"
+                subprocess.run(cc + extra + ["-c", str(src), "-o", str(obj)], check=True)
+                objs.append(str(obj))
+            subprocess.run(cc + objs + ["-o", str(Path(cls.tmp.name) / exe)], check=True)
         cls.host = out
+        cls.kernel_host = Path(cls.tmp.name) / "kernel_host"
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -77,7 +85,9 @@ class ExtensionOnHost(unittest.TestCase):
     def test_loads_in_the_small_area_and_self_tests(self) -> None:
         out = self.run_host("small")
         self.assertIn("into flexible memory", out)
-        self.assertIn("in the small RX area", out)
+        # 64 KiB after a 192 KiB core, 16 KiB of it kept for stubs: a bigger image goes in a JIT block
+        image_memsz, = struct.unpack_from("<I", self.blob, 40)
+        self.assertIn("in the small RX area" if image_memsz + 0x4000 <= 0x10000 else "in a new JIT block", out)
         self.assertIn("ext: self-test ok", out)
 
     def test_loads_in_a_jit_block(self) -> None:
@@ -94,6 +104,39 @@ class ExtensionOnHost(unittest.TestCase):
         self.assertIn("ok no host fallback: the stub returns the library's error", out)
         self.assertIn("DENIED call: libGhostldrExt", out)
         self.assertIn("UNRESOLVED call: libSceFake AAAAAAAAAAA (?)", out)
+
+    def test_kernel_families(self) -> None:
+        import orbis_build
+        app0 = orbis_build.kernel_title(Path(self.tmp.name) / "kernel")
+        p = subprocess.run([str(self.kernel_host), str(EXT), self.crc, str(app0)], capture_output=True, text=True)
+        out = p.stdout
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("FAILED", out)
+        self.assertIn("ok heap trace info gets private mask and table", out)
+        self.assertIn("ok boot: Fios2, libc, then what the imports need by name, then the executable", out)
+        self.assertIn("ok sysmodule: LoadModule(0x102) starts the title's NpToolkit2", out)
+        self.assertIn("ok LoadStartModule: its host import resolves by a name kept from boot", out)
+        starts = [line.split()[1] for line in out.splitlines() if line.startswith("module_start") and " -> " in line]
+        self.assertEqual(starts[:4], ["libSceFios2.prx", "libc.prx", "libSceZed.prx", "libSceFoo.prx"])
+        self.assertLess(out.index("sceSysmoduleLoadModule(102)"), out.index("module_start libSceNpToolkit2.prx at"))
+        # the core's choice of boot modules is gen_nids.boot_modules' (check_ext.py and import_report.py use it)
+        import gen_nids
+        self.assertEqual([f.name for f in gen_nids.title_files(app0)][:-1],
+                         ["libSceFios2.prx", "libc.prx", "libSceFoo.prx", "libSceNpToolkit2.prx", "libSceTls.prx",
+                          "libSceTlsUser.prx", "libSceZed.prx"])
+        for line in ("FromAddr: eh_frame_hdr and eh_frame from PT_GNU_EH_FRAME",
+                     "ForUnwind: the unwinder finds the title module's FDEs",
+                     "pthread exit runs libc's thread-exit hook",
+                     "TLS: 24 more modules: the vector grows, blocks aligned",
+                     "pthread_create: the thread gets its own static TLS block",
+                     "files: AIO reads a ghostfs file at submission",
+                     "boot: an unresolved variable binds to 0, an unresolved function to a stub",
+                     "SDK version: the title's proc param",
+                     "TLS: the profile's site list: listed sites only, each checked",
+                     "TLS: an imported thread_local names the exporting module's block",
+                     "TLS: an ended thread's blocks serve the next thread, fresh",
+                     "TLS: a callback thunk gives a host thread its block, arguments intact"):
+            self.assertIn("ok " + line, out)
 
     def test_refuses_a_bad_transfer_before_touching_anything(self) -> None:
         self.assertIn("is corrupt", self.run_host("badcrc"))
