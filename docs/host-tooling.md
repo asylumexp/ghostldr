@@ -1,7 +1,7 @@
-# Host tooling (fork additions)
+# Host tooling
 
-Three host-side tools on top of the stock release flow. All are
-read-only with respect to the console except where noted.
+Four host-side additions to the release flow. All are read-only with
+respect to the console except where noted.
 
 ## `run.py doctor`
 
@@ -24,9 +24,11 @@ also exists; on trees that cannot run the checker it prints
 "skipped" and boots as before). The summary line prints how the
 title's functions bind — core-HLE, ext-HLE, title, host — and how
 many are UNRESOLVED. Unresolved imports bind to stubs that return 0,
-which looks like success to the title, so any unresolved count
-refuses the boot. The full report is written to
-`build/ghostldr/preflight.md` (and `.json`). To boot anyway:
+which looks like success to the title, so any unresolved count asks
+`Boot anyway? [y/N]` before going on (anything but `y` cancels; with
+no terminal to ask on, the boot stops). The full report is written to
+`build/ghostldr/preflight.md` (and `.json`). To boot without being
+asked:
 
     python3 ghostldr/host/run.py boot --force-preflight
 

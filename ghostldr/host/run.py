@@ -15,8 +15,8 @@ core runs it before the title when more than one title is installed, or with
 --select.
 
 A boot first runs a preflight coverage check when a local app0 and the
-NID name table are staged: imports that would bind to stubs (which
-return 0 and look like success to the title) refuse the boot unless
+NID name table are staged: if imports would bind to stubs (which return
+0 and look like success to the title), it asks before booting, unless
 --force-preflight is given. The full report lands in
 build/ghostldr/preflight.md.
 """
@@ -253,14 +253,22 @@ def preflight(force: bool) -> None:
           f"{by.get('CORE-HLE', 0)} core-HLE, {by.get('EXT-HLE', 0)} ext-HLE, "
           f"{by.get('TITLE', 0)} title, {by.get('HOST', 0)} host, "
           f"{un} unresolved (report: build/ghostldr/preflight.md)", flush=True)
-    if un and not force:
-        libs = [row["library"] for row in rep["libraries"]
-                if row["classes"].get("UNRESOLVED")]
-        raise SystemExit(
-            f"preflight: {un} imports would bind to stubs that return 0 "
-            f"(libraries: {', '.join(libs[:5])}). See "
-            "build/ghostldr/preflight.md, or re-run with "
-            "--force-preflight to boot anyway")
+    if not un or force:
+        return
+    libs = [row["library"] for row in rep["libraries"]
+            if row["classes"].get("UNRESOLVED")]
+    print(f"preflight: {un} imports would bind to stubs that return 0 "
+          f"(libraries: {', '.join(libs[:5])}); see "
+          "build/ghostldr/preflight.md", flush=True)
+    if not sys.stdin.isatty():
+        raise SystemExit("preflight: no terminal to ask on; re-run with "
+                         "--force-preflight to boot anyway")
+    try:
+        answer = input("Boot anyway? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("y", "yes"):
+        raise SystemExit("preflight: boot cancelled")
 
 
 def doctor(args) -> int:
