@@ -1,6 +1,6 @@
 # Bringing up a new title
 
-ghostldr loads PS4 titles, games and homebrew alike, inside SWRR. **Ghost of Tsushima (CUSA11456 v2.18) is the only title tested so far.** Nothing in the loader is tied to it any more: everything Ghost needs that other titles don't lives in its profile, `ghostldr/data/titles/CUSA11456.json`, and only applies to that build of its executable. Another title will boot as far as its imports and memory needs allow. This page is the loop for finding out how far that is and for closing the gaps.
+ghostldr loads PS4 titles, games and homebrew alike, inside SWRR. **Ghost of Tsushima (CUSA11456 v2.18) is the most tested title. Bloodborne (CUSA00900 v1.09) also reaches gameplay, and OpenOrbis homebrew runs ([Homebrew](#homebrew)).** Nothing in the loader is tied to Ghost: everything Ghost needs that other titles don't lives in its profile, `ghostldr/data/titles/CUSA11456.json`, and only applies to that build of its executable. Another title will boot as far as its imports and memory needs allow. This page is the loop for finding out how far that is and for closing the gaps.
 
 1. [Pack](#1-pack) the dump, with or without an open-order file.
 2. [Install](#2-install) it next to whatever is installed already.
@@ -125,7 +125,11 @@ For each `UNRESOLVED call`, decide:
 - **It needs logic** (callbacks, handles, real work): C in the runtime extension.
 - **SWRR's system module would do it** but the name was unknown: the core resolves host modules by name, so the name must be in its NID table. The runtime extension carries all ~42,000 known names. A core without it carries only the names of the dump it was built against: rebuild it with `make -C ghostldr/native APP0=/path/to/app0`.
 
-To see all of it before the first boot, `ghostldr/tools/import_report.py` (the import coverage report) lists every import of the dump and how it would bind.
+To see all of it before the first boot, `ghostldr/tools/import_report.py` (the import coverage report) lists every import of the dump's `eboot.bin` and `sce_module/*.prx` and how it would bind: core HLE, extension HLE, the title's own modules, a system module on the console (`ghostldr/data/ps5_ps4_sysmodules.txt`), or nothing. Given a [shadPS4](https://github.com/shadps4-emu/shadPS4) source tree, it also shows which of those functions shadPS4 implements or stubs (a reference for how they behave; no shadPS4 code is used):
+
+```bash
+python3 ghostldr/tools/import_report.py /path/to/CUSA12345/app0 --shadps4 /path/to/shadPS4 --md coverage.md --json coverage.json
+```
 
 ## 5. Write a profile
 
@@ -200,7 +204,7 @@ A rule answers one import without C: it writes constants through pointer argumen
 
 ## 7. C-level HLE
 
-What needs logic goes in the runtime extension that run.py serves with the core (`ghostldr/native/ext/`, branch `hle/ext-loader`; see its README). One family of functions per file, `ext/src/hle_<family>.c`, registered by library and NID, so it covers imports with no known name too. The core stays within its 240 KiB.
+What needs logic goes in the runtime extension that run.py serves with the core (`ghostldr/native/ext/`; see [its README](../ghostldr/native/ext/README.md)). One family of functions per file, `ext/src/hle_<family>.c`, registered by library and NID, so it covers imports with no known name too. The core stays within its 240 KiB.
 
 ## 8. Capture an open order
 

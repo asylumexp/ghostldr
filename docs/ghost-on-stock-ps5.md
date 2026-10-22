@@ -13,7 +13,7 @@ After that the console needs nothing but SWRR.
   - Each region keeps its own saved data. Install the game data from the SWRR you will play in; an install made in one region doesn't appear in the other.
 - **A USB drive.** exFAT or FAT32.
 - **A computer on the same network.** The install moves 53 GiB over LAN. It needs:
-  - this repo, Python 3 and LLVM 18 (run.py builds the core; see the README);
+  - this repo, Python 3.11+ and LLVM 18 (run.py builds the core; see [Building from source](../README.md#building-from-source));
   - the dependencies from `tools/fetch_deps.sh`;
   - your own extracted Ghost files at `build/ghost/app0` (eboot.bin, sce_module/, cache/, movies/ ...).
 - **About 60 GB free** on the PS5.
@@ -32,7 +32,9 @@ The scripts find the console with the PlayStation discovery protocol (PS5s on UD
 python3 ghostldr/host/console.py --list
 ```
 
-With one console on, or one running SWRR or Luac0re's loader, nothing needs setting. Otherwise use one of:
+The list shows each console's type, name, host-id, firmware, whether it is on or in rest mode, the running app (PS4s report it; SWRR is marked), and whether Luac0re's loader listens on 9026.
+
+With one console on, or one running SWRR or Luac0re's loader, nothing needs setting. When several answer, every tool prints this numbered list and marks the one it uses. If none stands out, it asks which to use, or stops with the list when not run from a terminal. To choose one yourself, use one of:
 
 ```bash
 export PS_HOST_ID=0123456789AB
@@ -80,7 +82,7 @@ python3 ghostldr/host/gfs_install.py --title CUSA12345
 - **What is installed:** `gfs_install.py --list`.
 - **Removing a title:** `gfs_install.py --remove CUSA12345` deletes its data containers and index. Its progress (`<prefix>SAVE`, GHOSTSAVE for Ghost) stays unless you add `--remove-saves`. SWRR's own save is never touched.
 - **Progress:** each title keeps its progress in its own `<prefix>SAVE` container (the new title gets `G12345SAVE`). A title that mounts save directories (most games, unlike Ghost) also gets one container per directory, `<prefix>D001SAVE` and up, listed in `<prefix>SAVE`'s catalogue; save data memory too big for `<prefix>SAVE` goes to `<prefix>M<slot>SAVE`. The installer never deletes these unless asked, and the receiver refuses to.
-- **Other titles are untested:** ghostldr is title-agnostic, but only Ghost has been played. [compatibility.md](compatibility.md) covers bringing one up: reading the log, profiles and HLE rules.
+- **Other titles:** ghostldr is title-agnostic. Bloodborne 1.09 reaches gameplay; other games are untested. [compatibility.md](compatibility.md) covers bringing one up: reading the log, profiles and HLE rules.
 - Names and formats: [ghostfs-catalogue.md](ghostfs-catalogue.md).
 
 ## 4. Boot Ghost
