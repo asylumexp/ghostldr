@@ -22,7 +22,9 @@ Extension HLE entries are read from C files ({"libX", "name", fn} or
 MACRO("libX", name) entries anywhere in the file) or from text lists
 ("libX name" per line), under native/ext/ or the --ext paths.
 
-It also counts, per library, how many of the imported functions shadPS4
+It also says whether the title's code fits the executable memory ghostldr
+has inside SWRR (tools/exec_fit.py: the EE buffer, several buffers, or not at
+all), and counts, per library, how many of the imported functions shadPS4
 registers and whether its version is a real implementation or a stub. shadPS4
 is only read for data (its LIB_FUNCTION lines and function bodies).
 
@@ -42,6 +44,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import exec_fit  # noqa: E402
 import orbis_elf as oe  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -716,6 +719,8 @@ def render_markdown(rep: dict, title: str | None = None) -> str:
                f"Extension HLE entries: {inp['ext_hle_entries']}.")
     out.append(f"- System modules a PS4 app can load: {inp['system_modules_visible']} "
                f"(in {', '.join(APP_LIB_DIRS)}).")
+    if rep.get("executable_memory", {}).get("verdict"):
+        out.append(f"- Executable memory: {exec_fit.summary(rep['executable_memory'])}.")
     if inp["shadps4"]:
         sh = inp["shadps4"]
         out.append(f"- shadPS4: {sh['registrations']} registered functions"
@@ -739,6 +744,14 @@ def render_markdown(rep: dict, title: str | None = None) -> str:
         out.append(f"| {m['file']} | {m['module'] or '?'} | {m['imports']} | {m['exports']} | "
                    f"{', '.join(m['export_libs']) or '-'} | {loaded} |")
     out.append("")
+
+    fit = rep.get("executable_memory")
+    if fit:
+        out += ["## Executable memory", "",
+                "Where the title's code would run inside SWRR on a PS5 (`tools/exec_fit.py`, the loader's own "
+                "rules: arena.c, bigexec.c and bxplan.c).", ""]
+        out += [f"**{exec_fit.summary(fit)}**", ""] if "verdict" in fit else [f"**not checked**: {fit['error']}", ""]
+        out += ["```", *exec_fit.lines(fit)[1:], "```", ""] if "verdict" in fit else []
 
     out += ["## Libraries by risk", "",
             "HIGH: some imports resolve to nothing. MEDIUM: some imports bind to the console's own module. "
@@ -849,6 +862,15 @@ def render_markdown(rep: dict, title: str | None = None) -> str:
 
 # ---------------------------------------------------------------- main
 
+def executable_memory(app0: Path) -> dict:
+    """exec_fit's verdict (with the title profile's code ranges when they
+    apply), or {"error": why}."""
+    try:
+        return exec_fit.fit(app0, exec_fit.profile_exec(app0))
+    except Exception as e:  # a module the core could not parse either
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("app0", type=Path, help="the title's app0 directory (eboot.bin, sce_module/)")
@@ -882,6 +904,8 @@ def main(argv: list[str] | None = None) -> int:
         import gen_nids  # the boot's own choice (modules.c): Fios2, libc and what the imports need
         bundled = [f.name for f in gen_nids.boot_modules(args.app0)]
     rep = build_report(args.app0, names, core, ext, sysmods, shad, bundled)
+    if (args.app0 / "eboot.bin").is_file():
+        rep["executable_memory"] = executable_memory(args.app0)
     md = render_markdown(rep, args.title)
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -894,6 +918,10 @@ def main(argv: list[str] | None = None) -> int:
     s = rep["summary"]
     print("functions: " + ", ".join(f"{c} {s['functions_by_class'][c]}" for c in CLASSES)
           + f" (total {s['functions']}, {s['import_sites']} sites)", file=sys.stderr)
+    fit = rep.get("executable_memory")
+    if fit:
+        print("executable memory: " + (exec_fit.summary(fit) if "verdict" in fit else f"not checked ({fit['error']})"),
+              file=sys.stderr)
     return 0
 
 

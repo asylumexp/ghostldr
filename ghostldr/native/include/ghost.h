@@ -291,6 +291,7 @@ struct module {
     u32 nsegs;
     u8 fingerprint[20];                   /* DT_SCE_FINGERPRINT */
     u64 tls_offset;            /* static TLS: image at thread pointer - tls_offset (tls.c); 0: dynamic */
+    struct bx_state *bx;       /* code in whole emulator JIT objects (bigexec.c); NULL: in the arena */
 };
 
 /* struct module.start_state */
@@ -402,10 +403,16 @@ struct prof_rec {
 #define REC_RULE 3
 #define REC_TLS 4
 #define REC_NAME 5      /* the title's display name, UTF-8 + NUL (the game selector reads it; the core ignores it) */
+#define REC_EXEC 6      /* a module's code ranges (bigexec.c) */
 struct prof_tls {       /* tools/tls_sites.py: one module's thread-pointer loads, checked before patching */
     struct prof_rec r;
     char module[32];    /* its file name, e.g. "eboot.bin" */
     u32 count, off[];   /* text offsets of each "mov/add r64, fs:[0]"'s fs prefix */
+};
+struct prof_exec {      /* a module's code ranges, instead of the evidence bxplan.c reads */
+    struct prof_rec r;
+    char module[32];    /* its file name, e.g. "eboot.bin" */
+    u32 count, range[]; /* start, end text offsets of each range */
 };
 struct prof_plan {
     struct prof_rec r;
@@ -508,6 +515,18 @@ u64 arena_wr(u64 dst, u64 size); /* where the compiler writes [dst, dst+size); 0
 extern u64 g_punched;           /* bytes arena_punch_rw has mapped */
 int arena_write(u64 dst, const void *src, u64 size);
 int arena_punch_rw(u64 addr, u64 size);
+u32 arena_buffers(u64 *start, u64 *end, u32 max); /* whole JIT buffers, not the core's; by address */
+void arena_drop(u64 start);                       /* a buffer bigexec.c maps elsewhere: place nothing in it */
+
+/* ---- large executables (bigexec.c, bxplan.c) ---- */
+int bx_prepare(void);          /* after arena_init: views for a module the arena cannot hold; -1: no room */
+int bx_place(struct module *m);
+int bx_write_text(struct module *m, const u8 *text);
+struct bx_range {
+    s64 lo, hi;                /* module offsets, [lo, hi) */
+};
+u32 bx_code(const struct module *m, const struct bx_range **runs); /* its code runs (TLS patching) */
+bool bx_in_view(const struct module *m, u64 addr);                 /* executable: in one of its views */
 
 /* ---- runtime extension (ext.c; interface in ghost_api.h) ---- */
 #define CTX_FLAG_EXT_JIT 64 /* place the extension in a new JIT block (run.py --ext-jit) */

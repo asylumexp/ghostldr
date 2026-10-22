@@ -237,6 +237,7 @@ class CoreProfileTests(unittest.TestCase):
         bound = copy.deepcopy(rule_title)
         bound["title"] = "CUSA33333"
         bound["eboot"] = {"fingerprint": "11" * 20}
+        bound["exec"] = {"eboot.bin": [["0x0", "0x2c00000"], ["0x3000000", "0x3100000"]]}
         blobs = [profiles.compile_blob(profiles.load("CUSA11456")), profiles.compile_blob(rule_title),
                  profiles.compile_blob(bound), profiles.compile_blob(profiles.load(None))]
         cls.bundle = Path(cls.tmp.name) / "bundle.bin"
@@ -295,6 +296,15 @@ class CoreProfileTests(unittest.TestCase):
         self.assertIn("rule stub 5000 returns 80550001, out aaaaaaaa0700000000000000aaaaaaaa", lines)
         lines = self.run_host("rules", "22" * 20, "CUSA33333", "sceNpGetState", "libSceNpManager")
         self.assertIn("rule stub 0 returns 0, out aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", lines)
+
+    def test_exec_ranges_only_on_the_profiles_build(self) -> None:
+        """bigexec.c reads a profile's code ranges (REC_EXEC) on its own build only."""
+        lines = self.run_host("exec", "11" * 20, "CUSA33333")
+        self.assertIn("exec eboot.bin 0-2c00000", lines)
+        self.assertIn("exec eboot.bin 3000000-3100000", lines)
+        self.assertIn("exec records 1", lines)
+        self.assertIn("exec records 0", self.run_host("exec", "22" * 20, "CUSA33333"))
+        self.assertIn("exec records 0", self.run_host("exec", GHOST_FP, "CUSA11456"))
 
 
 if __name__ == "__main__":

@@ -167,6 +167,18 @@ int main(int argc, char **argv)
              arc, (u64)off, size / MiB);
         return 0;
     }
+    if (strcmp(sc, "exec") == 0) { /* the code ranges bigexec.c would read */
+        profile_select(argv[4]);
+        make_text("");
+        profile_bind(have_fp ? fp : NULL);
+        const struct prof_exec *x;
+        u32 k = 0;
+        for (; (x = profile_record(REC_EXEC, k)); k++)
+            for (u32 i = 0; i < x->count; i++)
+                logf("exec %s %x-%x", x->module, x->range[2 * i], x->range[2 * i + 1]);
+        logf("exec records %u", k);
+        return 0;
+    }
     if (strcmp(sc, "rules") == 0) {
         profile_select(argv[4]);
         make_text("");

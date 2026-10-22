@@ -66,7 +66,7 @@ MAGIC = b"GLPF"
 VERSION = 1
 HEADER = struct.Struct("<4sHHII16s20sI5iIiII4x")  # struct prof_hdr, 96 bytes
 REC = struct.Struct("<HHI")                        # struct prof_rec
-REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME = 1, 2, 3, 4, 5
+REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME, REC_EXEC = 1, 2, 3, 4, 5, 6
 NAME_MAX = 127                 # bytes of UTF-8 in REC_NAME (the selector's name field is 128)
 TLS_PER_REC = 15000            # offsets per REC_TLS record (its size is a u16)
 MAX_BLOB = 0x10000
@@ -237,7 +237,8 @@ def _keys(errors: list, where: str, obj, allowed: set, required: set = frozenset
 
 
 TOP_KEYS = {"title", "name", "version", "status", "notes", "eboot", "pack", "app_params", "save_blocks",
-            "features", "memory", "hle", "tls_sites"}
+            "features", "memory", "hle", "tls_sites", "exec"}
+MAX_EXEC_RANGES = 6            # bxplan.h BX_MAX_RUNS
 MEMORY_KEYS = {"mode", "runtime_reserve_mib", "video_reserve_mib", "flex_mib", "min_mib", "plan"}
 
 
@@ -313,6 +314,7 @@ def validate(p: dict) -> list[str]:
                 e.append(f"tls_sites.{mod}: no file ghostldr/data/titles/{f} (tools/tls_sites.py --out writes it)")
         if tls and not p.get("eboot", {}).get("fingerprint"):
             e.append("tls_sites are text offsets of one build: set eboot.fingerprint")
+    _validate_exec(e, p)
     rules = p.get("hle", [])
     if not isinstance(rules, list):
         e.append("hle must be a list of rules")
@@ -322,6 +324,34 @@ def validate(p: dict) -> list[str]:
         for i, r in enumerate(rules):
             _validate_rule(e, f"hle[{i}]", r)
     return e
+
+
+def exec_ranges(p: dict) -> dict[str, list[tuple[int, int]]]:
+    """The profile's "exec" code ranges per module file, as numbers."""
+    return {mod: [(_int(a), _int(b)) for a, b in r] for mod, r in p.get("exec", {}).items()}
+
+
+def _validate_exec(e: list, p: dict) -> None:
+    """exec: {"eboot.bin": [["0x0", "0x2c00000"], ...]}: a module's code
+    ranges (text offsets), used instead of what the core reads from the
+    module when its code needs several JIT buffers (bigexec.c)."""
+    ex = p.get("exec", {})
+    if not isinstance(ex, dict):
+        e.append('exec must map module file names to code ranges ({"eboot.bin": [["0x0", "0x2c00000"]]})')
+        return
+    for mod, ranges in ex.items():
+        if not (isinstance(mod, str) and 0 < len(mod) < 32 and "/" not in mod):
+            e.append(f"exec: {mod!r} is not a module file name (at most 31 characters)")
+            continue
+        ok = isinstance(ranges, list) and 0 < len(ranges) <= MAX_EXEC_RANGES and all(
+            isinstance(r, list) and len(r) == 2 and _int(r[0], 0, 2**32 - 1) is not None
+            and _int(r[1], 0, 2**32 - 1) is not None and _int(r[0]) < _int(r[1]) for r in ranges)
+        if not ok:
+            e.append(f"exec.{mod}: 1 to {MAX_EXEC_RANGES} [start, end] text offsets, start < end")
+        elif any(_int(ranges[i][0]) < _int(ranges[i - 1][1]) for i in range(1, len(ranges))):
+            e.append(f"exec.{mod}: ranges must be sorted and must not overlap")
+    if ex and not p.get("eboot", {}).get("fingerprint"):
+        e.append("exec ranges are text offsets of one build: set eboot.fingerprint")
 
 
 def _validate_plan(e: list, plan) -> None:
@@ -478,6 +508,9 @@ def compile_blob(prof: dict, src: Path | None = None, flags: int = 0, extra_feat
             recs += _rec(REC_TLS, struct.pack("<32sI", mod.encode(), len(chunk)) + struct.pack(f"<{len(chunk)}I", *chunk))
     if prof.get("name"):           # the game selector shows it when the title has no param.sfo
         recs += _rec(REC_NAME, _cstr(utf8_cut(prof["name"], NAME_MAX)))
+    for mod, ranges in sorted(exec_ranges(prof).items()):
+        flat = [v for r in ranges for v in r]
+        recs += _rec(REC_EXEC, struct.pack("<32sI", mod.encode(), len(ranges)) + struct.pack(f"<{len(flat)}I", *flat))
     video = mem.get("video_reserve_mib")
     params = params if params is not None else app_params(prof, src)
     header = HEADER.pack(MAGIC, VERSION, HEADER.size, HEADER.size + len(recs), flags, prof["title"].encode(), fp,

@@ -69,18 +69,19 @@ int ghost_boot(void)
         return rc;
 
     u64 code_lo, code_hi;
-    if (arena_init() != 0 || arena_code_region(&code_lo, &code_hi) != 0)
+    /* a module the arena cannot hold gets whole JIT objects of its own
+     * (bigexec.c), which leave the arena first; the selector is done by now */
+    if (arena_init() != 0 || bx_prepare() != 0 || arena_code_region(&code_lo, &code_hi) != 0)
         return -3;
     /* bundled modules first, then the executable; its data may extend past
      * the code region (over the emulator's other, now unused, buffers) */
     for (struct module *m = g_modules; m; m = m->next)
-        if (!m->is_main && module_place(m, arena_code_alloc(m->image_size)) != 0)
+        if (!m->is_main && module_place(m, m->bx ? 0 : arena_code_alloc(m->image_size)) != 0)
             return -3;
-    u64 main_at = arena_code_alloc(g_main_mod->image_size);
-    if (module_place(g_main_mod, main_at) != 0)
+    if (module_place(g_main_mod, g_main_mod->bx ? 0 : arena_code_alloc(g_main_mod->image_size)) != 0)
         return -3;
-    logf("boot: code region %lx-%lx, main at %lx, image end %lx", code_lo, code_hi, main_at,
-         main_at + g_main_mod->image_size);
+    logf("boot: code region %lx-%lx, main at %lx, image end %lx", code_lo, code_hi, g_main_mod->base,
+         g_main_mod->base + g_main_mod->image_size);
     if (ext_start() != 0)
         return -8;
     for (struct module *m = g_modules; m; m = m->next)

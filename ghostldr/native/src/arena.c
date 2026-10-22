@@ -216,6 +216,31 @@ u64 arena_code_alloc(u64 size)
     return at;
 }
 
+/* The emulator's JIT buffers that hold no part of the core: each region is
+ * one whole JIT object (bigexec.c maps some of them elsewhere). */
+COLD u32 arena_buffers(u64 *start, u64 *end, u32 max)
+{
+    u32 n = 0;
+    for (u32 i = 0; i < g_nrx && n < max; i++)
+        if (!holds_core(&g_rx[i]) && g_rx[i].end - g_rx[i].start >= 0x100000)
+            start[n] = g_rx[i].start, end[n++] = g_rx[i].end;
+    return n;
+}
+
+/* A buffer whose object now holds a module's code elsewhere: no module,
+ * selector or punch goes there any more. */
+COLD void arena_drop(u64 start)
+{
+    for (u32 i = 0; i < g_nrx; i++)
+        if (g_rx[i].start == start) {
+            logf("arena: %lx-%lx (%lu KiB) leaves the arena", g_rx[i].start, g_rx[i].end,
+                 (g_rx[i].end - g_rx[i].start) >> 10);
+            for (g_nrx--; i < g_nrx; i++)
+                g_rx[i] = g_rx[i + 1];
+            return;
+        }
+}
+
 bool arena_is_rx(u64 addr, u64 size)
 {
     for (u32 i = 0; i < g_nrx; i++)

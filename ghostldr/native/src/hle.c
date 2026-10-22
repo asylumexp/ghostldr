@@ -87,6 +87,13 @@ void budget_alloc_note(s64 len);
 int budget_flex_gate(u64 len);
 void budget_flex_note(s64 len);
 
+/* A title's new memory reads as zeros, as a fresh process's does on a PS4;
+ * the physical pages ghostldr hands out held SWRR's emulator buffers or its
+ * own data before (homebrew draws over framebuffers it never cleared).
+ * Plan-free titles only: a memory plan's lazily backed pools must stay
+ * uncommitted, and Ghost runs as measured. */
+static bool zero_new_memory(void) { return !profile_has(PF_PLAN); }
+
 /* Flexible memory is scarce inside SWRR: back named/unnamed flexible
  * mappings with direct memory instead, within the title's flex budget
  * (budget.c). */
@@ -96,14 +103,37 @@ int hle_map_flex(void **addr, size_t len, int prot, int flags)
     if (rc)
         return rc;
     u64 fixed = (flags & MAP_FIXED) ? (u64)*addr : 0;
-    void *p = direct_alloc(len, prot ? prot : PROT_READ | PROT_WRITE, fixed);
+    bool zero = zero_new_memory();
+    int want = prot ? prot : PROT_READ | PROT_WRITE;
+    void *p = direct_alloc(len, zero ? PROT_READ | PROT_WRITE : want, fixed);
     if (!p) {
         logf("flex->direct %lx failed", len);
         return 0x8002000c;
     }
+    if (zero) {
+        memset(p, 0, ALIGN_UP(len, 0x4000));
+        if (want != (PROT_READ | PROT_WRITE))
+            K.mprotect(p, ALIGN_UP(len, 0x4000), want);
+    }
     budget_flex_note((s64)ALIGN_UP(len, 0x4000));
     *addr = p;
     return 0;
+}
+
+/* zero a new direct allocation through a temporary read-write mapping */
+static void zero_direct(off_t off, size_t len)
+{
+    void *va = NULL;
+    int rc = vdm_is((u64)off) ? vdm_map(&va, len, PROT_READ | PROT_WRITE, 0, (u64)off, 0x200000)
+                              : K.map_direct(&va, len, PROT_READ | PROT_WRITE, 0, off, 0x4000);
+    if (rc != 0) {
+        static u32 said;
+        if (said++ < 4)
+            logf("AllocateDirectMemory: could not map %lx+%lx to clear it: %x", (u64)off, len, rc);
+        return;
+    }
+    memset(va, 0, len);
+    K.munmap(va, len);
 }
 
 static int hle_map_named_flex(void **addr, size_t len, int prot, int flags, const char *name)
@@ -162,6 +192,8 @@ int hle_alloc_direct(off_t start, off_t end, size_t len, size_t align, int type,
             0, (off_t)real_size, len, align, type, out);
     if (rc != 0 && len >= 0x200000) /* no single hole is big enough: scatter it (vdm.c) */
         rc = vdm_alloc(planfree ? 0 : (u64)start, planfree ? real_size : (u64)end, len, align, type, out);
+    if (rc == 0 && out && zero_new_memory() && !budget_lazy_site(site))
+        zero_direct(*out, len);
     if (rc == 0)
         budget_alloc_note((s64)len);
     if (rc == 0 && out)

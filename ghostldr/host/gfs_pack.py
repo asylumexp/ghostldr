@@ -24,7 +24,9 @@ The title comes from --title, else sce_sys/param.sfo, else the profile whose
 eboot fingerprint matches.  Writes build/ghostfs/<TITLE>/layout.json and
 index.bin, and meta.bin: the name and art the game selector shows
 (gfs_meta.py; the title's own sce_sys files first, then --name, --icon,
---backdrop, then the PlayStation Store's with --fetch-art).
+--backdrop, then the PlayStation Store's with --fetch-art).  It prints
+whether the title's code fits the executable memory ghostldr has inside
+SWRR (tools/exec_fit.py).
 
 Index (little endian): 128-byte header "GFS1", version 2, containers, entries,
 cap u64, total u64, names_off, names_size, prefix[16] @40, header_size @56,
@@ -47,6 +49,7 @@ from pathlib import Path
 import gfs_catalog as gc
 import gfs_meta as gm
 import profiles as titles
+import exec_fit  # noqa: E402 (ghostldr/tools, on the path through profiles)
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT_ROOT = ROOT / "build/ghostfs"
@@ -270,6 +273,10 @@ def main() -> int:
     for c in cs[:6]:
         first = c["pieces"][0][0] if c["pieces"] else "-"
         print(f"  {c['dir']}: {c['size'] >> 20} MiB, {len(c['pieces'])} pieces, starts with {first}")
+    fit, line = exec_fit.check(src, title)
+    print(line)
+    if fit and fit["verdict"] == exec_fit.NO_FIT:
+        print("  ghostldr cannot load this title's code: gfs_install.py will refuse it (--no-fit-check overrides)")
     return 0
 
 

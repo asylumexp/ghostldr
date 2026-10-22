@@ -14,14 +14,17 @@ anything.  For the title being installed:
   - another layout: its containers are replaced (its PSAVE progress is kept)
   - the same layout, interrupted: containers whose gfs.tag matches are kept
 Its catalogue entry and PINDEX are marked incomplete first and completed
-last, so an interrupted install is recognised and never booted.  Ghost
+last, so an interrupted install is recognised and never booted.  Before
+anything is sent, the packed dump's code is checked against the executable
+memory ghostldr has inside SWRR (tools/exec_fit.py): a title that won't fit
+is refused unless --no-fit-check.  Ghost
 installed by ghostldr v0.1 (GHOST000..055 + GFSINDEX) is kept as it is and
 added to the catalogue.  The title's name and art for the game selector go
 into PMETA (gfs_meta.py), written last; --update-meta writes only that, for
 a title that is already installed (nothing else is touched).
 
     python3 ghostldr/host/gfs_pack.py [--src DIR] [--title CUSA12345]
-    python3 ghostldr/host/gfs_install.py [--title CUSA12345] [--dry-run] [--force]
+    python3 ghostldr/host/gfs_install.py [--title CUSA12345] [--dry-run] [--force] [--no-fit-check]
     python3 ghostldr/host/gfs_install.py --list
     python3 ghostldr/host/gfs_install.py --remove CUSA12345 [--remove-saves]
     python3 ghostldr/host/gfs_install.py --update-meta [--title CUSA12345] [--fetch-art]
@@ -45,7 +48,7 @@ from pathlib import Path
 import gfs_catalog as gc
 import gfs_meta as gm
 from console import console_ip
-from gfs_pack import FLAG_INCOMPLETE, OUT_ROOT, default_title, index_header
+from gfs_pack import FLAG_INCOMPLETE, OUT_ROOT, default_title, exec_fit, index_header
 
 ROOT = Path(__file__).resolve().parents[2]
 RECEIVER = ROOT / "ghostldr/lua/gfs_receiver.lua"
@@ -559,6 +562,20 @@ def check_space(rx, st: State, steps: list[tuple], new: Install) -> None:
                          f"free space on the PS5, or remove a title (gfs_install.py --remove TITLE), then rerun.")
 
 
+def fit_check(src: Path, title: str, skip: bool) -> None:
+    """Before anything is sent: can ghostldr run this title's code at all
+    (tools/exec_fit.py, the loader's own rules)?  A title that cannot is not
+    installed unless --no-fit-check."""
+    fit, line = exec_fit.check(src, title)
+    log(line)
+    if fit and fit["verdict"] == exec_fit.NO_FIT:
+        if skip:
+            log("  installing anyway (--no-fit-check)")
+            return
+        raise SystemExit(f"{title}: its code does not fit the executable memory ghostldr has inside SWRR, so it "
+                         "could not boot; nothing was sent (--no-fit-check installs it anyway)")
+
+
 def connect(args) -> Receiver:
     global GFS_PORT
     rx = Receiver(args.host or console_ip(), args.interface)
@@ -583,6 +600,8 @@ def main() -> int:
     ap.add_argument("--src", type=Path, help="with --update-meta: the title's app0, for its own sce_sys files "
                     "(default: the packed one, else they are read from the console)")
     ap.add_argument("--no-space-check", action="store_true", help="skip the free-space check before sending")
+    ap.add_argument("--no-fit-check", action="store_true",
+                    help="install even when the title's code cannot fit SWRR's executable memory")
     ap.add_argument("--host")
     ap.add_argument("--interface", help="this computer's network interface to send through (e.g. en0)")
     ap.add_argument("--port", type=int, help="reattach to a receiver already listening on this port "
@@ -649,6 +668,7 @@ def main() -> int:
     new = parse_header(gc.index_name(layout["prefix"]), index)
     assert new and new.title == args.title, "index.bin does not match layout.json: rerun gfs_pack.py"
     jobs = layout["containers"]
+    fit_check(src, args.title, args.no_fit_check)
 
     rx = connect(args)
     st = survey(rx, new, jobs, args.force)

@@ -84,6 +84,8 @@ void module_publish(struct module *m)
 
 int module_place(struct module *m, u64 base)
 {
+    if (m->bx) /* code in whole JIT objects, the rest in direct memory (bigexec.c) */
+        return bx_place(m);
     m->base = base;
     if (!arena_is_rx(base, m->text_size)) {
         logf("%s: text %lx+%lx not inside the RX arena", m->name, base, m->text_size);
@@ -355,13 +357,27 @@ int module_write_text(struct module *m)
             logf("%s: patched %u TLS sites from the profile's list (%u listed sites did not match)", m->name,
                  (u32)n, other);
         } else {
-            u32 k = patch_tls(buf, m->text_size, &other);
-            logf("%s: patched %u TLS sites (%u other fs: loads left as they are)", m->name, k, other);
+            /* a module with a code map (bigexec.c): only its code, not the data around it */
+            const struct bx_range *r = NULL;
+            u32 nr = bx_code(m, &r), k = nr ? 0 : patch_tls(buf, m->text_size, &other);
+            for (u32 i = 0; i < nr; i++)
+                k += patch_tls(buf + r[i].lo, (u64)(r[i].hi - r[i].lo), &other);
+            logf("%s: patched %u TLS sites (%u other fs: loads left as they are)%s", m->name, k, other,
+                 nr ? " in its code runs" : "");
         }
     }
     if (m->is_main && m->file) {
         /* everything that needed the file (relocation, exports, TLS image,
-         * text) is done: give its ~26 MiB back before the memory plan */
+         * text) is done: give its ~26 MiB back before the memory plan.  The
+         * module and library names stay (budget.c reads them): copied out */
+        m->modname = m->modname ? arena_strdup(m->modname) : NULL;
+        for (u32 i = 0; i < m->n_import_libs; i++)
+            m->import_libs[i].name = arena_strdup(m->import_libs[i].name);
+        for (u32 i = 0; i < m->n_export_libs; i++)
+            m->export_libs[i].name = arena_strdup(m->export_libs[i].name);
+        for (u32 i = 0; i < m->n_needed_mods; i++)
+            m->needed_mods[i].name = arena_strdup(m->needed_mods[i].name);
+        m->n_needed_files = 0;
         page_free(m->file, m->file_size);
         m->file = NULL;
         m->strtab = NULL, m->symtab = NULL, m->dynlib = NULL, m->nsyms = 0;
@@ -375,7 +391,7 @@ int module_write_text(struct module *m)
         }
         hooks_patch_text(m, buf);
     }
-    int rc = arena_write(m->base, buf, m->text_size);
+    int rc = m->bx ? bx_write_text(m, buf) : arena_write(m->base, buf, m->text_size);
     page_free(buf, m->text_size);
     if (rc == 0 && m->relro_shadow) {
         rc = arena_write(m->base + m->relro_lo, m->relro_shadow, m->relro_size);

@@ -57,6 +57,9 @@ static void on_signal(int sig, void *info, void *ucv)
     }
     logf("CRASH sig %d fault addr %lx rip %lx = %s+%lx rsp %lx (info %p uc %p)", sig, fault, rip, mod, off,
          rsp, info, ucv);
+    for (struct module *m = g_modules; m; m = m->next)
+        if (m->bx && rip >= m->base && rip - m->base < m->text_size && !bx_in_view(m, rip))
+            logf("CRASH: rip is in %s's text but in none of its JIT views: code its code map missed", m->name);
     if (readable(rsp)) {
         u64 ret = *(u64 *)rsp;
         mod = describe(ret, &off);

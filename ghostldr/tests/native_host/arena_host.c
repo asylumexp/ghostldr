@@ -17,7 +17,8 @@
  * the first module where v0.1.1 put it).  small: the title's modules
  * fit in 16 MiB (default: Ghost's sizes from the PS4 log).
  * Also: arena_host heap -- ps4_keep_heap's cases; arena_host layout -- the
- * boot context's offsets that ghostldr.lua writes.
+ * boot context's offsets that ghostldr.lua writes; arena_host ps5 drop -- the
+ * buffers bigexec.c can take, and the arena after it took two.
  */
 #include "ghost.h"
 
@@ -237,6 +238,24 @@ int main(int argc, char **argv)
     u64 lo = 0, hi = 0;
     int sel = arena_code_region(&lo, &hi);
     printf("selector region %d +%lx-+%lx\n", sel, sel ? 0 : lo - g_ipu, sel ? 0 : hi - g_ipu);
+    if (argc > 2 && !strcmp(argv[2], "drop")) { /* bigexec.c takes the EE and VU1 buffers */
+        u64 st[8], en[8];
+        u32 n = arena_buffers(st, en, 8);
+        for (u32 i = 0; i < n; i++)
+            printf("buffer +%lx-+%lx\n", st[i] - g_ipu, en[i] - g_ipu);
+        arena_drop(g_ee);
+        arena_drop(g_ee + 0x300c000);
+        n = arena_buffers(st, en, 8);
+        printf("left %u\n", n);
+        g_modules = &g_mods[0];
+        int rc = arena_code_region(&lo, &hi);
+        printf("code region %d +%lx-+%lx\n", rc, rc ? 0 : lo - g_ipu, rc ? 0 : hi - g_ipu);
+        g_mods[3].next = NULL, g_mods[2].next = NULL; /* libc and Fios2 only */
+        g_mods[1].next = NULL;
+        for (struct module *m = g_modules; m; m = m->next)
+            place(m);
+        return 0;
+    }
     g_modules = &g_mods[0];
     int rc = arena_code_region(&lo, &hi);
     printf("code region %d +%lx-+%lx\n", rc, rc ? 0 : lo - g_ipu, rc ? 0 : hi - g_ipu);

@@ -70,6 +70,16 @@ class ArenaTests(unittest.TestCase):
         self.assertNotIn("PS4", out)
         self.assertIn("selector region 0 +4c000", out)
 
+    def test_buffers_taken_by_bigexec_leave_the_arena(self) -> None:
+        """bigexec.c: the whole buffers past the core's; once the EE and VU1
+        buffers hold an executable's code, libc and Fios2 go to the IOP one."""
+        out = self.run_host("ps5", "drop")
+        self.assertEqual(re.findall(r"buffer \+(\w+)-\+(\w+)", out),
+                         [("48000", "2048000"), ("204c000", "284c000"), ("2850000", "3050000"), ("3054000", "4054000")])
+        self.assertIn("left 2", out)
+        self.assertIn("code region 0 +2050000-+284c000", out)
+        self.assertEqual(offsets(out), {"libSceFios2.prx": 0x205c000, "libc.prx": 0x21ec000})  # 902a30000 on 13.60
+
     def test_old_rule_faults_like_the_ps4(self) -> None:
         """v0.1.1's first module on the PS4 layout: the EE buffer's very start,
         which the compiler cannot write (the 12.02 crash at 914b20000)."""
