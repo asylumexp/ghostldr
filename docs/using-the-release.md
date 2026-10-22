@@ -1,6 +1,6 @@
 # Using the prebuilt release
 
-This walks through running Ghost of Tsushima from a ghostldr release on a stock PS5: no jailbreak, no compiler, no build step. It covers download to gameplay. [ghost-on-stock-ps5.md](ghost-on-stock-ps5.md) has the background and more troubleshooting.
+This walks through running Ghost of Tsushima from a ghostldr release on a stock PS5: no jailbreak, no compiler, no build step. It covers download to gameplay. [ghost-on-stock-ps5.md](ghost-on-stock-ps5.md) has the background and more troubleshooting. Other games and OpenOrbis homebrew follow the same steps with their own dump; [compatibility.md](compatibility.md) says what is known to work.
 
 ## What you need
 
@@ -10,11 +10,11 @@ This walks through running Ghost of Tsushima from a ghostldr release on a stock 
 - **A computer on the same network as the PS5** with Python 3.11 or newer.
   - macOS and Linux work; Windows is untested.
   - A wired or fast Wi-Fi connection helps.
-- **The computer's firewall must let Python receive** on UDP port 18194 (the game's log) and TCP port 18195 (the loader fetches its extension from the computer). On macOS, click Allow when asked.
+- **The computer's firewall must let Python receive** on UDP port 18194 (the game's log), TCP port 18195 (the loader fetches its extension from the computer) and TCP port 18196 (the game selector, when more than one title is installed). On macOS, click Allow when asked.
 
 ## 1. Download and unpack
 
-From the release page, download `ghostldr-v0.2.0.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
+From the release page, download `ghostldr-v0.3.0.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
 
 ```bash
 shasum -a 256 --ignore-missing -c SHA256SUMS.txt
@@ -23,11 +23,11 @@ shasum -a 256 --ignore-missing -c SHA256SUMS.txt
 Unpack it and work from inside the folder; every command below runs there:
 
 ```bash
-unzip ghostldr-v0.2.0.zip
+unzip ghostldr-v0.3.0.zip
 ```
 
 ```bash
-cd ghostldr-v0.2.0
+cd ghostldr-v0.3.0
 ```
 
 ## 2. Put the game files in place
