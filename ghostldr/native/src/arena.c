@@ -21,7 +21,7 @@
  */
 #include "ghost.h"
 
-#define COLD __attribute__((minsize, cold))
+#define COLD GHOST_COLD
 
 struct rx_region {
     u64 start, end;

@@ -36,7 +36,7 @@ bool direct_is_ours(u64 addr);
  * thread writes into its buffer, so the heap cannot go while it runs: on a
  * PS4 v0.1.1 boot it faulted at once (docs/ps4.md).  Stop it the way SWRR's
  * own exit path would; true when nothing of it uses the heap any more. */
-__attribute__((minsize, cold)) static bool ps4_stop_system_services(void)
+GHOST_COLD static bool ps4_stop_system_services(void)
 {
     u64 eb = g_ctx->eboot_base, thr = *(volatile u64 *)(eb + SWRR_SYSSVC_THREAD);
     volatile u64 *buf = (volatile u64 *)(eb + SWRR_SYSSVC_BUFFER);

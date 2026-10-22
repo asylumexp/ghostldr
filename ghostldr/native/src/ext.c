@@ -115,7 +115,7 @@ const char *nid_to_name(const char *nid)
     return NULL;
 }
 
-__attribute__((minsize, cold)) void nid_keep(const char *nid)
+GHOST_COLD void nid_keep(const char *nid)
 {
     u64 key;
     const char *name = g_nid_keys ? nid_to_name(nid) : NULL;

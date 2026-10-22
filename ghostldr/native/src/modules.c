@@ -23,7 +23,7 @@
  */
 #include "ghost.h"
 
-#define COLD __attribute__((minsize, cold)) /* boot-time code: small beats fast */
+#define COLD GHOST_COLD /* boot-time code: small beats fast */
 
 #define MAX_CAND 48
 

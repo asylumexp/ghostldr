@@ -34,7 +34,7 @@
 #define E_INVAL 0x80020016
 #define DEFAULT_FLEX (448 * MiB)
 #define VIDEO_MIB 100
-#define COLD __attribute__((minsize, cold)) /* runs once per boot (or rarely): small beats fast */
+#define COLD GHOST_COLD /* runs once per boot (or rarely): small beats fast */
 
 u64 g_reported_dmem;
 static u64 g_flex_cap;                    /* 0: no cap (planned titles without flex_mib) */

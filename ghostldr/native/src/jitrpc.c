@@ -52,7 +52,7 @@ static u64 now_us(void)
 }
 
 /* PS4: true when the compiler has had long enough; logs while it waits */
-__attribute__((minsize, cold)) static bool ps4_given_up(u64 fn, u64 rax, u64 *t0, u32 *said)
+GHOST_COLD static bool ps4_given_up(u64 fn, u64 rax, u64 *t0, u32 *said)
 {
     u64 t = now_us();
     if (!t)
@@ -200,7 +200,7 @@ int jit_copy_to(u64 dst, const void *src, size_t len)
  * (Luac0re never uses the pair there itself).  The compiler's system call
  * has returned by now, so what it sent is queued already: up to `tries` ms
  * of waiting covers nothing else.  Bytes received, or -1 (errno set). */
-__attribute__((minsize, cold)) static ssize_t sock_recv(void *msg, u32 tries)
+GHOST_COLD static ssize_t sock_recv(void *msg, u32 tries)
 {
     for (u32 i = 0;; i++) {
         ssize_t r = K.recvmsg((int)g_ctx->new_main_sock, msg, MSG_DONTWAIT);
@@ -210,7 +210,7 @@ __attribute__((minsize, cold)) static ssize_t sock_recv(void *msg, u32 tries)
     }
 }
 
-__attribute__((minsize, cold)) static ssize_t sock_read(void *buf, u32 n, u32 tries)
+GHOST_COLD static ssize_t sock_read(void *buf, u32 n, u32 tries)
 {
     u64 iov[2] = {(u64)buf, n};
     u8 msg[0x30];
@@ -336,7 +336,7 @@ int jit_block_write(struct jit_block *b, u64 offset, const void *src, size_t len
  * jit_peek: the compiler write()s n bytes at addr into its end of the
  * socket pair Luac0re connected; they are read here, without blocking
  * (a blocking read waited forever when they did not come).  0, or -1. */
-__attribute__((minsize, cold)) int jit_peek(u64 addr, void *out, u32 n)
+GHOST_COLD int jit_peek(u64 addr, void *out, u32 n)
 {
     struct boot_ctx *c = g_ctx;
     if (!c->jit_syscall)
@@ -368,7 +368,7 @@ __attribute__((minsize, cold)) int jit_peek(u64 addr, void *out, u32 n)
 
 /* jit_stamp: the compiler's clock_gettime() writes 16 bytes (the time) at
  * addr.  0 when it could write there, else -1. */
-__attribute__((minsize, cold)) int jit_stamp(u64 addr)
+GHOST_COLD int jit_stamp(u64 addr)
 {
     if (!g_ctx->jit_syscall)
         return -1;
@@ -383,7 +383,7 @@ __attribute__((minsize, cold)) int jit_stamp(u64 addr)
  * shared scratch) or known to be absent (the first page).  Each step is
  * logged before it runs, so the last line of a log that stops names it.
  * 0 when all four work. */
-__attribute__((minsize, cold)) int jit_ps4_check(void)
+GHOST_COLD int jit_ps4_check(void)
 {
     struct boot_ctx *c = g_ctx;
     u64 a = priv(0x300), b = priv(0x340);
@@ -419,7 +419,7 @@ __attribute__((minsize, cold)) int jit_ps4_check(void)
 
 /* Undo jit_block_create, also a partial one: the RX view and descriptor
  * here, the RW view and the three descriptors in the compiler. */
-__attribute__((minsize, cold)) void jit_block_destroy(struct jit_block *b)
+GHOST_COLD void jit_block_destroy(struct jit_block *b)
 {
     if (b->rx)
         K.munmap((void *)b->rx, b->size);
@@ -442,7 +442,7 @@ __attribute__((minsize, cold)) void jit_block_destroy(struct jit_block *b)
 /* The compiler process's own map: sceKernelVirtualQuery run there (ctx
  * reserved[0]), find-next from lo, each answer copied out of the shared
  * scratch.  Only reads. */
-__attribute__((minsize, cold)) u32 jit_vmap(u64 lo, u64 hi, struct vmq *out, u32 max)
+GHOST_COLD u32 jit_vmap(u64 lo, u64 hi, struct vmq *out, u32 max)
 {
     struct vmq *q = (struct vmq *)priv(0x1000);
     u32 n = 0;

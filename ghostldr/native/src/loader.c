@@ -5,7 +5,7 @@
  * everything else is flexible memory mapped RW at its fixed offset. */
 #include "ghost.h"
 
-#define COLD __attribute__((minsize, cold)) /* boot-time code: small beats fast */
+#define COLD GHOST_COLD /* boot-time code: small beats fast */
 
 #define R_X86_64_64 1
 #define R_X86_64_GLOB_DAT 6
