@@ -66,7 +66,8 @@ MAGIC = b"GLPF"
 VERSION = 1
 HEADER = struct.Struct("<4sHHII16s20sI5iIiII4x")  # struct prof_hdr, 96 bytes
 REC = struct.Struct("<HHI")                        # struct prof_rec
-REC_PLAN, REC_TABLE, REC_RULE, REC_TLS = 1, 2, 3, 4
+REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME = 1, 2, 3, 4, 5
+NAME_MAX = 127                 # bytes of UTF-8 in REC_NAME (the selector's name field is 128)
 TLS_PER_REC = 15000            # offsets per REC_TLS record (its size is a u16)
 MAX_BLOB = 0x10000
 MAX_RULES = 32
@@ -418,6 +419,12 @@ def _cstr(s: str) -> bytes:
     return s.encode() + b"\0"
 
 
+def utf8_cut(text: str, limit: int) -> str:
+    """text, cut to at most `limit` bytes of UTF-8 without splitting a character."""
+    raw = text.encode()
+    return raw[:limit].decode("utf-8", "ignore") if len(raw) > limit else text
+
+
 def tls_site_list(name: str) -> list[int]:
     """A tls_sites file (tools/tls_sites.py --out): hex text offsets, # comments."""
     out = []
@@ -469,6 +476,8 @@ def compile_blob(prof: dict, src: Path | None = None, flags: int = 0, extra_feat
         for i in range(0, max(len(offs), 1), TLS_PER_REC):
             chunk = offs[i:i + TLS_PER_REC]
             recs += _rec(REC_TLS, struct.pack("<32sI", mod.encode(), len(chunk)) + struct.pack(f"<{len(chunk)}I", *chunk))
+    if prof.get("name"):           # the game selector shows it when the title has no param.sfo
+        recs += _rec(REC_NAME, _cstr(utf8_cut(prof["name"], NAME_MAX)))
     video = mem.get("video_reserve_mib")
     params = params if params is not None else app_params(prof, src)
     header = HEADER.pack(MAGIC, VERSION, HEADER.size, HEADER.size + len(recs), flags, prof["title"].encode(), fp,

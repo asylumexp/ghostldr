@@ -1,7 +1,8 @@
 """Installing ghostfs titles side by side: gfs_pack.py + gfs_install.py against
 a fake console that follows gfs_receiver.lua's rules (containers as dicts;
 PUT/DELETE/WRITE refuse *SAVE and SWRR's own save, DELSAVE only takes *SAVE;
-storage is finite).
+storage is finite).  The game selector's <prefix>META: written last, only
+when it changed, removed with its title; --update-meta writes nothing else.
 
     python3 -m unittest discover -s ghostldr/tests
 """
@@ -16,10 +17,14 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "host"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import argparse  # noqa: E402
 import gfs_catalog as gc  # noqa: E402
 import gfs_install as gi  # noqa: E402
+import gfs_meta as gm  # noqa: E402
 import gfs_pack as gp  # noqa: E402
 import profiles  # noqa: E402
+from test_profiles import make_sfo  # noqa: E402
 
 NOT_FOUND = gi.NOT_FOUND
 NO_SPACE = 0x809F000A
@@ -146,10 +151,12 @@ def catalogue(console: FakeConsole) -> gc.Catalogue:
     return gc.parse(console.saves[gc.CATALOG][gc.CATALOG_FILE])
 
 
-def make_legacy(console: FakeConsole, info: dict, index: bytes, name: str = "GFSINDEX") -> None:
-    """What ghostldr v0.1 left: the data containers and the single GFSINDEX."""
+def make_legacy(console: FakeConsole, info: dict, index: bytes, name: str = "GFSINDEX", src: Path | None = None) -> None:
+    """What ghostldr v0.1 left: the data containers (zeros, or the files of
+    src) and the single GFSINDEX."""
     for k, c in enumerate(info["containers"]):
-        console.saves[c["dir"]] = {"data.bin": b"".join(b"\0" * p[2] for p in c["pieces"]),
+        data = b"".join(gi.container_bytes(src, c["pieces"])) if src else b"".join(b"\0" * p[2] for p in c["pieces"])
+        console.saves[c["dir"]] = {"data.bin": data,
                                    gi.TAG: gi.tag_bytes(int(info["layout_id"], 16), k, c["size"])}
         console.blocks[c["dir"]] = c["blocks"]
     console.saves[name] = {gc.INDEX_FILE: index}
@@ -300,6 +307,26 @@ class InstallTests(unittest.TestCase):
         remove(self.console, "CUSA11111")
         self.assertEqual(sorted(self.console.saves), [gc.CATALOG])
 
+    def test_name_and_art_are_written_last_and_only_when_changed(self) -> None:
+        icon = gm.png_encode(gm.Image(8, 8, bytes((200, 30, 30, 255)) * 64))
+        info, index, src = self.title("CUSA11111", {"eboot.bin": b"a" * 100, "sce_sys/icon0.png": icon})
+        out = self.root / "CUSA11111/out"
+        gm.write_pack_meta(info, out, profiles.load("CUSA11111"), log=lambda s: None)
+        steps = install(self.console, info, index, src)
+        self.assertEqual(steps[-2:], [("catalog", steps[-2][1]), ("meta",)])     # after the title is complete
+        meta = self.console.saves["G11111META"][gm.META_FILE]
+        self.assertEqual(meta, (out / gm.META_FILE).read_bytes())
+        self.assertEqual(gm.parse(meta)["sections"][gm.SECT_ICON]["source"], gm.ART_TITLE)
+        self.assertEqual(install(self.console, info, index, src), [])           # the same: nothing to send
+        backdrop = self.root / "bd.png"
+        backdrop.write_bytes(gm.png_encode(gm.Image(16, 9, bytes((0, 0, 90, 255)) * 144)))
+        gm.write_pack_meta(info, out, profiles.load("CUSA11111"), backdrop=backdrop, log=lambda s: None)
+        self.console.ops.clear()
+        self.assertEqual(install(self.console, info, index, src), [("meta",)])
+        self.assertEqual(self.console.changes(), [("put", "G11111META")])
+        remove(self.console, "CUSA11111")
+        self.assertNotIn("G11111META", self.console.saves)
+
     def test_receiver_refuses_to_touch_progress(self) -> None:
         self.console.saves["GHOSTSAVE"] = {"x": b"1"}
         self.assertNotEqual(self.console.delete("GHOSTSAVE"), 0)
@@ -374,6 +401,66 @@ class LegacyGhostTests(unittest.TestCase):
     def test_remove_legacy_ghost(self) -> None:
         remove(self.console, "CUSA11456")
         self.assertEqual(sorted(self.console.saves), [gc.CATALOG, "GHOSTSAVE"])
+
+    def update_meta(self, **kw) -> int:
+        args = argparse.Namespace(title="CUSA11456", src=None, name=None, icon=None, backdrop=None, fetch_art=False,
+                                  art_dir=None, refetch=False, force=False, dry_run=False)
+        for k, v in kw.items():
+            setattr(args, k, v)
+        with mock.patch.object(gm, "OUT_ROOT", self.root / "packs"):
+            return gm.update_meta(self.console, args, lambda msg: None)
+
+    def test_update_meta_writes_only_ghostmeta(self) -> None:
+        icon, back = self.root / "icon.png", self.root / "back.png"
+        icon.write_bytes(gm.png_encode(gm.Image(64, 64, bytes((250, 250, 240, 255)) * 4096)))
+        back.write_bytes(gm.png_encode(gm.Image(64, 36, bytes((20, 20, 20, 255)) * 2304)))
+        self.console.ops.clear()
+        self.assertEqual(self.update_meta(icon=icon, backdrop=back, name="My Ghost", dry_run=True), 0)
+        self.assertEqual(self.console.changes(), [])
+        self.assertEqual(self.update_meta(icon=icon, backdrop=back, name="My Ghost"), 0)
+        self.assertEqual(self.console.changes(), [("put", "GHOSTMETA")])
+        for d, files in self.legacy_bytes.items():
+            self.assertEqual(self.console.saves[d], files)        # GHOST000.., GFSINDEX, GHOSTSAVE: untouched
+        self.assertNotIn(gc.CATALOG, self.console.saves)          # not even the catalogue is written
+        info = gm.parse(self.console.saves["GHOSTMETA"][gm.META_FILE])
+        # its profile names it (over --name); the dump has no sce_sys: the given art
+        self.assertEqual((info["title"], info["name"], info["name_source"]), ("CUSA11456", "Ghost of Tsushima",
+                                                                            gm.NAME_PROFILE))
+        self.assertEqual([x["source"] for x in info["sections"]], [0, gm.ART_GIVEN, gm.ART_GIVEN])
+        self.assertEqual(info["version"], "02.18")                 # the profile's: Ghost's dump has no param.sfo
+        self.assertTrue(info["flags"] & gm.FLAG_SCANNED)
+        self.console.ops.clear()
+        self.assertEqual(self.update_meta(icon=icon, backdrop=back), 0)
+        self.assertEqual(self.console.changes(), [])               # up to date
+        self.assertEqual(self.update_meta(), 0)                    # nothing to store: GHOSTMETA is kept
+        self.assertEqual(self.console.changes(), [])
+        self.assertIn("GHOSTMETA", self.console.saves)
+        with self.assertRaises(SystemExit):
+            self.update_meta(title="CUSA99999")
+
+    def test_update_meta_reads_the_titles_own_art_from_the_console(self) -> None:
+        icon0 = gm.png_encode(gm.Image(8, 8, bytes((1, 2, 3, 255)) * 64))
+        sfo = make_sfo({"TITLE": "Ghost of Tsushima (sfo)", "TITLE_ID": "CUSA11456"})
+        files = {"eboot.bin": b"g" * 130, "sce_sys/icon0.png": icon0, "sce_sys/param.sfo": sfo}
+        root = self.root / "own"
+        info, index, src = make_title(root, "CUSA11456", files)
+        console = FakeConsole()
+        make_legacy(console, info, index, src=src)
+        self.console = console
+        self.assertEqual(self.update_meta(), 0)                    # no dump here: read through GFSINDEX
+        meta = console.saves["GHOSTMETA"][gm.META_FILE]
+        head = gm.parse(meta)
+        self.assertEqual((head["name"], head["name_source"]), ("Ghost of Tsushima (sfo)", gm.NAME_SFO))
+        sfo_s = head["sections"][gm.SECT_SFO]
+        self.assertEqual(meta[sfo_s["offset"]:sfo_s["offset"] + sfo_s["size"]], sfo)
+        self.assertEqual(head["sections"][gm.SECT_ICON]["source"], gm.ART_TITLE)
+
+    def test_meta_never_names_another_container(self) -> None:
+        cat, _, _ = gi.read_catalogue(self.console)
+        self.assertEqual(gm.meta_target(cat, "CUSA11456", "GHOST"), "GHOSTMETA")
+        for title, prefix in (("CUSA22222", "GHOST"), ("CUSA11456", "ghost"), ("CUSA11456", "GHOST-1")):
+            with self.assertRaises(SystemExit):
+                gm.meta_target(cat, title, prefix)
 
 
 @mock.patch.object(gp, "CAP", 64)

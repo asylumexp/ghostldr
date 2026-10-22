@@ -375,7 +375,7 @@ static void blit_glyph(surface *dst, const struct glyph *g, int x, int y, u32 ar
     u32 ca = argb >> 24;
     for (int j = 0; j < g->h; j++) {
         int yy = y + j;
-        if (yy < 0 || yy >= dst->h)
+        if (yy < surf_y0(dst) || yy >= surf_y1(dst))
             continue;
         const u8 *a = g->alpha + (u64)j * (u64)g->w;
         u32 *d = dst->px + (u64)yy * (u64)dst->stride;

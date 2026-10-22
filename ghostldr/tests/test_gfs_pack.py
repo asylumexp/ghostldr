@@ -1,6 +1,8 @@
 """Packing a title: the generic order without an open-order file, a captured
 order, homebrew dumps (no param.sfo, an odd one, no sce_module/), and
-capture_order.py reading a boot log.
+capture_order.py reading a boot log.  The game selector's name and art
+(gfs_meta.py): QOI and PNG, which source wins, the store lookup (faked: no
+network), meta.bin.
 
     python3 -m unittest discover -s ghostldr/tests
 """
@@ -18,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[0] / "host"))
 sys.path.insert(0, str(HERE))
 import capture_order as co  # noqa: E402
+import gfs_meta as gm  # noqa: E402
 import gfs_pack as gp  # noqa: E402
 import profiles  # noqa: E402
 from test_profiles import make_sfo  # noqa: E402
@@ -163,6 +166,149 @@ class CaptureOrderTests(unittest.TestCase):
         mine = [b for b in boots if b["title"] == "CUSA22222"]
         self.assertEqual(co.merge(mine), ["data/first.bin", "data/second.bin", "data/third.bin"])
         self.assertEqual(co.merge([boots[1]]), ["other.bin"])      # failed opens are not files
+
+
+def picture(w: int, h: int, seed: int = 1, alpha: bool = False) -> gm.Image:
+    """Gradients, flat runs and noise: every QOI op gets used."""
+    px = bytearray()
+    for y in range(h):
+        for x in range(w):
+            if x < w // 4:
+                px += bytes((10, 20, 30, 255))
+            elif x < w // 2:
+                px += bytes(((x + seed) & 255, (y * 2) & 255, (x + y) & 255, 255))
+            else:
+                v = (x * 7919 + y * 104729 + seed * 31) & 0xFFFFFFFF
+                px += bytes((v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) | 128 if alpha else 255))
+    return gm.Image(w, h, bytes(px))
+
+
+def png(img: gm.Image) -> bytes:
+    with mock.patch.object(gm, "PIL", None):
+        return gm.png_encode(img)
+
+
+class MetaTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_qoi_round_trip(self) -> None:
+        for alpha in (False, True):
+            img = picture(97, 41, alpha=alpha)
+            data = gm.qoi_encode(img)
+            self.assertEqual(data[:4], b"qoif")
+            self.assertEqual(data[-8:], b"\0" * 7 + b"\1")
+            self.assertEqual(gm.qoi_decode(data).rgba, img.rgba)
+        flat = gm.Image(300, 200, bytes((1, 2, 3, 255)) * 60000)
+        self.assertLess(len(gm.qoi_encode(flat)), 1100)        # runs of 62
+
+    def test_png_without_pillow(self) -> None:
+        img = picture(33, 17, alpha=True)
+        data = png(img)
+        with mock.patch.object(gm, "PIL", None):
+            self.assertEqual(gm.decode_image(data).rgba, img.rgba)
+            small = gm.cover(gm.Image(64, 32, bytes((200, 100, 50, 255)) * 2048), 16, 16)
+        self.assertEqual((small.w, small.h, small.rgba[:4]), (16, 16, bytes((200, 100, 50, 255))))
+        if gm.PIL:
+            self.assertEqual(gm.decode_image(data).rgba, img.rgba)
+        with self.assertRaises(gm.ArtError), mock.patch.object(gm, "PIL", None), \
+                mock.patch.object(gm.shutil, "which", lambda name: None):
+            gm.decode_image(b"\xff\xd8\xff\xe0 a JPEG")
+
+    def test_sources_best_first(self) -> None:
+        sfo = make_sfo({"TITLE": "Own Name", "TITLE_ID": "CUSA12345"})
+        given = self.root / "given.png"
+        given.write_bytes(png(picture(40, 40, 2)))
+        own = {"param.sfo": sfo, "icon0.png": png(picture(64, 64, 3)), "pic0.png": png(picture(64, 36, 4))}
+        m = gm.choose("CUSA12345", own, True, "Profile Name", "Given", icon=given, log=lambda s: None)
+        self.assertEqual((m.name, m.name_source, m.sfo), ("Own Name", gm.NAME_SFO, sfo))
+        self.assertEqual(m.version, "")                      # no APP_VER, no profile version
+        self.assertEqual((m.icon_source, m.backdrop_source), (gm.ART_TITLE, gm.ART_TITLE))   # pic0 when no pic1
+        self.assertTrue(any("--icon is not used" in n for n in m.notes))
+        self.assertTrue(any("--name is not used" in n for n in m.notes))
+        m = gm.choose("CUSA12345", {}, True, "Profile Name", "Given", backdrop=given, log=lambda s: None)
+        self.assertEqual((m.name, m.name_source, m.icon, m.backdrop_source), ("Profile Name", gm.NAME_PROFILE, None,
+                                                                              gm.ART_GIVEN))
+        m = gm.choose("CUSA12345", {}, False, "", "Given", log=lambda s: None)
+        self.assertEqual((m.name, m.name_source, m.scanned), ("Given", gm.NAME_GIVEN, False))
+        with self.assertRaises(gm.ArtError):
+            gm.choose("CUSA12345", {}, True, icon=self.root / "missing.png", log=lambda s: None)
+
+    def fake_store(self, calls: list):
+        icon, back = png(picture(80, 80, 5)), png(picture(160, 90, 6))
+        container = {"name": "Product Edition", "title_name": "Store Name",
+                     "images": [{"type": 10, "url": "https://img/icon.png"}, {"type": 12, "url": "https://img/bg.png"}]}
+
+        def get(url: str):
+            calls.append(url)
+            if "titlecontainer/US/en/999/CUSA12345_00" in url:
+                return __import__("json").dumps(container).encode()
+            return {"https://img/icon.png": icon, "https://img/bg.png": back}.get(url)
+        return get
+
+    def test_fetch_art_asks_the_store_once(self) -> None:
+        calls: list = []
+        art = self.root / "art"
+        m = gm.choose("CUSA12345", {}, True, "", None, fetch=True, art_dir=art, get=self.fake_store(calls),
+                      log=lambda s: None)
+        self.assertEqual((m.name, m.name_source), ("Store Name", gm.NAME_STORE))
+        self.assertEqual((m.icon_source, m.backdrop_source, m.icon.w, m.backdrop.w), (gm.ART_STORE, gm.ART_STORE,
+                                                                                      80, 160))
+        self.assertEqual(len(calls), 3)                    # the title container, then both pictures
+        self.assertTrue(all("hmac" not in c.lower() and "tmdb" not in c for c in calls))
+        self.assertEqual(sorted(p.name for p in art.iterdir()), ["backdrop.png", "icon.png", "store.json"])
+        m2 = gm.choose("CUSA12345", {}, True, "Profile", None, fetch=True, art_dir=art, get=self.fake_store(calls),
+                       log=lambda s: None)
+        self.assertEqual(len(calls), 3)                    # reused from the art directory
+        self.assertEqual((m2.name, m2.icon.rgba), ("Profile", m.icon.rgba))
+        own = {"icon0.png": png(picture(8, 8)), "pic1.png": png(picture(16, 9)), "param.sfo": make_sfo({"TITLE": "X"})}
+        m3 = gm.choose("CUSA12345", own, True, fetch=True, art_dir=self.root / "unused", get=self.fake_store(calls),
+                       log=lambda s: None)
+        self.assertEqual(len(calls), 3)                    # nothing missing: the store is not asked
+        self.assertFalse((self.root / "unused").exists())
+        self.assertEqual(m3.icon_source, gm.ART_TITLE)
+
+    def test_meta_bin(self) -> None:
+        sfo = make_sfo({"TITLE": "Own", "TITLE_01": "Own (EN)"})
+        m = gm.Meta("CUSA12345", "Own", gm.NAME_SFO, sfo, "01.07", picture(100, 100), gm.ART_TITLE,
+                    picture(640, 480), gm.ART_STORE)
+        data = gm.build(m, now=1234)
+        info = gm.parse(data)
+        self.assertEqual(info["version"], "01.07")
+        self.assertEqual(data[:4], b"GFSM")
+        self.assertEqual((info["title"], info["name"], info["name_source"], info["flags"], info["written"],
+                          info["size"]), ("CUSA12345", "Own", gm.NAME_SFO, gm.FLAG_SCANNED, 1234, len(data)))
+        sfo_s, icon_s, bd_s = info["sections"]
+        self.assertEqual(data[sfo_s["offset"]:sfo_s["offset"] + sfo_s["size"]], sfo)
+        self.assertEqual((icon_s["w"], icon_s["h"], icon_s["format"], icon_s["source"]),
+                         (gm.ICON, gm.ICON, gm.FMT_QOI, gm.ART_TITLE))
+        self.assertEqual((bd_s["w"], bd_s["h"], bd_s["source"]), (*gm.BACKDROP, gm.ART_STORE))
+        bd = gm.qoi_decode(data[bd_s["offset"]:bd_s["offset"] + bd_s["size"]])
+        self.assertEqual((bd.w, bd.h), gm.BACKDROP)
+        self.assertTrue(all(o % 16 == 0 for o in (sfo_s["offset"], icon_s["offset"], bd_s["offset"])))
+        m.name = "Other"
+        self.assertNotEqual(gm.parse(gm.build(m))["id"], info["id"])     # the id covers the name
+        self.assertIsNone(gm.parse(b"GFSX" + data[4:]))
+        self.assertGreaterEqual(gm.container_blocks(len(data)) * 32768, 2 * len(data))
+
+    def test_pack_writes_meta_only_when_there_is_something_to_show(self) -> None:
+        src = tree(self.root / "app0", {"eboot.bin": b"e" * 50, "sce_sys/icon0.png": png(picture(32, 32)),
+                                        "sce_sys/param.sfo": make_sfo({"TITLE": "Packed", "TITLE_ID": "CUSA12345"})})
+        out = self.root / "out"
+        info = gp.pack(src, "CUSA12345", "G12345", out)
+        meta = gm.write_pack_meta(info, out, profiles.load("CUSA12345"), log=lambda s: None)
+        head = gm.parse((out / "meta.bin").read_bytes())
+        self.assertEqual((meta["id"], head["name"], info["name"]), (head["id"], "Packed", "Packed"))
+        self.assertEqual(json.loads((out / "layout.json").read_text())["meta"]["file"], str(out / "meta.bin"))
+        bare = tree(self.root / "bare", {"eboot.bin": b"e" * 50})
+        info = gp.pack(bare, "CUSA12345", "G12345", out)
+        self.assertIsNone(gm.write_pack_meta(info, out, profiles.load("CUSA12345"), log=lambda s: None))
+        self.assertFalse((out / "meta.bin").exists())
+        self.assertNotIn("meta", json.loads((out / "layout.json").read_text()))
 
 
 if __name__ == "__main__":

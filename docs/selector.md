@@ -1,6 +1,8 @@
 # The game selector
 
-When more than one title is installed, ghostldr shows a game picker before it loads anything: a row of game tiles over the selected game's background, laid out after the PS4 home screen. You pick a game with the controller and it boots. Everything the picker used is freed before the game loads.
+When more than one title is installed, ghostldr shows a game picker before it loads anything, laid out after the PS4 home screen: the selected game's backdrop fills the screen, with a row of game tiles over it, the focused one larger and lit, its name and details under it, and the user and the clock at the top. You pick a game with the controller and it boots. Everything the picker used is freed before the game loads.
+
+Each game shows its real name and art: from the game's own files when it has them, otherwise from what was stored with the install (`<prefix>META`, below), which `gfs_install.py --update-meta --fetch-art` can add to an existing install without reinstalling it.
 
 ## Controls
 
@@ -33,12 +35,63 @@ The selector uses its built-in font by default; `--select-font auto` tries the c
 ## What it shows
 
 - **The list:** `GFSCATALOG/catalog.bin` (docs/ghostfs-catalogue.md). An install made with ghostldr v0.1 has no catalogue; its one title is the one in `GFSINDEX` (or `GHOSTIDX`). Outside ghostfs (`--app-root /data/...` on a dev console) the one title is the app root.
-- **Art:** each title's `sce_sys/icon0.png` (the tile) and `sce_sys/pic1.png` (the background), found through the title's own index (`<prefix>INDEX`, or the legacy index) and read from its data containers. The containers are mounted read-only for each read and unmounted at once, one at a time.
-- **Names and versions:** from the catalogue. When the catalogue has none, from the title's `sce_sys/param.sfo` (`TITLE_xx` in the system language, else `TITLE`, and `APP_VER`). Dumps without `param.sfo` show their title ID.
-- **Missing art:** a tile in a colour derived from the title ID, with the title's initials; a missing background shows a generated blue backdrop.
-- **A clock**, in the system's 12/24-hour setting.
+- **The row:** square tiles, the focused one 384 px with a soft glow and a white frame, the others 256 px and a little darker. Moving along the row slides the tiles on a critically damped spring (about 0.3 s, no overshoot).
+- **Under the focused tile:** its name, then title ID, version and size, then a **Start** button (greyed out for an incomplete install, with "Install incomplete" in orange).
+- **The backdrop:** the focused game's, full screen, dimmed and shaded darker towards the top, the left (where the text is) and the bottom. It is decoded once the row stops moving and crossfades from the previous one.
+- **The top bar:** the signed-in user's name (`sceUserServiceGetUserName`) beside a disc with their initial, and the clock in the system's 12/24-hour setting.
+- **Options:** an information panel slides in from the right: the icon, the name, title ID, version, size, install state, where the art came from and the save containers.
 
-Icons are loaded one per frame, nearest to the selection first; a background is decoded once the row stops moving.
+Icons are loaded one per frame, nearest to the selection first.
+
+### Names
+
+The first of these that the title has:
+
+1. **Its own `sce_sys/param.sfo`:** `TITLE_xx` in the system language, else `TITLE`. From the copy in `<prefix>META`, else read through the title's index.
+2. **Its profile's `name`** (`ghostldr/data/titles/<TITLE>.json`). run.py sends the profiles at boot (`GHOSTLDR_PROFILE_HEX`; `--select` sends every profile it knows); `profiles.py` compiles the name into a `REC_NAME` record that the selector reads in place, and the core ignores. Ghost of Tsushima's profile says "Ghost of Tsushima", so the v0.1 install, whose dump has no `sce_sys`, shows its name without anything installed.
+3. **A name stored at install time:** `--name` given to `gfs_pack.py` or `gfs_install.py`, else the PlayStation Store's (`--fetch-art`), in `<prefix>META`; then the catalogue's.
+4. **The title ID.**
+
+Names in scripts the built-in font lacks show the title ID (see Text). Versions come from `param.sfo`'s `APP_VER`, the catalogue, or `<prefix>META` (the profile's `version` for dumps without `param.sfo`).
+
+### Art
+
+The tile and the backdrop each come from the first of:
+
+1. **The title's own** `sce_sys/icon0.png` (tile) and `sce_sys/pic1.png`, else `pic0.png` (backdrop).
+2. **Pictures given at pack or install time:** `--icon FILE` and `--backdrop FILE` on `gfs_pack.py` or `gfs_install.py` (PNG; JPEG and others with Pillow, or on macOS).
+3. **The PlayStation Store's** (`--fetch-art`): the game's official square key art and background, found by title ID in the store's public web data (the store's title container, then its catalog concept; no key, no sign-in, one request a second). The downloads stay in `build/ghostfs/<TITLE>/art` (or `--art-dir`) and on your console: the art belongs to its owners, so it is never part of ghostldr.
+4. **Generated by the selector:** a tile in a colour derived from the title ID, with a soft gradient and the game's name written on it (and its ID under it), and a backdrop in the same colour with soft light bands.
+
+The installer converts whatever it picks into `<prefix>META` at the sizes the selector draws. Without `<prefix>META` (installs made before it existed) the selector reads the title's own `icon0.png` and `pic1.png` through its index and decodes them with the console's `libScePngDec`, as before.
+
+### Where names and art are stored: `<prefix>META`
+
+A small save container next to the title's data, holding `meta.bin` (`ghostldr/host/gfs_meta.py` has the byte layout):
+
+- a 256-byte header: title ID, the name and where it came from, the version, a content ID, and a flag saying the title's own `sce_sys` was looked at (so the selector needn't search its index);
+- a copy of the title's `param.sfo`, when it has one (the selector picks the name in the system language from it);
+- the tile, 384x384, and the backdrop, 1920x1080, as [QOI](https://qoiformat.org) images: lossless, decoded by the selector's own 60 lines of C in milliseconds, with no system library. Ghost's store art makes a 3 MB `meta.bin`.
+
+The selector reads the header, the `param.sfo` copy and the tile with one read-only mount of `<prefix>META` (its first MiB), and the backdrop with one more when the row stops on the title.
+
+`gfs_install.py` writes `<prefix>META` last, after the title is complete, and only when it changed; `--remove` deletes it with the title. It is a whole-container write (PUT) of a name ending in `META`, which can't be a data container, an index, the catalogue, a title's progress or SWRR's own save; the installer checks that before writing.
+
+### Adding names and art to an existing install: `--update-meta`
+
+```bash
+python3 ghostldr/host/gfs_install.py --update-meta --title CUSA11456 --fetch-art
+python3 ghostldr/host/gfs_install.py --update-meta --title CUSA11456 --icon tile.png --backdrop back.jpg
+```
+
+With SWRR at Luac0re's loader, this works out the title's name and art and writes **only** `<prefix>META` (`GHOSTMETA` for Ghost). The title's data containers, its index (`GFSINDEX` for a v0.1 install), its progress and the catalogue are only read, never written; the 53 GiB are not sent again.
+
+- The title's own `sce_sys` files come from its dump when this computer has it (`--src`, or the packed one), else they are read back from the console through the title's index.
+- `--name NAME`, `--icon FILE`, `--backdrop FILE`, `--fetch-art` as above; `--art-dir DIR` keeps the downloads elsewhere; `--refetch` asks the store again; `--dry-run` shows what would be written.
+- Nothing worth storing (no art and no name beyond the profile's): nothing is written.
+- An unchanged result: nothing is written.
+
+`gfs_pack.py` takes the same `--name`, `--icon`, `--backdrop` and `--fetch-art` and stores the result with the pack (`build/ghostfs/<TITLE>/meta.bin`), which `gfs_install.py` installs with the title. `python3 ghostldr/host/gfs_meta.py fetch TITLE --out DIR` only downloads the store's art; `gfs_meta.py show FILE --extract DIR` unpacks a `meta.bin`.
 
 ## Text
 
@@ -57,13 +110,20 @@ The selector is a second runtime module, next to the extension (`ghostldr/native
 4. `sel_main(&g_ghost_api, title)` runs on the boot thread, with the same core services the extension gets.
 5. When it returns, the core overwrites the image with zeros and continues the boot.
 
-The core side is about 1 KiB of text: `src/sel.c`, the deferral in `gfs_init` and `gfs_pick` (`ghostfs.c`), a few lines in `boot.c`, and a guard in `arena_init`. The module itself is about 122 KiB: 55 KiB of code and data, and 67 KiB of font.
+The core side is about 1 KiB of text: `src/sel.c`, the deferral in `gfs_init` and `gfs_pick` (`ghostfs.c`), a few lines in `boot.c`, and a guard in `arena_init`. The module itself is about 134 KiB: 67 KiB of code and data, and 67 KiB of font.
 
 ### Screen and controller
 
-- **VideoOut:** it opens the main output through the core's own `sceVideoOutOpen` override (`hle_sys.c`). That override takes the output over from SWRR if `run.py --keep-host-memory` left SWRR's open. It registers two linear 1920x1080 A8R8G8B8 scan-out buffers and flips at most at 30 Hz. A frame is drawn only when something moves; idle, it just polls the pad 30 times a second. It closes the output before it returns, so the title opens its own as before.
+- **VideoOut:** it opens the main output through the core's own `sceVideoOutOpen` override (`hle_sys.c`). That override takes the output over from SWRR if `run.py --keep-host-memory` left SWRR's open. It registers two linear 1920x1080 A8R8G8B8 scan-out buffers and flips at most at 30 Hz. It closes the output before it returns, so the title opens its own as before.
+- **Drawing only what changes:** a frame is drawn only when something moves; idle, the selector just polls the pad 30 times a second. Then only the rows that changed are redrawn: the top bar for a clock tick, the band of the row and the text under it while the row moves, everything for a backdrop crossfade, the panel or the launch fade. Every primitive keeps to that band, and `present` copies only the changed rows into the buffer about to be shown (this frame's and the previous frame's, as the two buffers alternate). The preview checks every partial frame against a whole redraw. At the end the log says what frames cost:
+
+  ```
+  selector: 53 frames drawn (11 partial): draw 5 ms average, 6 ms at most; present 1 ms average, 6 ms at most, 1010 rows average
+  ```
+
+  (A 13.60 PS5 with two titles, a minute of moving along the row and opening the panel.) Loading art happens between frames: a title's index and its PNG icon took about a second at start-up, `<prefix>META` a single read.
 - **Pad:** SWRR's shared pad handle, through the core's `scePadOpen` override, read with `scePadReadState` (the leftover "intercepted" bit is ignored).
-- **PNG:** the console's `libScePngDec` (`ParseHeader`, `QueryMemorySize`, `Create`, `Decode` to B8G8R8A8, `Delete`). There is a decoder per image, in temporary heap memory. Images up to 2560x1440 are decoded; larger ones fall back to the generated art.
+- **Pictures:** `<prefix>META`'s QOI images are decoded by the module's own `meta.c`. A title's own PNGs (installs without `<prefix>META`) go through the console's `libScePngDec` (`ParseHeader`, `QueryMemorySize`, `Create`, `Decode` to B8G8R8A8, `Delete`), a decoder per image in temporary heap memory, up to 2560x1440; larger ones fall back to the generated art.
 
 ## Memory, and how it all goes back
 
@@ -71,11 +131,11 @@ ghostldr's memory is tight: the title's memory plan is computed after the select
 
 | Block | Type | Size | Holds |
 |---|---|---|---|
-| heap | direct memory, write-back, CPU RW | 60 MiB for one title; plus 0.75 MiB per extra title; plus 8 MiB with the system font | the frame being drawn, two prepared backgrounds and the generated one (7.9 MiB each), each title's tile at two sizes, the glyph cache, the system font library's memory, and temporaries (a title's index, a PNG file, its decoded image, PngDec's work memory) |
+| heap | direct memory, write-back, CPU RW | 52 MiB for one title; plus 0.82 MiB per extra title; plus 8 MiB with the system font | the frame being drawn and two prepared backdrops (7.9 MiB each), each title's tile at two sizes (384 and 256 px), the glyph cache, the system font library's memory, and temporaries (`<prefix>META`'s first MiB, a backdrop's QOI and its pixels; or a title's index, a PNG file, its decoded image, PngDec's work memory) |
 | video | direct memory type 3 (write-combined), CPU+GPU RW | 16 MiB | the two scan-out buffers |
 
 - **Placement:** both blocks go at the top of the largest free run of direct memory (`sceKernelAvailableDirectMemorySize`), away from the low hole and the top 32 MiB where the loader's own small blocks go (`mem.c`). Freeing them gives the run back in one piece, so no fragment is left between the run and anything allocated meanwhile.
-- **Inside the heap:** a bump allocator with marks: temporaries are dropped as soon as they are used. The peak in the offline tests is 42 MiB.
+- **Inside the heap:** a bump allocator with marks: temporaries are dropped as soon as they are used. The generated backdrop is drawn when needed rather than kept. The peak in the offline preview is 37 MiB for Ghost alone with its store art, 43 MiB for eight titles; on a PS5 with Ghost (`GHOSTMETA`) and a title with its own 1920x1080 `pic1.png`, 39 MiB of a 54 MiB heap.
 - **Teardown, in order:**
   1. wait for pending flips;
   2. close VideoOut;
@@ -88,11 +148,11 @@ ghostldr's memory is tight: the title's memory plan is computed after the select
 - **Accounting in the log:**
 
   ```
-  selector: largest free run 20000000+3072 MiB; heap 60 MiB at ... (phys ...), video 16 MiB at ... (phys ...)
+  selector: largest free run 20000000+3072 MiB; heap 52 MiB at ... (phys ...), video 16 MiB at ... (phys ...)
   selector: freed video buffers: 16 MiB at ... munmap 0, release 0
-  selector: freed heap: 60 MiB at ... munmap 0, release 0
-  selector: released 76 MiB of direct memory; largest free run 3072 MiB (was 3072 MiB); 7 mounts, 7 unmounts; booting title 0
-  sel: module at 9c2c00000 (122 KiB) cleared; chose 0
+  selector: freed heap: 52 MiB at ... munmap 0, release 0
+  selector: released 68 MiB of direct memory; largest free run 3072 MiB (was 3072 MiB); 7 mounts, 7 unmounts; booting title 0
+  sel: module at 9c2c00000 (134 KiB) cleared; chose 0
   ```
 
   The two "largest free run" figures should match. The mount and unmount counts must match too.
@@ -108,13 +168,23 @@ python3 -m unittest ghostldr.tests.test_selector      # or discover -s ghostldr/
 SELECTOR_SHOTS=/tmp/shots python3 -m unittest ghostldr.tests.test_selector   # keep the screenshots
 ```
 
-- **`ghostldr/tests/selector/preview.c`:** the UI code against a fake catalogue with generated placeholder art. It writes PNG screenshots of a tour (moving along the row, fallbacks, an incomplete title), the information panel and the launch fade. `--art TITLE=DIR` uses a dump's `sce_sys` directory instead; the art is read at run time and never copied.
+- **`ghostldr/tests/selector/preview.c`:** the UI code against a fake catalogue with generated placeholder art. It writes PNG screenshots of a tour (moving along the row, fallbacks, an incomplete title, a clock tick), the information panel and the launch fade, and prints what frames cost. `--meta TITLE=meta.bin` reads a `<prefix>META` file as the console does; `--art TITLE=DIR` takes a dump's `sce_sys` (`icon0.png`, `pic1.png`) or what `gfs_meta.py fetch` saved (`icon.png`, `backdrop.png`); `--user NAME` fills the top bar; `--verify` compares every partial frame with a whole redraw. The art is read at run time and never copied.
+
+  ```bash
+  python3 ghostldr/host/gfs_meta.py fetch CUSA11456 --out ../art/CUSA11456          # outside the repository
+  python3 ghostldr/host/gfs_meta.py build --title CUSA11456 --fetch-art --art-dir ../art/CUSA11456 --out /tmp/ghost-meta.bin
+  cc -O2 -Ighostldr/native/selector/src ghostldr/tests/selector/{preview,png_host}.c \
+     ghostldr/native/selector/src/{ui,draw,font,sfo,meta}.c -lz -lm -o /tmp/preview
+  /tmp/preview --font ghostldr/native/selector/font/notosans.glf --out /tmp/shots --scene tour \
+     --meta CUSA11456=/tmp/ghost-meta.bin --user Player --verify
+  ```
 - **`ghostldr/tests/selector/host_env.c`:** runs the core's real `sel.c` and the real `selector.bin` in an x86-64 process (Rosetta on Apple silicon) against a fake console. Its save data is built by the test in ghostfs's formats. Every run must give back every block, close VideoOut and every file, unload what it loaded, unmount every container and leave the image cleared. `SELECTOR_NO_X86=1` skips these runs.
 
 ## Limits
 
 - **Cross is always "start".** It doesn't follow a Circle-to-confirm system setting.
-- **Loading art is synchronous:** each icon costs a few save-container mounts, so the row can stutter while icons first load. Backgrounds wait until the row stops.
+- **Loading art is synchronous:** each icon costs a save-container mount (a few, for an install without `<prefix>META`), so the row can stutter while icons first load. Backdrops wait until the row stops.
+- **`--fetch-art` needs the store to know the title ID:** it asks the US, UK, Japanese and Hong Kong stores. Titles delisted everywhere get no art; `--icon` and `--backdrop` still work.
 - **The system font** (SST through libSceFont) crashed SWRR on a 13.60 PS5 during the font library's set-up; it is off unless `--select-font auto` is given.
 - **No sound,** no Japanese button layout, no touchpad.
 - **Background art** larger than 2560x1440 isn't decoded; a pic1 at 1920x1080, as PS4 titles ship it, is.

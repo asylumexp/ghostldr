@@ -100,6 +100,16 @@ The first boot takes a minute or two. On a new save Ghost goes through brightnes
 
 **Every later session:** close SWRR, start it again, open HALL OF FAME, and run the same `run.py` command. The install is only needed once per PSN user.
 
+## Names and pictures in the game selector (optional)
+
+With more than one title installed, or with `run.py boot --select`, ghostldr shows a game picker in the style of the PS4 home screen before the game loads ([selector.md](selector.md)). A dump without `sce_sys` (Ghost's usually has none) shows its name from ghostldr's profile and a tile drawn in its colour. To show the game's official icon and background instead, with SWRR at the Luac0re loader:
+
+```bash
+python3 ghostldr/host/gfs_install.py --update-meta --title CUSA11456 --fetch-art
+```
+
+This downloads the art from the PlayStation Store's public pages into `build/ghostfs/CUSA11456/art` and writes one small entry, `GHOSTMETA` (about 3 MB), to the PS5. The game data, its progress and SWRR's own save are not touched, and nothing is reinstalled. Your own pictures work too: `--icon tile.png --backdrop background.png`. Restart SWRR before the next `run.py boot`, as after an install.
+
 ## Troubleshooting
 
 - **`receiver did not come up` or `is SWRR at the Luac0re loader?`:** the loader isn't listening. Open HALL OF FAME again, or restart SWRR first.

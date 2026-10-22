@@ -30,10 +30,39 @@ struct sel;
 typedef struct {
     u32 *px;
     int w, h, stride; /* stride in pixels */
+    int cy0, cy1;     /* drawing is clipped to rows cy0..cy1-1 when cy1 > 0 (partial redraws) */
 } surface;
+
+static inline int surf_y0(const surface *s) { return s->cy1 > 0 ? s->cy0 : 0; }
+static inline int surf_y1(const surface *s) { return s->cy1 > 0 && s->cy1 < s->h ? s->cy1 : s->h; }
 
 /* ---- the catalogue, as the selector sees it ---- */
 #define TITLE_COMPLETE 1u /* fully installed: can boot */
+
+/* where a picture came from (host/gfs_meta.py ART_*) */
+#define ART_TITLE 1     /* the title's own sce_sys/icon0.png, pic1.png */
+#define ART_GIVEN 2     /* gfs_pack.py / gfs_install.py --icon, --backdrop */
+#define ART_STORE 3     /* --fetch-art: the PlayStation Store's */
+#define ART_GENERATED 4 /* drawn by the selector */
+enum { SEL_ICON, SEL_BACKDROP };
+
+/* <prefix>META/meta.bin (host/gfs_meta.py; meta.c) */
+#define META_HEADER 256
+#define META_SCANNED 1u /* the title's own sce_sys was looked at: what it has is in here */
+#define META_FMT_RAW 1
+#define META_FMT_QOI 2
+enum { META_SFO, META_ICON, META_BACKDROP, META_SECTIONS };
+struct meta_sect {
+    u32 off, size;
+    u16 w, h;
+    u8 format, source;
+};
+struct meta_info {
+    u32 flags, size;
+    u8 name_source;
+    char name[128], version[16];
+    struct meta_sect s[META_SECTIONS];
+};
 
 struct title {
     char id[16];      /* CUSA11456; may be empty */
@@ -46,7 +75,8 @@ struct title {
     surface icon;     /* TILE_BIG square, pixels allocated at start */
     surface icon_small; /* TILE_SMALL square */
     u8 icon_state;    /* 0 not tried, 1 loaded, 2 none */
-    u8 bg_state;      /* 0 not tried, 1 has pic1, 2 none */
+    u8 bg_state;      /* 0 not tried, 1 has a backdrop, 2 none */
+    u8 icon_src, bg_src; /* ART_*: set by sel_load_art, or ART_GENERATED */
 };
 
 /* ---- outline font (font.c) ---- */
@@ -81,14 +111,14 @@ struct fontcache {
 };
 
 /* ---- whole-UI state (ui.c) ---- */
-#define TILE_BIG 360
+#define TILE_BIG 384             /* the focused tile (host/gfs_meta.py ICON) */
 #define TILE_SMALL 256
 struct sel {
     void *plat;              /* platform state */
     int plat_title;          /* platform scratch: the title being loaded */
-    surface back;            /* where frames are drawn */
-    surface bg[2];           /* prepared (scaled, dimmed) backgrounds */
-    surface bg_default;      /* the generated background, dimmed */
+    surface back;            /* where frames are drawn (always the whole current frame) */
+    int damage_y0, damage_y1; /* rows ui_draw changed in back */
+    surface bg[2];           /* prepared (scaled, shaded) backdrops */
     int bg_cur;              /* index into bg of the visible one */
     int bg_title;            /* title whose background is in bg[bg_cur], -1 = default */
     int bg_from_valid;
@@ -98,7 +128,7 @@ struct sel {
     int ntitles;
     /* navigation */
     int sel;                 /* selected title */
-    float pos;               /* animated scroll position */
+    float pos, vel;          /* animated scroll position and its speed (titles per second) */
     float panel;             /* info panel slide 0..1 */
     int panel_open;
     float launch;            /* 0..1 fade out after Cross */
@@ -106,8 +136,11 @@ struct sel {
     u64 last_move_us;        /* time of the last selection change */
     u64 toast_until_us;
     char toast[96];
-    /* clock */
+    /* top bar */
     int clock_h, clock_m, clock_24h, clock_valid;
+    char user[64];           /* the signed-in user's name; empty: not shown */
+    int drawn_once;          /* the next ui_draw may be partial */
+    u32 changed;             /* CH_* since the last ui_draw */
     /* input repeat */
     u32 held;
     int repeat_dir;
@@ -128,15 +161,20 @@ struct sel {
 #define PAD_CROSS 0x4000u
 #define PAD_SQUARE 0x8000u
 
+#define CH_ALL 1u   /* everything (backdrop, panel, launch, toast) */
+#define CH_ROW 2u   /* the tiles and the focused title's name */
+#define CH_TOP 4u   /* the top bar (clock) */
+
 /* ---- platform (main.c / preview.c) ---- */
 void *sel_alloc(struct sel *S, u64 size); /* 64-byte aligned, zeroed; NULL when the heap is full */
 u64 sel_mark(struct sel *S);              /* temporaries: sel_release(S, mark) frees everything since */
 void sel_release(struct sel *S, u64 mark);
 void sel_log(struct sel *S, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 int sel_fmt(char *buf, int size, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
-/* Decode the title's file (e.g. "sce_sys/icon0.png") into a temporary BGRA
- * surface; 0 on success.  Freed by the caller's sel_release. */
-int sel_load_png(struct sel *S, int title, const char *path, surface *out);
+/* The title's tile picture (SEL_ICON) or backdrop (SEL_BACKDROP) as a
+ * temporary surface (freed by the caller's sel_release), from its META or
+ * its own sce_sys files; sets the title's icon_src / bg_src.  0 on success. */
+int sel_load_art(struct sel *S, int title, int which, surface *out);
 
 /* ---- drawing (draw.c) ---- */
 void draw_fill(surface *s, int x, int y, int w, int h, u32 argb);
@@ -154,8 +192,12 @@ void draw_line(surface *s, float x0, float y0, float x1, float y1, float w, u32 
 void draw_round_rect(surface *s, float x, float y, float w, float h, float r, float stroke, u32 argb);
 void draw_triangle_outline(surface *s, float cx, float cy, float r, float w, u32 argb);
 void draw_square_outline(surface *s, float cx, float cy, float r, float w, u32 argb);
-void draw_default_bg(surface *s);
-void draw_fallback_tile(surface *s, u32 tint);
+void draw_generated_bg(surface *s, u32 tint);  /* a backdrop in the title's colour */
+void draw_fallback_tile(surface *s, u32 tint); /* a tile's background in its colour */
+void draw_halo(surface *s, int x, int y, int w, int h, int radius, int alpha, u32 rgb); /* soft glow around a rect */
+void draw_shade(surface *s);                     /* the backdrop's dimming and gradients */
+void draw_vgradient(surface *s, int x, int y, int w, int h, u32 top, u32 bottom); /* alpha-blended */
+u32 mix_rgb(u32 a, u32 b, int t256);
 
 /* ---- text (font.c) ---- */
 int font_init(struct sel *S, const u8 *glf, u64 cache_bytes);
@@ -171,12 +213,18 @@ u32 utf8_next(const char **p);
 /* ---- param.sfo (sfo.c) ---- */
 int sfo_get(const u8 *sfo, u64 size, const char *key, char *out, int cap, s32 *num);
 
+/* ---- META and QOI (meta.c) ---- */
+int meta_parse(const u8 *d, u64 n, struct meta_info *mi);
+int qoi_header(const u8 *d, u64 n, int *w, int *h);
+int qoi_decode(const u8 *d, u64 n, surface *out);
+
 /* ---- the UI (ui.c) ---- */
 int ui_init(struct sel *S, struct title *titles, int n, int initial);
 /* advance by dt microseconds with the given pad buttons; returns 1 when the
  * frame changed, and sets *boot to the chosen title once the launch fade ends */
 int ui_step(struct sel *S, u64 now_us, u64 dt_us, u32 buttons, int stick_x, int *boot);
 void ui_set_clock(struct sel *S, int h, int m, int h24);
+void ui_set_user(struct sel *S, const char *name);
 void ui_draw(struct sel *S);
 void ui_prepare_bg(struct sel *S, int title); /* decode + dim pic1 into the spare buffer */
 void ui_load_icon(struct sel *S, int title);

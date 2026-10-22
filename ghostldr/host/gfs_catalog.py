@@ -4,8 +4,8 @@
 Several titles live side by side in SWRR's save data.  Each has a prefix
 <P>: data containers <P>000..<P>095, its index <P>INDEX (or the legacy
 GFSINDEX / GHOSTIDX of a v0.1 install), and its progress <P>SAVE (later
-<P>D001SAVE.., <P>M00SAVE..).  GFSCATALOG/catalog.bin lists the installed
-titles.
+<P>D001SAVE.., <P>M00SAVE..), and its name and art for the game selector
+<P>META (gfs_meta.py).  GFSCATALOG/catalog.bin lists the installed titles.
 
 The core's twin is ghostldr/native/src/ghostfs.c; the receiver's LIST op
 (ghostldr/lua/gfs_receiver.lua) builds the same bytes when there is no
@@ -61,6 +61,12 @@ def index_name(prefix: str) -> str:
 
 def save_name(prefix: str) -> str:
     return f"{prefix}SAVE"
+
+
+def meta_name(prefix: str) -> str:
+    """The title's name and art for the game selector (gfs_meta.py): only
+    ever written whole, never part of the title's data or progress."""
+    return f"{prefix}META"
 
 
 def is_progress(name: str) -> bool:

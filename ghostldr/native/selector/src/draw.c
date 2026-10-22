@@ -1,4 +1,6 @@
-/* Software drawing on 32-bit BGRA surfaces (0xAARRGGBB). */
+/* Software drawing on 32-bit BGRA surfaces (0xAARRGGBB).  Everything that
+ * draws into a surface keeps to its row band (surf_y0..surf_y1): the UI
+ * redraws only the rows that changed. */
 #include "sel.h"
 
 #define A(c) ((c) >> 24)
@@ -27,16 +29,19 @@ static inline u32 scale32(u32 c, u32 t) /* rgb * t / 256 */
     return 0xFF000000u | rb | g;
 }
 
+u32 mix_rgb(u32 a, u32 b, int t256) { return lerp32(a | 0xFF000000u, b | 0xFF000000u, (u32)clampi(t256, 0, 256)); }
+
 static int clip(const surface *s, int *x, int *y, int *w, int *h)
 {
+    int y0 = surf_y0(s), y1 = surf_y1(s);
     if (*x < 0)
         *w += *x, *x = 0;
-    if (*y < 0)
-        *h += *y, *y = 0;
+    if (*y < y0)
+        *h -= y0 - *y, *y = y0;
     if (*x + *w > s->w)
         *w = s->w - *x;
-    if (*y + *h > s->h)
-        *h = s->h - *y;
+    if (*y + *h > y1)
+        *h = y1 - *y;
     return *w > 0 && *h > 0;
 }
 
@@ -64,10 +69,28 @@ void draw_rect_blend(surface *s, int x, int y, int w, int h, u32 argb)
     }
 }
 
+/* top to bottom from one colour to another, each blended by its own alpha */
+void draw_vgradient(surface *s, int x, int y, int w, int h, u32 top, u32 bottom)
+{
+    int x0 = x, y0 = y, w0 = w, h0 = h;
+    if (h0 <= 0 || !clip(s, &x0, &y0, &w0, &h0))
+        return;
+    for (int j = 0; j < h0; j++) {
+        int t = (y0 + j - y) * 256 / h;
+        u32 c = lerp32(top, bottom, (u32)t), a = A(c);
+        a += a >> 7;
+        if (!a)
+            continue;
+        u32 *p = row(s, y0 + j) + x0;
+        for (int i = 0; i < w0; i++)
+            p[i] = over(p[i], c, a);
+    }
+}
+
 void draw_dim(surface *s, int x0, int x1, int y0, int y1, int alpha)
 {
     x0 = clampi(x0, 0, s->w), x1 = clampi(x1, 0, s->w);
-    y0 = clampi(y0, 0, s->h), y1 = clampi(y1, 0, s->h);
+    y0 = clampi(y0, surf_y0(s), surf_y1(s)), y1 = clampi(y1, surf_y0(s), surf_y1(s));
     u32 t = (u32)(256 - clampi(alpha, 0, 256));
     for (int y = y0; y < y1; y++) {
         u32 *p = row(s, y);
@@ -78,19 +101,21 @@ void draw_dim(surface *s, int x0, int x1, int y0, int y1, int alpha)
 
 void draw_copy(surface *dst, const surface *src)
 {
-    int w = dst->w < src->w ? dst->w : src->w, h = dst->h < src->h ? dst->h : src->h;
+    int w = dst->w < src->w ? dst->w : src->w, y0 = surf_y0(dst), y1 = surf_y1(dst);
+    if (y1 > src->h)
+        y1 = src->h;
     if (dst->stride == w && src->stride == w) {
-        __builtin_memcpy(dst->px, src->px, (u64)w * (u64)h * 4);
+        __builtin_memcpy(row(dst, y0), src->px + (u64)y0 * (u64)w, (u64)w * (u64)(y1 - y0) * 4);
         return;
     }
-    for (int y = 0; y < h; y++)
+    for (int y = y0; y < y1; y++)
         __builtin_memcpy(row(dst, y), src->px + (u64)y * (u64)src->stride, (u64)w * 4);
 }
 
 void draw_mix(surface *dst, const surface *a, const surface *b, int t256)
 {
     u32 t = (u32)clampi(t256, 0, 256);
-    for (int y = 0; y < dst->h; y++) {
+    for (int y = surf_y0(dst); y < surf_y1(dst); y++) {
         u32 *d = row(dst, y);
         const u32 *pa = a->px + (u64)y * (u64)a->stride, *pb = b->px + (u64)y * (u64)b->stride;
         for (int x = 0; x < dst->w; x++)
@@ -126,12 +151,12 @@ void draw_scale(surface *dst, int dx, int dy, int dw, int dh, const surface *src
     int x0 = dx < clip_x0 ? clip_x0 : dx, y0 = dy, x1 = dx + dw, y1 = dy + dh;
     if (x0 < 0)
         x0 = 0;
-    if (y0 < 0)
-        y0 = 0;
+    if (y0 < surf_y0(dst))
+        y0 = surf_y0(dst);
     if (x1 > dst->w)
         x1 = dst->w;
-    if (y1 > dst->h)
-        y1 = dst->h;
+    if (y1 > surf_y1(dst))
+        y1 = surf_y1(dst);
     if (x0 >= x1 || y0 >= y1)
         return;
     u32 ga = (u32)clampi(alpha, 0, 256);
@@ -141,6 +166,15 @@ void draw_scale(surface *dst, int dx, int dy, int dw, int dh, const surface *src
         u32 *d = row(dst, y);
         s32 fy = (y - dy) * sy + sy / 2 - 0x8000;
         const u32 *srow = src->px + (u64)(y - dy) * (u64)src->stride;
+        if (exact && ga == 256) { /* opaque art at its own size: a copy (fast path for the focused tile) */
+            int opaque = 1;
+            for (int x = x0; x < x1 && opaque; x++)
+                opaque = A(srow[x - dx]) == 255;
+            if (opaque) {
+                __builtin_memcpy(d + x0, srow + (x0 - dx), (u64)(x1 - x0) * 4);
+                continue;
+            }
+        }
         for (int x = x0; x < x1; x++) {
             u32 c = exact ? srow[x - dx] : sample(src, (x - dx) * sx + sx / 2 - 0x8000, fy);
             u32 t = A(c);
@@ -151,10 +185,16 @@ void draw_scale(surface *dst, int dx, int dy, int dw, int dh, const surface *src
     }
 }
 
-/* Resample src into all of dst: box filter when shrinking, bilinear otherwise. */
+/* Resample src into all of dst: a copy at the same size, a box filter when
+ * shrinking, bilinear otherwise. */
 void draw_resample(surface *dst, const surface *src)
 {
-    if (src->w >= dst->w && src->h >= dst->h && (src->w > dst->w || src->h > dst->h)) {
+    if (src->w == dst->w && src->h == dst->h) {
+        for (int y = 0; y < dst->h; y++)
+            __builtin_memcpy(row(dst, y), src->px + (u64)y * (u64)src->stride, (u64)dst->w * 4);
+        return;
+    }
+    if (src->w >= dst->w && src->h >= dst->h) {
         for (int y = 0; y < dst->h; y++) {
             int sy0 = (int)((s64)y * src->h / dst->h), sy1 = (int)((s64)(y + 1) * src->h / dst->h);
             if (sy1 <= sy0)
@@ -190,20 +230,30 @@ void draw_cover(surface *dst, const surface *src)
 {
     if ((s64)src->w * dst->h >= (s64)src->h * dst->w) {
         int cw = (int)((s64)src->h * dst->w / dst->h);
-        surface c = {src->px + (src->w - cw) / 2, cw, src->h, src->stride};
+        surface c = {src->px + (src->w - cw) / 2, cw, src->h, src->stride, 0, 0};
         draw_resample(dst, &c);
     } else {
         int ch = (int)((s64)src->w * dst->h / dst->w);
-        surface c = {src->px + (u64)((src->h - ch) / 2) * (u64)src->stride, src->w, ch, src->stride};
+        surface c = {src->px + (u64)((src->h - ch) / 2) * (u64)src->stride, src->w, ch, src->stride, 0, 0};
         draw_resample(dst, &c);
     }
 }
 
-/* soft shadow around the rectangle (darkens a ring of the given radius) */
-void draw_shadow(surface *s, int x, int y, int w, int h, int radius, int alpha)
+/* A soft ring around the rectangle, towards rgb (glow) or black (shadow):
+ * strength alpha/256 at the edge, fading out over radius. */
+static void ring(surface *s, int x, int y, int w, int h, int radius, int alpha, u32 rgb, int light)
 {
+    if (radius <= 0 || alpha <= 0)
+        return;
+    int lut[96];
+    if (radius > 95)
+        radius = 95;
+    for (int d = 0; d <= radius; d++) {
+        int f = 256 - d * 256 / radius;
+        lut[d] = alpha * f / 256 * f / 256;
+    }
     for (int yy = y - radius; yy < y + h + radius; yy++) {
-        if (yy < 0 || yy >= s->h)
+        if (yy < surf_y0(s) || yy >= surf_y1(s))
             continue;
         int dy = yy < y ? y - yy : yy >= y + h ? yy - (y + h - 1) : 0;
         u32 *p = row(s, yy);
@@ -218,11 +268,21 @@ void draw_shadow(surface *s, int x, int y, int w, int h, int radius, int alpha)
             int d2 = dx * dx + dy * dy;
             if (d2 >= radius * radius)
                 continue;
-            float f = 1.0f - (float)d2 / (float)(radius * radius);
-            int a = (int)((float)alpha * f * f);
-            p[xx] = scale32(p[xx], (u32)(256 - a));
+            int d = (int)__builtin_sqrtf((float)d2);
+            int a = lut[d < radius ? d : radius];
+            p[xx] = light ? over(p[xx], rgb, (u32)a) : scale32(p[xx], (u32)(256 - a));
         }
     }
+}
+
+void draw_shadow(surface *s, int x, int y, int w, int h, int radius, int alpha)
+{
+    ring(s, x, y, w, h, radius, alpha, 0, 0);
+}
+
+void draw_halo(surface *s, int x, int y, int w, int h, int radius, int alpha, u32 rgb)
+{
+    ring(s, x, y, w, h, radius, alpha, rgb, 1);
 }
 
 void draw_frame(surface *s, int x, int y, int w, int h, int t, u32 argb)
@@ -242,7 +302,7 @@ static float sqrtf_(float v)
 
 static void plot(surface *s, int x, int y, u32 argb, float cov)
 {
-    if (x < 0 || y < 0 || x >= s->w || y >= s->h || cov <= 0)
+    if (x < 0 || y < surf_y0(s) || x >= s->w || y >= surf_y1(s) || cov <= 0)
         return;
     u32 t = (u32)(clampf(cov, 0, 1) * (float)(A(argb) + (A(argb) >> 7)));
     u32 *p = row(s, y) + x;
@@ -281,7 +341,12 @@ void draw_line(surface *s, float x0, float y0, float x1, float y1, float w, u32 
 void draw_round_rect(surface *s, float x, float y, float w, float h, float r, float stroke, u32 argb)
 {
     float cx = x + w * 0.5f, cy = y + h * 0.5f, hx = w * 0.5f - r, hy = h * 0.5f - r;
-    for (int py = (int)(y - 1); py <= (int)(y + h + 1); py++)
+    int py0 = (int)(y - 1), py1 = (int)(y + h + 1);
+    if (py0 < surf_y0(s))
+        py0 = surf_y0(s);
+    if (py1 >= surf_y1(s))
+        py1 = surf_y1(s) - 1;
+    for (int py = py0; py <= py1; py++)
         for (int px = (int)(x - 1); px <= (int)(x + w + 1); px++) {
             float qx = (float)px + 0.5f - cx, qy = (float)py + 0.5f - cy;
             qx = (qx < 0 ? -qx : qx) - hx, qy = (qy < 0 ? -qy : qy) - hy;
@@ -325,39 +390,78 @@ static float sinturn(float t)
     return x * (1.5f - 0.5f * x * x);           /* smooth it */
 }
 
-/* A deep blue gradient with soft diagonal light bands, in the spirit of the
- * PS4's default theme (drawn here, nothing taken from the console). */
-void draw_default_bg(surface *s)
+static inline u32 rgbf(float r, float g, float b)
 {
+    return 0xFF000000u | (u32)clampi((int)r, 0, 255) << 16 | (u32)clampi((int)g, 0, 255) << 8 |
+           (u32)clampi((int)b, 0, 255);
+}
+
+/* A deep gradient in the title's colour with soft diagonal light bands and a
+ * glow towards the top right, in the spirit of the PS4's default theme
+ * (drawn here: nothing is taken from the console). */
+void draw_generated_bg(surface *s, u32 tint)
+{
+    float tr = (float)R(tint), tg = (float)G(tint), tb = (float)B(tint);
     for (int y = 0; y < s->h; y++) {
         u32 *p = row(s, y);
         float fy = (float)y / (float)s->h;
         for (int x = 0; x < s->w; x++) {
             float fx = (float)x / (float)s->w;
-            float band = 0;
-            band += 0.5f + 0.5f * sinturn(fx * 0.9f - fy * 0.55f + 0.15f);
-            band = band * band * band * 0.22f;
-            float glow = 0.5f + 0.5f * sinturn(fx * 0.45f + fy * 0.35f + 0.6f);
-            glow = glow * glow * 0.12f;
-            float r = 6 + 10 * (1 - fy), g = 30 + 38 * (1 - fy), b = 74 + 70 * (1 - fy);
-            float k = 1 + band + glow;
-            int ri = (int)(r * k + 40 * band), gi = (int)(g * k + 70 * band), bi = (int)(b * k + 90 * band);
-            p[x] = 0xFF000000u | (u32)clampi(ri, 0, 255) << 16 | (u32)clampi(gi, 0, 255) << 8 | (u32)clampi(bi, 0, 255);
+            float base = 0.30f - 0.20f * (fx * 0.35f + fy * 0.65f); /* 0.30 top left .. 0.10 bottom right */
+            float band = 0.5f + 0.5f * sinturn(fx * 0.9f - fy * 0.55f + 0.15f);
+            band = band * band * band * 0.16f;
+            float band2 = 0.5f + 0.5f * sinturn(fx * 1.7f - fy * 0.9f + 0.62f);
+            band2 = band2 * band2 * band2 * band2 * 0.07f;
+            float gx = fx - 0.78f, gy = fy - 0.18f;
+            float glow = 1.0f - (gx * gx * 1.6f + gy * gy * 2.4f);
+            glow = glow > 0 ? glow * glow * 0.26f : 0;
+            float k = base + band + band2 + glow;
+            p[x] = rgbf(tr * k + 18 * (band + glow), tg * k + 22 * (band + glow), tb * k + 30 * (band + glow));
         }
     }
 }
 
-/* tile used when a title has no icon0.png: a diagonal gradient of its tint */
+/* A tile without a picture: a diagonal gradient of the title's colour with a
+ * soft sheen; the UI writes the name on it. */
 void draw_fallback_tile(surface *s, u32 tint)
 {
-    int r = (int)R(tint), g = (int)G(tint), b = (int)B(tint);
+    float tr = (float)R(tint), tg = (float)G(tint), tb = (float)B(tint);
     for (int y = 0; y < s->h; y++) {
         u32 *p = row(s, y);
+        float fy = (float)y / (float)s->h;
         for (int x = 0; x < s->w; x++) {
-            int t = (x + y) * 256 / (s->w + s->h); /* 0 top-left .. 256 bottom-right */
-            int k = 300 - t * 3 / 4;               /* lighter to darker */
-            p[x] = 0xFF000000u | (u32)clampi(r * k >> 8, 0, 255) << 16 | (u32)clampi(g * k >> 8, 0, 255) << 8 |
-                   (u32)clampi(b * k >> 8, 0, 255);
+            float fx = (float)x / (float)s->w;
+            float k = 1.10f - 0.62f * (fx * 0.45f + fy * 0.55f); /* lighter top left, darker bottom right */
+            float sx = fx - 0.92f, sy = fy + 0.05f;
+            float sheen = 1.0f - (sx * sx + sy * sy) * 1.5f;
+            sheen = sheen > 0 ? sheen * sheen * 0.22f : 0;
+            float stripe = 0.5f + 0.5f * sinturn((fx + fy) * 2.2f);
+            stripe = stripe * stripe * stripe * stripe * 0.05f;
+            float add = (sheen + stripe) * 255;
+            p[x] = rgbf(tr * k + add, tg * k + add, tb * k + add);
         }
+    }
+}
+
+/* The backdrop's tone, after the PS4 home screen: dimmed overall, darker at
+ * the top (status bar), towards the bottom and on the left, where the text
+ * is.  Applied once when a backdrop is prepared. */
+void draw_shade(surface *s)
+{
+    u16 col[SCREEN_W];
+    int w = s->w < SCREEN_W ? s->w : SCREEN_W;
+    for (int x = 0; x < w; x++) {
+        float f = x < 1150 ? 1.0f - (float)x / 1150.0f : 0;
+        col[x] = (u16)(256 * (1.0f - 0.48f * f * f));
+    }
+    for (int y = 0; y < s->h; y++) {
+        float top = y < 230 ? 1.0f - (float)y / 230.0f : 0;
+        float bot = y > 520 ? (float)(y - 520) / (float)(s->h - 520) : 0;
+        bot = bot * bot * (3 - 2 * bot);
+        float k = 0.60f * (1.0f - 0.45f * top * top) * (1.0f - 0.66f * bot);
+        u32 kr = (u32)(k * 256);
+        u32 *p = row(s, y);
+        for (int x = 0; x < w; x++)
+            p[x] = scale32(p[x], kr * col[x] >> 8);
     }
 }

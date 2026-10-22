@@ -14,15 +14,28 @@ int fmt(char *buf, size_t size, const char *fmt, ...);
  * where its art is once its index has been read. */
 #define CAT_INCOMPLETE 1u
 #define CAT_LEGACY 2u
-enum { FILE_ICON, FILE_PIC, FILE_SFO, NFILES };
+enum { FILE_ICON, FILE_PIC, FILE_SFO, FILE_PIC0, NFILES };
+#define NAME_SFO 1      /* where a title's display name came from (docs/selector.md, "Names") */
+#define NAME_PROFILE 2
+#define NAME_GIVEN 3
+#define NAME_STORE 4
+#define NAME_CATALOGUE 5
 struct cat_title {
-    char id[16], prefix[16], index[32], name[128], version[16];
+    char id[16], prefix[16], index[32], version[16];
+    char name[128];      /* the one shown (cat_pick_name): the first of the ones below that is set */
+    char sfo_name[128];  /* sce_sys/param.sfo: TITLE_xx in the system language, else TITLE */
+    char prof_name[128]; /* the title's profile (run.py's bundle, REC_NAME) */
+    char meta_name[128]; /* <prefix>META's, written at install time (--name, the store's ...) */
+    char cat_name[128];  /* GFSCATALOG's, written at install time */
+    u8 name_src;         /* NAME_* of name; 0: none (the ID is shown) */
     u64 total, cap;
     u32 containers, flags;
     struct {
         u64 off, size;
     } file[NFILES];
     u8 indexed; /* 0 not yet, 1 read, 2 failed */
+    u8 meta_state; /* <prefix>META: 0 not read yet, 1 read (meta), 2 none */
+    struct meta_info meta;
 };
 
 struct sysfont;
@@ -63,6 +76,10 @@ struct plat {
     s32 (*png_create)(const void *param, void *mem, u32 size, void **handle);
     s32 (*png_decode)(void *handle, const void *param, void *info);
     s32 (*png_delete)(void *handle);
+    /* frames: what drawing and presenting cost (logged at the end) */
+    u64 draw_us, draw_max_us, present_us, present_max_us, present_rows;
+    u32 frames, partial_frames;
+    int prev_damage_y0, prev_damage_y1;
     /* the system font (sysfont.c), when it opened */
     struct sysfont *sf;
     /* time and system settings */
@@ -79,8 +96,11 @@ void *sys_sym(struct plat *P, u32 handle, const char *name);
 
 /* cat.c */
 int cat_count(struct plat *P);
+void cat_pick_name(struct cat_title *c);
 int cat_load(struct sel *S, struct plat *P, int n);
 s64 cat_file(struct sel *S, struct plat *P, int title, int which, void *buf, u64 cap);
+s64 cat_meta_read(struct plat *P, int title, u64 off, void *buf, u64 cap);
+void cat_meta_names(struct plat *P, int title, const u8 *head, u64 n);
 
 /* png.c */
 int png_init(struct plat *P);

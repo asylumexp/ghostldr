@@ -154,15 +154,22 @@ void *sys_sym(struct plat *P, u32 handle, const char *name)
     return fn;
 }
 
-/* ---- PNG files of a title ---- */
-#define PNG_FILE_MAX (8u << 20)
+static const char *name_src(u8 src)
+{
+    return src == NAME_SFO ? "param.sfo" : src == NAME_PROFILE ? "profile" : src == NAME_GIVEN ? "given"
+         : src == NAME_STORE ? "store" : src == NAME_CATALOGUE ? "catalogue" : "none";
+}
 
-/* what reading a title's index and param.sfo taught us (dumps the catalogue knows little about) */
+/* ---- a title's art ---- */
+#define PNG_FILE_MAX (8u << 20)
+#define META_HEAD (1u << 20) /* read with META's header: param.sfo and the icon fit in it */
+
+/* what reading a title's META, index or param.sfo taught us */
 static void sync_title(struct sel *S, struct plat *P, int i)
 {
     struct title *t = &S->titles[i];
     const struct cat_title *c = &P->cat[i];
-    if (!t->name[0] && c->name[0])
+    if (c->name[0])
         str_copy(t->name, c->name, sizeof(t->name));
     if (!t->version[0] && c->version[0])
         str_copy(t->version, c->version, sizeof(t->version));
@@ -170,20 +177,88 @@ static void sync_title(struct sel *S, struct plat *P, int i)
         str_copy(t->id, c->id, sizeof(t->id));
 }
 
-int sel_load_png(struct sel *S, int title, const char *path, surface *out)
+/* <prefix>META: its header once (with whatever follows it in the first MiB) */
+static const u8 *meta_head(struct sel *S, struct plat *P, int i, u64 *n)
+{
+    struct cat_title *c = &P->cat[i];
+    *n = 0;
+    if (c->meta_state || !P->ghostfs || !c->prefix[0]) {
+        if (!c->meta_state)
+            c->meta_state = 2;
+        return NULL;
+    }
+    u8 *buf = sel_alloc(S, META_HEAD);
+    s64 got = buf ? cat_meta_read(P, i, 0, buf, META_HEAD) : -1;
+    if (got >= META_HEADER && meta_parse(buf, (u64)got, &c->meta) == 0) {
+        c->meta_state = 1;
+        cat_meta_names(P, i, buf, (u64)got);
+        LOG(P, "title %d (%s): %sMETA: '%s' (%s), icon %ux%u, backdrop %ux%u, param.sfo %u bytes%s", i, c->id,
+            c->prefix, c->meta.name, c->meta.version, c->meta.s[META_ICON].w, c->meta.s[META_ICON].h,
+            c->meta.s[META_BACKDROP].w, c->meta.s[META_BACKDROP].h, c->meta.s[META_SFO].size,
+            c->meta.flags & META_SCANNED ? "" : ", not scanned");
+        *n = (u64)got;
+        return buf;
+    }
+    c->meta_state = 2;
+    return NULL;
+}
+
+static int load_qoi(struct sel *S, const u8 *d, u64 n, surface *out)
+{
+    int w, h;
+    if (qoi_header(d, n, &w, &h) != 0)
+        return -1;
+    *out = (surface){sel_alloc(S, (u64)w * (u64)h * 4), w, h, w, 0, 0};
+    return out->px ? qoi_decode(d, n, out) : -1;
+}
+
+int sel_load_art(struct sel *S, int title, int which, surface *out)
 {
     struct plat *P = PLAT(S);
-    int which = path[8] == 'i' ? FILE_ICON : FILE_PIC; /* "sce_sys/icon0.png" or "sce_sys/pic1.png" */
-    s64 n = cat_file(S, P, title, which, NULL, 0);
+    struct cat_title *c = &P->cat[title];
+    struct title *t = &S->titles[title];
+    u8 *src = which == SEL_ICON ? &t->icon_src : &t->bg_src;
+    u64 hn = 0;
+    const u8 *head = meta_head(S, P, title, &hn);
     sync_title(S, P, title);
+    if (c->meta_state == 1) {
+        const struct meta_sect *m = &c->meta.s[which == SEL_ICON ? META_ICON : META_BACKDROP];
+        if (m->size && m->format == META_FMT_QOI) {
+            const u8 *d = NULL;
+            if (head && (u64)m->off + m->size <= hn) {
+                d = head + m->off;
+            } else {
+                u8 *b = sel_alloc(S, m->size);
+                if (b && cat_meta_read(P, title, m->off, b, m->size) == (s64)m->size)
+                    d = b;
+            }
+            if (d && load_qoi(S, d, m->size, out) == 0) {
+                *src = m->source;
+                return 0;
+            }
+            LOG(P, "title %d: %sMETA's %s is unreadable", title, c->prefix, which == SEL_ICON ? "icon" : "backdrop");
+        }
+        if (c->meta.flags & META_SCANNED)
+            return -1; /* the title has none of its own: no need to search its index */
+    }
+    /* the title's own sce_sys PNGs, through its index (installs without META) */
     if (!P->png_decode)
         return -1;
-    if (n <= 0 || (u64)n > PNG_FILE_MAX)
-        return -1;
-    u8 *data = sel_alloc(S, (u64)n);
-    if (!data || cat_file(S, P, title, which, data, (u64)n) != n)
-        return -1;
-    return png_decode_to(S, P, data, (u64)n, out);
+    int files[2] = {which == SEL_ICON ? FILE_ICON : FILE_PIC, which == SEL_ICON ? -1 : FILE_PIC0};
+    for (int k = 0; k < 2 && files[k] >= 0; k++) {
+        s64 n = cat_file(S, P, title, files[k], NULL, 0);
+        sync_title(S, P, title);
+        if (n <= 0 || (u64)n > PNG_FILE_MAX)
+            continue;
+        u8 *data = sel_alloc(S, (u64)n);
+        if (!data || cat_file(S, P, title, files[k], data, (u64)n) != n)
+            continue;
+        if (png_decode_to(S, P, data, (u64)n, out) == 0) {
+            *src = ART_TITLE;
+            return 0;
+        }
+    }
+    return -1;
 }
 
 /* ---- VideoOut ---- */
@@ -233,6 +308,7 @@ static int video_open(struct plat *P)
     if (rc < 0)
         return -1;
     P->fb_shown = -1;
+    P->prev_damage_y0 = 0, P->prev_damage_y1 = SCREEN_H; /* both buffers start black: the first frames are whole */
     return 0;
 }
 
@@ -242,18 +318,45 @@ static void wait_flips(struct plat *P, u32 max_ms)
         P->k->usleep(1000);
 }
 
+/* Show the frame in S->back.  Only rows that changed are copied: the
+ * buffer about to be shown last held the frame before the previous one, so
+ * it gets this frame's changed rows and the previous frame's. */
 static void present(struct sel *S)
 {
     struct plat *P = PLAT(S);
-    if (!P->vo_open)
+    if (!P->vo_open || S->damage_y0 >= S->damage_y1)
         return;
     int next = P->fb_shown == 0 ? 1 : 0;
+    int y0 = S->damage_y0 < P->prev_damage_y0 ? S->damage_y0 : P->prev_damage_y0;
+    int y1 = S->damage_y1 > P->prev_damage_y1 ? S->damage_y1 : P->prev_damage_y1;
     wait_flips(P, 100); /* the buffer we draw into must not be on its way to the screen */
-    memcpy(P->fb[next], S->back.px, FB_BYTES);
+    memcpy(P->fb[next] + (u64)y0 * SCREEN_W, S->back.px + (u64)y0 * SCREEN_W, (u64)(y1 - y0) * SCREEN_W * 4);
+    P->present_rows += (u64)(y1 - y0);
     s32 rc = P->vo_submit(P->vo, next, 1 /* vsync */, (s64)++P->flips);
     if (rc < 0 && P->flips < 4)
         LOG(P, "sceVideoOutSubmitFlip -> %x", (u32)rc);
     P->fb_shown = next;
+    P->prev_damage_y0 = S->damage_y0, P->prev_damage_y1 = S->damage_y1;
+}
+
+/* draw what changed and show it, timing both */
+static void frame(struct sel *S)
+{
+    struct plat *P = PLAT(S);
+    u64 t0 = P->proc_time();
+    ui_draw(S);
+    u64 t1 = P->proc_time();
+    if (S->damage_y0 >= S->damage_y1)
+        return;
+    present(S);
+    u64 t2 = P->proc_time();
+    P->frames++;
+    P->partial_frames += S->damage_y1 - S->damage_y0 < SCREEN_H;
+    P->draw_us += t1 - t0, P->present_us += t2 - t1;
+    if (t1 - t0 > P->draw_max_us)
+        P->draw_max_us = t1 - t0;
+    if (t2 - t1 > P->present_max_us)
+        P->present_max_us = t2 - t1;
 }
 
 static void video_close(struct plat *P)
@@ -269,7 +372,7 @@ static void video_close(struct plat *P)
 /* ---- pad ---- */
 #define PAD_INTERCEPTED 0x80000000u
 
-static int pad_open(struct plat *P)
+static int pad_open(struct plat *P, struct sel *S)
 {
     u32 us = sys_module(P, "libSceUserService.sprx", 0, NULL), pad = sys_module(P, "libScePad.sprx", 0, NULL);
     s32 (*initial)(s32 *) = (s32(*)(s32 *))sys_sym(P, us, "sceUserServiceGetInitialUser");
@@ -286,6 +389,12 @@ static int pad_open(struct plat *P)
     P->pad = open(user, 0, 0, NULL);
     if (P->pad < 0 && get)
         P->pad = get(user, 0, 0);
+    /* the user's name for the top bar */
+    s32 (*get_name)(s32, char *, size_t) = (s32(*)(s32, char *, size_t))sys_sym(P, us, "sceUserServiceGetUserName");
+    char name[64];
+    memset(name, 0, sizeof(name));
+    if (get_name && get_name(user, name, sizeof(name) - 1) == 0)
+        ui_set_user(S, name);
     LOG(P, "pad: user %x handle %x", (u32)user, (u32)P->pad);
     return P->pad >= 0 ? 0 : -1;
 }
@@ -315,11 +424,12 @@ static void clock_now(struct sel *S, struct plat *P)
 /* ---- entry ---- */
 extern const u8 sel_font_glf[];
 
-#define HEAP_BASE (4 * FB_BYTES) /* back buffer, two backgrounds, the default one */
+#define HEAP_BASE (3 * FB_BYTES) /* the frame being drawn, two backdrops */
 #define HEAP_TITLE ((u64)(TILE_BIG * TILE_BIG + TILE_SMALL * TILE_SMALL) * 4 + sizeof(struct title) + \
                     sizeof(struct cat_title))
 #define HEAP_FONT (3u << 20)  /* glyph cache, rasterizer */
-#define HEAP_TEMP (24u << 20) /* a title's index, a PNG file and its decoded image, PngDec's work memory */
+#define HEAP_TEMP (24u << 20) /* META's head, a backdrop's QOI and its pixels; or a title's index, a PNG file
+                                 and its decoded image, PngDec's work memory */
 #define HEAP_SYSFONT (8u << 20)
 
 __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_api *api, char chosen[16])
@@ -392,8 +502,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         str_copy(titles[i].prefix, P.ghostfs ? c->prefix : "", sizeof(titles[i].prefix));
         titles[i].size = c->total;
         titles[i].flags = c->flags & CAT_INCOMPLETE ? 0 : TITLE_COMPLETE;
-        LOG(&P, "title %d: %s '%s' %s, %lu MiB, index %s%s", i, c->id, c->name, c->version, c->total >> 20,
-            c->index[0] ? c->index : "-", c->flags & CAT_INCOMPLETE ? ", incomplete" : "");
+        LOG(&P, "title %d: %s '%s' (name %s) %s, %lu MiB, index %s%s", i, c->id, c->name, name_src(c->name_src),
+            c->version, c->total >> 20, c->index[0] ? c->index : "-", c->flags & CAT_INCOMPLETE ? ", incomplete" : "");
     }
     if (font_init(S, sel_font_glf, 2u << 20) != 0) {
         LOG(&P, "built-in font unusable");
@@ -413,16 +523,15 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         LOG(&P, "no video output: booting the default title");
         goto out;
     }
-    if (pad_open(&P) != 0) {
+    if (pad_open(&P, S) != 0) {
         LOG(&P, "no pad: booting the default title");
         goto out;
     }
 
     /* 5. the loop: 30 fps at most, frames drawn only when something changed */
-    u64 now = P.proc_time(), prev = now, next_clock = 0;
-    ui_draw(S);
-    present(S);
-    for (u64 frame = 0;; frame++) {
+    u64 now = P.proc_time(), prev = now, next_clock = 0, started = now;
+    frame(S);
+    for (;;) {
         u8 pad[0x80];
         memset(pad, 0, sizeof(pad));
         u32 buttons = 0;
@@ -437,16 +546,20 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
             next_clock = now + 1000000;
         }
         int boot = -1;
-        if (ui_step(S, now, now - prev, buttons, stick, &boot)) {
-            ui_draw(S);
-            present(S);
-        }
+        if (ui_step(S, now, now - prev, buttons, stick, &boot))
+            frame(S);
         prev = now;
         if (boot >= 0) {
             choice = boot;
             memcpy(chosen, P.cat[boot].id, 16);
-            LOG(&P, "Cross on title %d (%s) after %lu frames; heap peak %lu MiB, %u glyphs, %u mounts", boot,
-                P.cat[boot].id, frame, P.heap_peak >> 20, S->fc.misses, P.mounts);
+            LOG(&P, "Cross on title %d (%s) after %lu s; heap peak %lu MiB of %lu, %u glyphs, %u mounts", boot,
+                P.cat[boot].id, (now - started) / 1000000, P.heap_peak >> 20, P.heap_size >> 20, S->fc.misses,
+                P.mounts);
+            if (P.frames)
+                LOG(&P, "%u frames drawn (%u partial): draw %lu ms average, %lu ms at most; present %lu ms average, "
+                        "%lu ms at most, %lu rows average",
+                    P.frames, P.partial_frames, P.draw_us / P.frames / 1000, P.draw_max_us / 1000,
+                    P.present_us / P.frames / 1000, P.present_max_us / 1000, P.present_rows / P.frames);
             break;
         }
         u64 spent = P.proc_time() - now;

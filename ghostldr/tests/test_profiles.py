@@ -102,12 +102,24 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual((b["save_blocks"], b["runtime_reserve_mib"], b["video_reserve_mib"], b["flex_mib"]),
                          (256, 32, 100, 0))
         kinds = [k for k, _ in b["records"]]
-        self.assertEqual(kinds, [profiles.REC_PLAN] + [profiles.REC_TABLE] * 4 + [profiles.REC_TLS])  # tls_sites
+        self.assertEqual(kinds, [profiles.REC_PLAN] + [profiles.REC_TABLE] * 4 + [profiles.REC_TLS]   # tls_sites
+                         + [profiles.REC_NAME])
+        self.assertEqual(b["records"][-1][1].rstrip(b"\0"), b"Ghost of Tsushima")   # the selector's name
         fixed, over, n, *sites = struct.unpack_from("<6I", b["records"][0][1])
         self.assertEqual((fixed, over, n, sites), (3996, 120, 3, [0x896126, 0x89614A, 0xEEE2CF]))
         table, role, knob, nexp, mib, min_mib = struct.unpack_from("<IBBHII", b["records"][1][1])
         self.assertEqual((table, role, knob, nexp, mib, min_mib), (0x111CD50, 1, 0xFF, 6, 0, 128))
         self.assertTrue(b["records"][1][1][16 + 48:].startswith(b"streaming pool\0"))
+
+    def test_name_record(self) -> None:
+        prof = profiles.load("CUSA22222")
+        self.assertFalse([k for k, _ in profiles.read_blobs(profiles.compile_blob(prof))[0]["records"]
+                          if k == profiles.REC_NAME])      # no name: no record
+        prof["name"] = "\u661f" * 60                      # 180 bytes of UTF-8: cut on a character boundary
+        [b] = profiles.read_blobs(profiles.compile_blob(prof))
+        [rec] = [r for k, r in b["records"] if k == profiles.REC_NAME]
+        self.assertEqual(rec.rstrip(b"\0").decode(), "\u661f" * 42)
+        self.assertEqual(len(rec) % 8, 0)
 
     def test_rule_blob_layout(self) -> None:
         prof = profiles.load("CUSA22222")

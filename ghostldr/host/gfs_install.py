@@ -16,12 +16,16 @@ anything.  For the title being installed:
 Its catalogue entry and PINDEX are marked incomplete first and completed
 last, so an interrupted install is recognised and never booted.  Ghost
 installed by ghostldr v0.1 (GHOST000..055 + GFSINDEX) is kept as it is and
-added to the catalogue.
+added to the catalogue.  The title's name and art for the game selector go
+into PMETA (gfs_meta.py), written last; --update-meta writes only that, for
+a title that is already installed (nothing else is touched).
 
     python3 ghostldr/host/gfs_pack.py [--src DIR] [--title CUSA12345]
     python3 ghostldr/host/gfs_install.py [--title CUSA12345] [--dry-run] [--force]
     python3 ghostldr/host/gfs_install.py --list
     python3 ghostldr/host/gfs_install.py --remove CUSA12345 [--remove-saves]
+    python3 ghostldr/host/gfs_install.py --update-meta [--title CUSA12345] [--fetch-art]
+                                         [--name NAME] [--icon FILE] [--backdrop FILE]
 
 Without --title it installs the title packed in build/ghostfs (the newest one
 when there are several).
@@ -39,6 +43,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import gfs_catalog as gc
+import gfs_meta as gm
 from console import console_ip
 from gfs_pack import FLAG_INCOMPLETE, OUT_ROOT, default_title, index_header
 
@@ -116,6 +121,7 @@ class State:
     current: Install | None = None      # its installed index header (PINDEX or its legacy index)
     present: set[int] = field(default_factory=set)          # its data containers on the console
     tagged: set[int] = field(default_factory=set)           # ... complete for the new layout
+    meta: dict | None = None            # its <P>META header (gfs_meta.parse), if it has one
 
 
 def known_prefixes() -> dict[str, str]:
@@ -177,6 +183,7 @@ def survey(rx, new: Install, jobs: list, force: bool = False) -> State:
                          f"{st.entry.prefix} (its progress is in {gc.save_name(st.entry.prefix)})")
     if st.entry:
         st.current = parse_header(st.entry.index, rx.read(st.entry.index, gc.INDEX_FILE, 128))
+    st.meta = gm.parse(rx.read(gc.meta_name(new.prefix), gm.META_FILE, gm.HEADER_SIZE))
     cur = st.current
     if cur and same_data(cur, new) and not cur.incomplete and not force:
         return st                          # installed: no container to send
@@ -205,7 +212,16 @@ def same_entry(a: gc.Entry | None, b: gc.Entry) -> bool:
 
 
 def plan(st: State, new: Install, layout: dict, force: bool) -> list[tuple]:
-    """Steps to get `new` installed next to what the console has."""
+    """Steps to get `new` installed next to what the console has, then its
+    name and art (<P>META) when the pack has them and the console's differ."""
+    steps = plan_data(st, new, layout, force)
+    meta = layout.get("meta")
+    if meta and (force or not st.meta or st.meta["id"] != meta["id"]):
+        steps.append(("meta",))
+    return steps
+
+
+def plan_data(st: State, new: Install, layout: dict, force: bool) -> list[tuple]:
     steps: list[tuple] = []
     cur, entry = st.current, st.entry
     if cur and same_data(cur, new) and not cur.incomplete and not force:
@@ -240,6 +256,8 @@ def space_needed(st: State, steps: list[tuple], new: Install) -> int:
         need += SMALL_CONTAINER
     if any(s[0] == "catalog" for s in steps) and not st.catalogue.exists:
         need += SMALL_CONTAINER
+    if ("meta",) in steps and not st.meta:
+        need += gm.container_blocks(1 << 20) * 32768
     return need
 
 
@@ -249,7 +267,7 @@ def plan_remove(entry: gc.Entry, legacy: list[Install], saves: bool) -> list[tup
     for h in legacy:                      # a stale legacy index of the same title
         if h.prefix == entry.prefix and h.name != entry.index:
             steps.append(("delete", h.name))
-    steps += [("delete_data", entry.prefix), ("drop", entry.title)]
+    steps += [("delete_data", entry.prefix), ("delete_meta", entry.prefix), ("drop", entry.title)]
     if saves:
         steps.append(("delsaves", entry.prefix))
     return steps
@@ -435,6 +453,17 @@ def execute(rx, steps: list[tuple], st: State, new: Install | None = None, layou
         elif s[0] == "delete_data":
             gone = sum(delete_quiet(rx, gc.data_name(s[1], k)) for k in range(MAX_CONTAINERS))
             log(f"deleted {gone} data containers {s[1]}000..")
+        elif s[0] == "delete_meta":
+            if delete_quiet(rx, gc.meta_name(s[1])):
+                log(f"deleted {gc.meta_name(s[1])} (its name and art)")
+        elif s[0] == "meta":
+            data = Path(layout["meta"]["file"]).read_bytes()
+            rc = gm.put_meta(rx, cat, new.title, new.prefix, data)
+            if rc:
+                log(f"{gc.meta_name(new.prefix)}: {rc:#x}: the title is installed, but not its name and art "
+                    f"(rerun with --update-meta)")
+            else:
+                log(f"{gc.meta_name(new.prefix)} written: {gm.describe(gm.parse(data))}")
         elif s[0] == "delsaves":
             removed: list[str] = []
 
@@ -500,6 +529,10 @@ def describe_steps(steps: list[tuple], jobs: list) -> None:
             log(f"  delete the progress {gc.save_name(s[1])} (and {s[1]}D<nnn>SAVE, {s[1]}M<nn>SAVE)")
         elif s[0] == "drop":
             log(f"  drop {s[1]} from {gc.CATALOG}")
+        elif s[0] == "delete_meta":
+            log(f"  delete its name and art {gc.meta_name(s[1])}")
+        elif s[0] == "meta":
+            log("  write its name and art for the game selector (<prefix>META)")
     if puts:
         log(f"  send {len(puts)} containers, {sum(jobs[k]['size'] for k in puts) / 2**30:.1f} GiB")
     if ("index",) in steps:
@@ -545,14 +578,27 @@ def main() -> int:
     ap.add_argument("--list", action="store_true", help="list the installed titles")
     ap.add_argument("--remove", metavar="TITLE", help="delete this title's data and index (its progress stays)")
     ap.add_argument("--remove-saves", action="store_true", help="with --remove: delete its progress (<prefix>SAVE) too")
+    ap.add_argument("--update-meta", action="store_true", help="only write the installed title's name and art for "
+                    "the game selector (<prefix>META); its data, index and progress are not touched")
+    ap.add_argument("--src", type=Path, help="with --update-meta: the title's app0, for its own sce_sys files "
+                    "(default: the packed one, else they are read from the console)")
     ap.add_argument("--no-space-check", action="store_true", help="skip the free-space check before sending")
     ap.add_argument("--host")
     ap.add_argument("--interface", help="this computer's network interface to send through (e.g. en0)")
     ap.add_argument("--port", type=int, help="reattach to a receiver already listening on this port "
                     "(it holds Luac0re's loader, so a new one cannot start)")
+    gm.add_args(ap)
     args = ap.parse_args()
     if args.remove_saves and not args.remove:
         ap.error("--remove-saves goes with --remove TITLE")
+    if args.update_meta and (args.remove or args.list):
+        ap.error("--update-meta goes alone (with --title and the name and art options)")
+    if args.update_meta:
+        rx = connect(args)
+        try:
+            return gm.update_meta(rx, args, log)
+        finally:
+            rx.close()
 
     if args.list or args.remove:
         rx = connect(args)
@@ -590,6 +636,15 @@ def main() -> int:
         raise SystemExit(f"{args.title} is not packed: run gfs_pack.py --src <its app0> first")
     layout = json.loads((out / "layout.json").read_text())
     index = (out / "index.bin").read_bytes()
+    if args.name or args.icon or args.backdrop or args.fetch_art:   # art given now: a new meta.bin
+        import profiles
+        try:
+            gm.write_pack_meta(layout, out, profiles.load(args.title), args.name, args.icon, args.backdrop,
+                               args.fetch_art, args.art_dir, args.refetch, log=log)
+        except (gm.ArtError, profiles.ProfileError) as e:
+            raise SystemExit(str(e))
+    if layout.get("meta") and not Path(layout["meta"].get("file", "")).is_file():
+        layout.pop("meta")
     src = Path(layout["src"])
     new = parse_header(gc.index_name(layout["prefix"]), index)
     assert new and new.title == args.title, "index.bin does not match layout.json: rerun gfs_pack.py"

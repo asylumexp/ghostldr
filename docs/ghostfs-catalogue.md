@@ -24,6 +24,7 @@ Containers of one title, with `<P>` its prefix:
 |---|---|---|
 | `<P>000` … `<P>095` | `data.bin`: 992 MiB of the title's files laid end to end; `gfs.tag`: the layout id, container number and size, written once the container is complete | `gfs_install.py` |
 | `<P>INDEX` | `index.bin`: the title's index (format below) | `gfs_install.py` |
+| `<P>META` | `meta.bin`: the title's name and art for the game selector, at the sizes it draws (`ghostldr/host/gfs_meta.py`, docs/selector.md). Optional: written only when there is something to show beyond the profile's name | `gfs_install.py` (last, after the title is complete; `--update-meta` writes only this) |
 | `<P>SAVE` | The title's progress: save memory (`sdmemory_<slot>.bin`), later the catalogue of its save directories | the core, on the title's first save |
 | `<P>D001SAVE` … `<P>D999SAVE` | Reserved: one container per save directory of the title | the core (planned) |
 | `<P>M00SAVE` … `<P>M99SAVE` | Reserved: save-memory slots too big for `<P>SAVE` | the core (planned) |
@@ -41,7 +42,7 @@ Never touched by any ghostldr tool: `SLUS-20268` (US SWRR's own save, with Luac0
 
 The longest generated name is `<P>D999SAVE` with a 12-character prefix: 20 characters.
 
-Ghost of Tsushima installed with ghostldr v0.1.x is `GHOST000`…`GHOST055` + `GFSINDEX` + `GHOSTSAVE`. It keeps working as it is: the first run of the new installer adds it to the catalogue with index `GFSINDEX`, and the core boots it without the catalogue too.
+Ghost of Tsushima installed with ghostldr v0.1.x is `GHOST000`…`GHOST055` + `GFSINDEX` + `GHOSTSAVE`. It keeps working as it is: the first run of the new installer adds it to the catalogue with index `GFSINDEX`, and the core boots it without the catalogue too. `gfs_install.py --update-meta --fetch-art` adds `GHOSTMETA` (its name and art) and touches nothing else, not even the catalogue.
 
 ## The catalogue: `GFSCATALOG/catalog.bin`
 
@@ -93,7 +94,7 @@ Readers take `header_size` and `entry_size` from the header (a later version may
   6. the full `<P>INDEX`;
   7. catalogue: clear `INCOMPLETE`, set the layout id, size and count.
   Other titles' containers are never deleted to make room.
-- **Removing** title `T`: mark its entry `INCOMPLETE`, delete its index container, then `<P>000` … `<P>095`, then drop the entry. `<P>SAVE`, `<P>D<nnn>SAVE` and `<P>M<nn>SAVE` are deleted only when the user asks for the progress to go too (`--remove-saves`).
+- **Removing** title `T`: mark its entry `INCOMPLETE`, delete its index container, then `<P>000` … `<P>095`, then `<P>META`, then drop the entry. `<P>SAVE`, `<P>D<nnn>SAVE` and `<P>M<nn>SAVE` are deleted only when the user asks for the progress to go too (`--remove-saves`).
 - **No catalogue** (an install made by v0.1.x tools): the only title is the one in `GFSINDEX`, else `GHOSTIDX`. The installer writes the catalogue, with that title as a legacy entry, the first time it runs.
 - **A lost or damaged catalogue** (bad magic, size not `header_size + count × entry_size`): treat it as missing. `gfs_install.py` rebuilds it from the index headers it can find (the legacy names and the prefixes of the titles it knows).
 

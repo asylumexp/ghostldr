@@ -96,7 +96,7 @@ python3 ghostldr/host/profiles.py show CUSA12345
 
 | Field | Default | What it does |
 |---|---|---|
-| `title`, `name`, `version`, `status`, `notes` | | The ID (must match the file name), display name and version (the catalogue shows them), and free text. |
+| `title`, `name`, `version`, `status`, `notes` | | The ID (must match the file name), display name and version (the catalogue shows them; the game selector shows the name when the title has no `param.sfo`, and the version is stored with its name and art), and free text. |
 | `eboot.fingerprint` | none | 40 hex digits, `DT_SCE_FINGERPRINT` of `eboot.bin` (`profiles.py detect` prints it). **Binds the whole profile to that build:** on any other build the core uses the defaults. Required for a memory plan and the `ghost_*` features. |
 | `pack.prefix`, `pack.order`, `pack.late`, `pack.exclude`, `pack.groups` | generic | Container prefix; open-order file (in `ghostldr/data/titles/`); path prefixes whose traced files go after the other traced ones; a regex of files to leave out; `[regex, rank]` rules replacing the generic order (rank 0 is the boot group). Changing these changes the layout: reinstall. |
 | `app_params` | `{"0": 3}` | `sceAppContentAppParamGetInt` ids 0–4. Id 0 is the SKU (3 = full game); 1–4 come from `param.sfo`'s `USER_DEFINED_PARAM_1-4`, and the profile's win. |

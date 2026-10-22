@@ -407,6 +407,14 @@ static int user_initial(s32 *u)
     *u = 0x10000001;
     return 0;
 }
+static int user_name(s32 u, char *name, u64 size)
+{
+    const char *n = "Tester";
+    for (u64 i = 0; i < size; i++)
+        if (!(name[i] = i < 6 ? n[i] : 0))
+            break;
+    return u == 0x10000001 ? 0 : (int)0x80960009;
+}
 static int param_int(s32 id, s32 *v)
 {
     *v = id == 1 ? 1 : id == 3 ? 1 : 0;
@@ -554,6 +562,7 @@ void *host_dlsym(u32 handle, const char *name)
         {H_VIDEO, "sceVideoOutIsFlipPending", vo_pending},
         {H_PAD, "scePadReadState", pad_read},
         {H_USER, "sceUserServiceGetInitialUser", user_initial},
+        {H_USER, "sceUserServiceGetUserName", user_name},
         {H_SYSSVC, "sceSystemServiceParamGetInt", param_int},
         {H_PNG, "scePngDecParseHeader", png_parse},
         {H_PNG, "scePngDecQueryMemorySize", png_query},
@@ -632,12 +641,28 @@ int main(int argc, char **argv)
     K.munmap = k_munmap, K.alloc_direct = k_alloc_direct, K.map_direct = k_map_direct;
     K.direct_size = k_direct_size, K.avail_direct = k_avail_direct, K.avail_flex = k_avail_flex;
     K.module_list = k_module_list, K.module_info = k_module_info, K.load_start_module = k_load_start_module;
-    static struct boot_ctx ctx;
-    g_ctx = &ctx;
-    ctx.magic = BOOT_MAGIC, ctx.size = sizeof(ctx), ctx.libkernel_handle = H_KERNEL, ctx.jit_memcpy = JIT_MEMCPY;
-    ctx.staging_size = 4u << 20, ctx.staging = (u64)sys_calloc(ctx.staging_size);
-    ctx.app_root = (u64)(str_eq(g_mode, "approot") ? "/data/test/app0" : "ghostfs");
-    ctx.flags = (str_eq(g_mode, "skip") ? 0 : CTX_FLAG_SELECT) | 2 |
+    /* ghostldr.lua's context is 0x200 bytes: its last u64 points to the title
+     * profiles (profile.c PROFILE_SLOT), where the selector finds their names */
+    static union {
+        struct boot_ctx c;
+        u64 slot[64];
+    } ctxmem;
+    struct boot_ctx *const cx = &ctxmem.c;
+    g_ctx = cx;
+    const char *prof = sys_getenv("SEL_PROFILES"); /* profiles.py boot_bundle, from test_selector.py */
+    if (prof && *prof) {
+        s64 n = sys_file_size(prof);
+        int fd = n > 0 ? sys_open(prof) : -1;
+        u8 *bundle = fd >= 0 ? sys_calloc((u64)n + 8) : NULL;
+        if (bundle && sys_read(fd, bundle, (u64)n) == n)
+            ctxmem.slot[63] = (u64)bundle;
+        if (fd >= 0)
+            sys_close(fd);
+    }
+    cx->magic = BOOT_MAGIC, cx->size = sizeof(*cx), cx->libkernel_handle = H_KERNEL, cx->jit_memcpy = JIT_MEMCPY;
+    cx->staging_size = 4u << 20, cx->staging = (u64)sys_calloc(cx->staging_size);
+    cx->app_root = (u64)(str_eq(g_mode, "approot") ? "/data/test/app0" : "ghostfs");
+    cx->flags = (str_eq(g_mode, "skip") ? 0 : CTX_FLAG_SELECT) | 2 |
                 (str_eq(g_mode, "single") || str_eq(g_mode, "multi") ? CTX_FLAG_SEL_FONT_BUILTIN : 0);
     struct ghost_api *a = &g_ghost_api;
     a->version = GHOST_API_VERSION, a->size = sizeof(*a), a->ctx = &g_ctx, a->k = &K, a->logf = logf;
@@ -646,13 +671,13 @@ int main(int argc, char **argv)
     a->gfs_active = gfs_active, a->gfs_mount = gfs_mount, a->gfs_umount = gfs_umount;
 
     u64 size = (u64)sys_file_size(argv[2]);
-    ctx.sel_fd = (u64)sys_open(argv[2]); /* the "socket": sel.c closes it */
+    cx->sel_fd = (u64)sys_open(argv[2]); /* the "socket": sel.c closes it */
     g_opens++;
-    ctx.sel_size = size;
-    ctx.sel_crc = sys_strtoul(argv[3]) ^ (str_eq(g_mode, "badcrc") ? 1 : 0);
+    cx->sel_size = size;
+    cx->sel_crc = sys_strtoul(argv[3]) ^ (str_eq(g_mode, "badcrc") ? 1 : 0);
     char title[16];
     /* boot.c: show when ghostfs left the choice to it, or with run.py --select */
-    int pick = sel_run((ctx.flags & CTX_FLAG_SELECT) != 0, title);
+    int pick = sel_run((cx->flags & CTX_FLAG_SELECT) != 0, title);
 
     int want = str_eq(g_mode, "multi") ? 2 : str_eq(g_mode, "skip") || str_eq(g_mode, "badcrc") ? -1 : 0;
     say("selector_host: %s chose %d (%.16s)", g_mode, pick, pick >= 0 ? title : "-");

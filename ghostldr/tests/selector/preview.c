@@ -3,18 +3,23 @@
  * (ghostldr/native/selector/src/{ui,draw,font,sfo}.c) on this computer
  * against a fake catalogue, and writes PNG screenshots.
  *
- *   preview --font notosans.glf --out DIR [--art TITLE=DIR]... [--titles N] [--scene NAME]
+ *   preview --font notosans.glf --out DIR [--meta TITLE=FILE]... [--art TITLE=DIR]...
+ *           [--titles N] [--scene NAME] [--user NAME]
  *
- * Art: a title's icon0.png / pic1.png come from --art TITLE=DIR (a dump's
- * sce_sys directory) when given; otherwise the harness draws its own
- * placeholder art (gradients and shapes) or none, to exercise the fallbacks.
- * PNG decoding here uses zlib; on the console the module uses libScePngDec.
+ * Art: --meta TITLE=FILE reads a meta.bin (host/gfs_meta.py) as the console
+ * reads <prefix>META, QOI and all; --art TITLE=DIR takes icon0.png / pic1.png
+ * (a dump's sce_sys) or icon.png / backdrop.png (gfs_meta.py fetch) from DIR.
+ * Otherwise the harness draws its own placeholder art (gradients and shapes)
+ * or none, to exercise the fallbacks.  The art is read at run time and never
+ * copied.  PNG decoding here uses zlib; on the console the module uses
+ * libScePngDec.  Each run prints what drawing frames cost here.
  */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 #include "png_host.h"
 #include "sel.h"
 
@@ -24,8 +29,13 @@ struct plat {
     u64 size, used, peak;
     struct art {
         const char *id, *dir;
+        int meta; /* dir is a meta.bin */
     } art[16];
     int nart;
+    u64 draw_ns, draw_max_ns;
+    int frames, partial;
+    int verify, mismatches; /* --verify: every partial frame against a whole redraw */
+    u32 *check;
     int procedural[SEL_MAX_TITLES]; /* 0 none, 1.. kind */
 };
 
@@ -69,7 +79,7 @@ static int png_decode(struct sel *S, const u8 *d, u64 n, surface *out)
     unsigned w, h;
     if (png_host_decode(d, n, &w, &h, NULL))
         return -1;
-    out->w = (int)w, out->h = (int)h, out->stride = (int)w;
+    out->w = (int)w, out->h = (int)h, out->stride = (int)w, out->cy0 = out->cy1 = 0;
     out->px = sel_alloc(S, (u64)w * h * 4);
     return out->px ? png_host_decode(d, n, &w, &h, out->px) : -1;
 }
@@ -174,7 +184,7 @@ static u32 scene(int kind, float u, float v, float aspect)
 static int procedural(struct sel *S, int kind, int big, surface *out)
 {
     int w = big ? 1920 : 512, h = big ? 1080 : 512;
-    out->w = w, out->h = h, out->stride = w;
+    out->w = w, out->h = h, out->stride = w, out->cy0 = out->cy1 = 0;
     out->px = sel_alloc(S, (u64)w * h * 4);
     if (!out->px)
         return -1;
@@ -196,33 +206,80 @@ static int procedural(struct sel *S, int kind, int big, surface *out)
     return 0;
 }
 
-int sel_load_png(struct sel *S, int t, const char *path, surface *out)
+static u8 *slurp(struct sel *S, const char *path, u64 *n)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    fseek(f, 0, SEEK_END);
+    *n = (u64)ftell(f);
+    fseek(f, 0, SEEK_SET);
+    u8 *d = sel_alloc(S, *n);
+    int ok = d && fread(d, 1, (size_t)*n, f) == (size_t)*n;
+    fclose(f);
+    return ok ? d : NULL;
+}
+
+/* a meta.bin, as the console reads <prefix>META (main.c sel_load_art) */
+static int meta_art(struct sel *S, int t, const char *file, int which, surface *out)
+{
+    u64 n;
+    const u8 *d = slurp(S, file, &n);
+    struct meta_info mi;
+    if (!d || meta_parse(d, n, &mi) != 0)
+        return -1;
+    struct title *ti = &S->titles[t];
+    if (!ti->name[0] && mi.name[0])
+        str_copy(ti->name, mi.name, sizeof(ti->name));
+    if (!ti->version[0] && mi.version[0])
+        str_copy(ti->version, mi.version, sizeof(ti->version));
+    const struct meta_sect *m = &mi.s[which == SEL_ICON ? META_ICON : META_BACKDROP];
+    int w, h;
+    if (!m->size || m->format != META_FMT_QOI || (u64)m->off + m->size > n || qoi_header(d + m->off, m->size, &w, &h))
+        return -1;
+    *out = (surface){sel_alloc(S, (u64)w * h * 4), w, h, w, 0, 0};
+    if (!out->px || qoi_decode(d + m->off, m->size, out))
+        return -1;
+    (which == SEL_ICON ? &ti->icon_src : &ti->bg_src)[0] = m->source;
+    return 0;
+}
+
+int sel_load_art(struct sel *S, int t, int which, surface *out)
 {
     struct plat *P = S->plat;
-    const struct title *ti = &S->titles[t];
-    for (int i = 0; i < P->nart; i++)
-        if (!strcmp(P->art[i].id, ti->id)) {
+    struct title *ti = &S->titles[t];
+    u8 *src = which == SEL_ICON ? &ti->icon_src : &ti->bg_src;
+    for (int i = 0; i < P->nart; i++) {
+        if (strcmp(P->art[i].id, ti->id))
+            continue;
+        if (P->art[i].meta)
+            return meta_art(S, t, P->art[i].dir, which, out);
+        /* a dump's sce_sys, or what gfs_meta.py fetch saved */
+        const char *own[3] = {which == SEL_ICON ? "icon0.png" : "pic1.png", which == SEL_ICON ? NULL : "pic0.png", NULL};
+        const char *store = which == SEL_ICON ? "icon.png" : "backdrop.png";
+        for (int k = 0; k < 3; k++) {
+            const char *leaf = k < 2 ? own[k] : store;
+            if (!leaf)
+                continue;
             char full[1024];
-            const char *leaf = strrchr(path, '/');
-            snprintf(full, sizeof(full), "%s/%s", P->art[i].dir, leaf ? leaf + 1 : path);
-            FILE *f = fopen(full, "rb");
-            if (!f)
-                return -1;
-            fseek(f, 0, SEEK_END);
-            long n = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            u8 *d = sel_alloc(S, (u64)n);
-            int ok = d && fread(d, 1, (size_t)n, f) == (size_t)n;
-            fclose(f);
-            return ok ? png_decode(S, d, (u64)n, out) : -1;
+            snprintf(full, sizeof(full), "%s/%s", P->art[i].dir, leaf);
+            u64 n;
+            u8 *d = slurp(S, full, &n);
+            if (d && png_decode(S, d, n, out) == 0) {
+                *src = k < 2 ? ART_TITLE : ART_STORE;
+                return 0;
+            }
         }
+        return -1;
+    }
     int kind = P->procedural[t];
     if (!kind)
         return -1;
-    int big = strstr(path, "pic1") != NULL;
+    int big = which == SEL_BACKDROP;
     S->plat_title = t;
     if (kind < 0 && big) /* icon only */
         return -1;
+    *src = ART_TITLE;
     return procedural(S, kind < 0 ? -kind : kind, big, out);
 }
 
@@ -270,7 +327,7 @@ static int dump_art(struct sel *S, const char *dir, int n)
         for (int big = 0; big < 2; big++) {
             u64 m = sel_mark(S);
             surface img;
-            if (sel_load_png(S, i, big ? "sce_sys/pic1.png" : "sce_sys/icon0.png", &img) == 0) {
+            if (sel_load_art(S, i, big ? SEL_BACKDROP : SEL_ICON, &img) == 0) {
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/t%d/sce_sys/%s", dir, i, big ? "pic1.png" : "icon0.png");
                 if (png_write(path, &img))
@@ -298,7 +355,9 @@ static void run(struct sel *S, const struct event *ev, int nev, const char *outd
     int stick = 128;
     for (int frame = 0; frame < 30 * 60 && e < nev; frame++) {
         while (e < nev && (u64)ev[e].ms * 1000 <= now) {
-            if (ev[e].shot) {
+            if (ev[e].shot && ev[e].shot[0] == '@') { /* "@clock": the minute changes */
+                ui_set_clock(S, S->clock_h, (S->clock_m + 1) % 60, S->clock_24h);
+            } else if (ev[e].shot) {
                 ui_draw(S);
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/%s%s.png", outdir, prefix, ev[e].shot);
@@ -309,8 +368,32 @@ static void run(struct sel *S, const struct event *ev, int nev, const char *outd
             }
             e++;
         }
-        if (ui_step(S, now, step, buttons, stick, &boot))
+        if (ui_step(S, now, step, buttons, stick, &boot)) {
+            struct timespec a, b;
+            clock_gettime(CLOCK_MONOTONIC, &a);
             ui_draw(S);
+            clock_gettime(CLOCK_MONOTONIC, &b);
+            struct plat *P = S->plat;
+            u64 ns = (u64)(b.tv_sec - a.tv_sec) * 1000000000ull + (u64)b.tv_nsec - (u64)a.tv_nsec;
+            if (S->damage_y1 > S->damage_y0) {
+                P->frames++;
+                P->partial += S->damage_y1 - S->damage_y0 < SCREEN_H;
+                P->draw_ns += ns;
+                if (ns > P->draw_max_ns)
+                    P->draw_max_ns = ns;
+            }
+            if (P->verify && S->damage_y1 - S->damage_y0 < SCREEN_H) {
+                u64 bytes = (u64)SCREEN_W * SCREEN_H * 4;
+                memcpy(P->check, S->back.px, bytes);
+                S->drawn_once = 0, S->changed = CH_ALL;
+                ui_draw(S);
+                if (memcmp(P->check, S->back.px, bytes)) {
+                    P->mismatches++;
+                    fprintf(stderr, "partial frame at %llu ms differs from a whole redraw\n",
+                            (unsigned long long)(now / 1000));
+                }
+            }
+        }
         if (boot >= 0) {
             fprintf(stderr, "boot title %d (%s) at %llu ms\n", boot, S->titles[boot].id, (unsigned long long)(now / 1000));
             break;
@@ -321,7 +404,7 @@ static void run(struct sel *S, const struct event *ev, int nev, const char *outd
 
 int main(int argc, char **argv)
 {
-    const char *font = NULL, *out = ".", *scene_name = "tour", *prefix = "", *write_art = NULL;
+    const char *font = NULL, *out = ".", *scene_name = "tour", *prefix = "", *write_art = NULL, *user = NULL;
     int ntitles = (int)(sizeof(FAKES) / sizeof(FAKES[0])), clock_h = 21, clock_m = 47, h24 = 1;
     static struct plat P;
     for (int i = 1; i < argc; i++) {
@@ -339,13 +422,37 @@ int main(int argc, char **argv)
             h24 = 0;
         else if (!strcmp(argv[i], "--write-art") && i + 1 < argc)
             write_art = argv[++i];
-        else if (!strcmp(argv[i], "--art") && i + 1 < argc && P.nart < 16) {
+        else if (!strcmp(argv[i], "--decode-meta") && i + 2 < argc) { /* FILE DIR: its pictures through meta.c */
+            static struct sel D;
+            static struct plat DP;
+            DP.size = 64ull << 20, DP.heap = malloc(DP.size), D.plat = &DP;
+            struct title t;
+            memset(&t, 0, sizeof(t));
+            D.titles = &t, D.ntitles = 1;
+            const char *file = argv[++i], *dir = argv[++i];
+            for (int which = 0; which < 2; which++) {
+                surface img;
+                u64 m = sel_mark(&D);
+                char path[1024];
+                snprintf(path, sizeof(path), "%s/%s.png", dir, which == SEL_ICON ? "icon" : "backdrop");
+                if (meta_art(&D, 0, file, which, &img) == 0)
+                    png_write(path, &img);
+                sel_release(&D, m);
+            }
+            printf("name '%s' version '%s' icon %d backdrop %d\n", t.name, t.version, t.icon_src, t.bg_src);
+            return 0;
+        } else if (!strcmp(argv[i], "--verify"))
+            P.verify = 1;
+        else if (!strcmp(argv[i], "--user") && i + 1 < argc)
+            user = argv[++i];
+        else if ((!strcmp(argv[i], "--art") || !strcmp(argv[i], "--meta")) && i + 1 < argc && P.nart < 16) {
+            int meta = !strcmp(argv[i], "--meta");
             char *a = argv[++i], *eq = strchr(a, '=');
             if (eq)
-                *eq = 0, P.art[P.nart].id = a, P.art[P.nart++].dir = eq + 1;
+                *eq = 0, P.art[P.nart].id = a, P.art[P.nart].meta = meta, P.art[P.nart++].dir = eq + 1;
         } else {
             fprintf(stderr, "usage: preview --font F.glf --out DIR [--scene tour|info|single|launch] [--titles N] "
-                            "[--art TITLE=DIR] [--12h] [--prefix P]\n");
+                            "[--art TITLE=DIR] [--meta TITLE=meta.bin] [--user NAME] [--12h] [--prefix P]\n");
             return 2;
         }
     }
@@ -359,6 +466,7 @@ int main(int argc, char **argv)
         ntitles = (int)(sizeof(FAKES) / sizeof(FAKES[0]));
     P.size = 192ull << 20;
     P.heap = malloc(P.size);
+    P.check = malloc((u64)SCREEN_W * SCREEN_H * 4);
     static struct sel S;
     S.plat = &P;
     struct title *titles = sel_alloc(&S, sizeof(struct title) * ntitles);
@@ -377,6 +485,8 @@ int main(int argc, char **argv)
         return 1;
     }
     ui_set_clock(&S, clock_h, clock_m, h24);
+    if (user)
+        ui_set_user(&S, user);
     if (write_art) /* sample art for selector_host: DIR/t<N>/sce_sys/{icon0,pic1}.png */
         return dump_art(&S, write_art, ntitles);
     u64 base = P.used;
@@ -386,7 +496,7 @@ int main(int argc, char **argv)
         static const struct event ev[] = {
             {1000, 0, 0, "home"},
             {1100, PAD_RIGHT, 0, NULL}, {1180, 0, 0, NULL}, {1230, 0, 0, "moving"},
-            {2200, 0, 0, "second"},
+            {2200, 0, 0, "second"}, {2250, 0, 0, "@clock"},
             {2300, PAD_RIGHT, 0, NULL}, {2380, 0, 0, NULL},
             {2500, PAD_RIGHT, 0, NULL}, {2580, 0, 0, NULL},
             {3600, 0, 0, "fourth"},
@@ -417,5 +527,10 @@ int main(int argc, char **argv)
     }
     fprintf(stderr, "heap peak: %llu MiB (persistent %llu MiB), glyphs rendered %u\n",
             (unsigned long long)(P.peak >> 20), (unsigned long long)(base >> 20), S.fc.misses);
+    if (P.frames)
+        fprintf(stderr, "frames: %d drawn (%d partial), %.1f ms average, %.1f ms at most (this computer)\n", P.frames,
+                P.partial, (double)P.draw_ns / P.frames / 1e6, (double)P.draw_max_ns / 1e6);
+    if (P.verify)
+        fprintf(stderr, "verify: %d of %d partial frames differ from a whole redraw\n", P.mismatches, P.partial);
     return 0;
 }

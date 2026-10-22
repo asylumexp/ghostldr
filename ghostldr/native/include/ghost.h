@@ -401,6 +401,7 @@ struct prof_rec {
 #define REC_TABLE 2
 #define REC_RULE 3
 #define REC_TLS 4
+#define REC_NAME 5      /* the title's display name, UTF-8 + NUL (the game selector reads it; the core ignores it) */
 struct prof_tls {       /* tools/tls_sites.py: one module's thread-pointer loads, checked before patching */
     struct prof_rec r;
     char module[32];    /* its file name, e.g. "eboot.bin" */

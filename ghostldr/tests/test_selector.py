@@ -1,7 +1,9 @@
 """The game selector offline (docs/selector.md).  Needs `make -C ghostldr/native`.
 
-  - preview: the UI code (ui.c, draw.c, font.c) built natively against a fake
-    catalogue renders its scenes to PNG.
+  - preview: the UI code (ui.c, draw.c, font.c, meta.c) built natively
+    against a fake catalogue renders its scenes to PNG; every partial redraw
+    is checked against a whole one; a meta.bin from host/gfs_meta.py is read
+    and its QOI pictures decoded by the module's own code.
   - selector_host: the core's real src/sel.c and the real selector.bin run as
     x86-64 (Rosetta on Apple silicon) against a fake console whose save data
     is a directory tree built here in ghostfs's formats: a v0.1 install
@@ -35,7 +37,7 @@ ROOT = HERE.parents[1]
 NATIVE = ROOT / "ghostldr/native"
 SEL_BIN = ROOT / "build/ghostldr/selector.bin"
 FONT = NATIVE / "selector/font/notosans.glf"
-SHARED = [NATIVE / "selector/src" / f"{n}.c" for n in ("ui", "draw", "font", "sfo")]
+SHARED = [NATIVE / "selector/src" / f"{n}.c" for n in ("ui", "draw", "font", "sfo", "meta")]
 
 
 def x86_64_cc() -> list[str] | None:
@@ -159,11 +161,27 @@ class Selector(unittest.TestCase):
                         "total": total, "containers": count, "flags": (1 if incomplete else 0) |
                         (2 if index == "GFSINDEX" else 0)})
         catalogue(cls.multi, cat)
+        # name and art stored with the install (gfs_install.py --update-meta): CUSA00003 has none of its own
+        sys.path.insert(0, str(ROOT / "ghostldr/host"))
+        import gfs_meta as gm
+        m = gm.choose("CUSA00003", {}, True, "", "Harbor Lights at Dusk", log=lambda s: None)
+        m.icon, m.icon_source = gm.decode_image(art(0, "icon0.png")), gm.ART_STORE
+        m.backdrop, m.backdrop_source = gm.decode_image(art(0, "pic1.png")), gm.ART_STORE
+        (cls.multi / "G00003META").mkdir()
+        (cls.multi / "G00003META/meta.bin").write_bytes(gm.build(m))
         # an app root (dev setups: no ghostfs)
         cls.approot = t / "approot"
         (cls.approot / "sce_sys").mkdir(parents=True)
         (cls.approot / "sce_sys/param.sfo").write_bytes(sfo)
         (cls.approot / "sce_sys/icon0.png").write_bytes(art(2, "icon0.png"))
+        # the title profiles run.py sends: Ghost's own, and a name for CUSA00002 (profiles.py REC_NAME)
+        sys.path.insert(0, str(ROOT / "ghostldr/host"))
+        import profiles
+        named = profiles.load("CUSA00002")
+        named["name"] = "Neon Drift (from its profile)"
+        cls.bundle = t / "profiles.bin"
+        cls.bundle.write_bytes(profiles.compile_blob(profiles.load("CUSA11456")) + profiles.compile_blob(named)
+                               + profiles.compile_blob(profiles.load(None)) + b"\0" * 8)
         cls.host = None
         xcc = None if os.environ.get("SELECTOR_NO_X86") else x86_64_cc()
         if xcc:
@@ -198,19 +216,49 @@ class Selector(unittest.TestCase):
     def test_preview_scenes(self) -> None:
         for scene in ("tour", "info", "launch"):
             p = subprocess.run([str(self.preview), "--font", str(FONT), "--out", str(self.shots), "--scene", scene,
-                                "--prefix", "preview-"], capture_output=True, text=True)
+                                "--prefix", "preview-", "--user", "Tester", "--verify"], capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertRegex(p.stderr, r"verify: 0 of \d+ partial frames differ")
             if scene == "launch":
                 self.assertIn("boot title 0", p.stderr)
+            if scene == "tour":   # the row and a clock tick are redrawn alone
+                self.assertNotRegex(p.stderr, r"frames: \d+ drawn \(0 partial\)")
         for name in ("home", "moving", "fallbacks", "cjk", "toast", "info", "launching"):
             self.assertGreater((self.shots / f"preview-{name}.png").stat().st_size, 10000, name)
+
+    def test_meta_art(self) -> None:
+        """A meta.bin from gfs_meta.py, read and decoded by the module's code."""
+        sys.path.insert(0, str(ROOT / "ghostldr/host"))
+        import gfs_meta as gm
+        own = {"icon0.png": (self.art / "t0/sce_sys/icon0.png").read_bytes(),
+               "pic1.png": (self.art / "t0/sce_sys/pic1.png").read_bytes()}
+        m = gm.choose("CUSA11456", own, True, "Ghost of Tsushima", log=lambda s: None, profile_version="02.18")
+        meta = self.shots / "ghost-meta.bin"
+        meta.write_bytes(gm.build(m))
+        out = self.shots / "meta-decoded"
+        out.mkdir(exist_ok=True)
+        p = subprocess.run([str(self.preview), "--decode-meta", str(meta), str(out)], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("name 'Ghost of Tsushima' version '02.18' icon 1 backdrop 1", p.stdout)
+        data = meta.read_bytes()
+        for what, sect in (("icon", gm.SECT_ICON), ("backdrop", gm.SECT_BACKDROP)):
+            s = gm.parse(data)["sections"][sect]
+            want = gm.qoi_decode(data[s["offset"]:s["offset"] + s["size"]])
+            got = gm.png_decode((out / f"{what}.png").read_bytes())
+            self.assertEqual((got.w, got.h), (want.w, want.h))
+            self.assertEqual(got.rgba, want.rgba, what)       # B8G8R8A8 from meta.c == the encoder's input
+        p = subprocess.run([str(self.preview), "--font", str(FONT), "--out", str(self.shots), "--scene", "single",
+                            "--titles", "1", "--meta", f"CUSA11456={meta}", "--prefix", "meta-"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertGreater((self.shots / "meta-single.png").stat().st_size, 10000)
 
     # ---- the real module through the core's loader ----
     def run_host(self, mode: str, shots: str = "") -> str:
         if not self.host:
             self.skipTest("no way to build and run x86-64 code here")
         saves = self.multi if mode == "multi" else self.approot if mode == "approot" else self.legacy
-        env = dict(os.environ, SEL_SHOTS=shots)
+        env = dict(os.environ, SEL_SHOTS=shots, SEL_PROFILES=str(self.bundle))
         crc = hex(zlib.crc32(SEL_BIN.read_bytes()))
         p = subprocess.run([str(self.host), mode, str(SEL_BIN), crc, str(saves), str(self.shots)],
                            capture_output=True, text=True, env=env, timeout=300)
@@ -221,8 +269,9 @@ class Selector(unittest.TestCase):
     def test_v01_install_on_request(self) -> None:
         out = self.run_host("single", "700:home,1900:info,3300:closed,3600:launch")
         self.assertIn("1 title(s) installed (GFSINDEX), shown on request", out)
-        self.assertIn("title 0: CUSA11456 '' , 0 MiB, index GFSINDEX", out)
-        self.assertIn("'Test Title (English)' 02.18", out)  # from param.sfo, in the system language
+        # before its index is read: the profile's name; then param.sfo's, in the system language, wins
+        self.assertIn("title 0: CUSA11456 'Ghost of Tsushima' (name profile) , 0 MiB, index GFSINDEX", out)
+        self.assertIn("'Test Title (English)' 02.18", out)
 
     def test_one_title_is_not_shown(self) -> None:
         out = self.run_host("skip")
@@ -232,7 +281,9 @@ class Selector(unittest.TestCase):
         out = self.run_host("multi", "2000:home,2560:moving,4000:third,4500:launch")
         self.assertIn("5 title(s) installed (GFSCATALOG)", out)
         self.assertIn("Cross on title 2 (CUSA00003)", out)
+        self.assertIn("title 2 (CUSA00003): G00003META: 'Harbor Lights at Dusk'", out)
         self.assertIn("title 0 (CUSA00001): index G00001INDEX", out)
+        self.assertIn("title 1: CUSA00002 'Neon Drift (from its profile)' (name profile)", out)  # over the catalogue's
 
     def test_app_root(self) -> None:
         out = self.run_host("approot")

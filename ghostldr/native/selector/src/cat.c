@@ -19,10 +19,12 @@ void *memset(void *dst, int c, size_t n);
 void *memcpy(void *dst, const void *src, size_t n);
 int memcmp(const void *a, const void *b, size_t n);
 int strcmp(const char *a, const char *b);
+int strncmp(const char *a, const char *b, size_t n);
 size_t strlcpy(char *d, const char *s, size_t n);
 
 #define INDEX_MAX (64u << 20)
-static const char FILES[NFILES][20] = {"sce_sys/icon0.png", "sce_sys/pic1.png", "sce_sys/param.sfo"};
+static const char FILES[NFILES][20] = {"sce_sys/icon0.png", "sce_sys/pic1.png", "sce_sys/param.sfo",
+                                        "sce_sys/pic0.png"};
 
 /* ---- one container at a time ---- */
 static int mount(struct plat *P, const char *dir, char mp[16])
@@ -123,7 +125,70 @@ static void copy_str(char *d, const u8 *s, int n, int cap)
     d[i] = 0;
 }
 
+/* ---- names ---- */
+
+/* The title's name in its profile: run.py sends every profile it knows
+ * (profiles.py boot_bundle) and ghostldr.lua leaves them in the boot
+ * context's last u64 (profile.c PROFILE_SLOT); REC_NAME is the profile's
+ * "name".  Read in place: blobs of struct prof_hdr + records, ended by a
+ * zero magic. */
+#define PROFILE_SLOT 63
+static void profile_name(struct plat *P, struct cat_title *c)
+{
+    const u8 *p = (const u8 *)((const u64 *)P->ctx)[PROFILE_SLOT];
+    for (int n = 0; p && c->id[0] && n < 256; n++) {
+        const struct prof_hdr *h = (const struct prof_hdr *)p;
+        if (memcmp(h->magic, "GLPF", 4) != 0 || h->version != 1 || h->header_size < sizeof(*h) ||
+            h->total < h->header_size || h->total > 0x10000 || (h->total & 7))
+            return;
+        if (strncmp(h->title, c->id, sizeof(h->title)) == 0) {
+            for (u32 at = h->header_size; at + sizeof(struct prof_rec) <= h->total;) {
+                const struct prof_rec *r = (const struct prof_rec *)(p + at);
+                if (r->size < sizeof(*r) || at + r->size > h->total)
+                    return;
+                if (r->kind == REC_NAME)
+                    copy_str(c->prof_name, (const u8 *)(r + 1), (int)(r->size - sizeof(*r)), sizeof(c->prof_name));
+                at += r->size;
+            }
+            return;
+        }
+        p += h->total;
+    }
+}
+
+/* The name shown: the title's own param.sfo, its profile, then names stored
+ * at install time; none: the UI shows the title ID. */
+void cat_pick_name(struct cat_title *c)
+{
+    const char *pick[] = {c->sfo_name, c->prof_name, c->meta_name, c->cat_name};
+    u8 meta_src = c->meta.name_source ? c->meta.name_source : NAME_GIVEN;
+    const u8 src[] = {NAME_SFO, NAME_PROFILE, meta_src, NAME_CATALOGUE};
+    c->name[0] = 0, c->name_src = 0;
+    for (int i = 0; i < 4; i++)
+        if (pick[i][0]) {
+            strlcpy(c->name, pick[i], sizeof(c->name));
+            c->name_src = src[i];
+            return;
+        }
+}
+
 /* param.sfo: the name (in the system language when the title has it), ID and version */
+static void sfo_names(struct plat *P, struct cat_title *c, const u8 *sfo, s64 n)
+{
+    s32 lang = -1;
+    char key[16];
+    if (P->param_int && P->param_int(1, &lang) == 0 && lang >= 0 && lang < 100) {
+        fmt(key, sizeof(key), "TITLE_%02d", lang);
+        sfo_get(sfo, (u64)n, key, c->sfo_name, sizeof(c->sfo_name), NULL);
+    }
+    if (!c->sfo_name[0])
+        sfo_get(sfo, (u64)n, "TITLE", c->sfo_name, sizeof(c->sfo_name), NULL);
+    if (!c->id[0])
+        sfo_get(sfo, (u64)n, "TITLE_ID", c->id, sizeof(c->id), NULL);
+    if (!c->version[0])
+        sfo_get(sfo, (u64)n, "APP_VER", c->version, sizeof(c->version), NULL);
+}
+
 static void read_sfo(struct sel *S, struct plat *P, int t)
 {
     struct cat_title *c = &P->cat[t];
@@ -132,21 +197,31 @@ static void read_sfo(struct sel *S, struct plat *P, int t)
         return;
     u64 m = sel_mark(S);
     u8 *sfo = sel_alloc(S, (u64)n);
-    if (sfo && cat_file(S, P, t, FILE_SFO, sfo, (u64)n) == n) {
-        s32 lang = -1;
-        char key[16];
-        if (!c->name[0] && P->param_int && P->param_int(1, &lang) == 0 && lang >= 0 && lang < 100) {
-            fmt(key, sizeof(key), "TITLE_%02d", lang);
-            sfo_get(sfo, (u64)n, key, c->name, sizeof(c->name), NULL);
-        }
-        if (!c->name[0])
-            sfo_get(sfo, (u64)n, "TITLE", c->name, sizeof(c->name), NULL);
-        if (!c->id[0])
-            sfo_get(sfo, (u64)n, "TITLE_ID", c->id, sizeof(c->id), NULL);
-        if (!c->version[0])
-            sfo_get(sfo, (u64)n, "APP_VER", c->version, sizeof(c->version), NULL);
-    }
+    if (sfo && cat_file(S, P, t, FILE_SFO, sfo, (u64)n) == n)
+        sfo_names(P, c, sfo, n);
     sel_release(S, m);
+    cat_pick_name(c);
+}
+
+/* ---- <prefix>META (host/gfs_meta.py): the name and art stored with the install ---- */
+s64 cat_meta_read(struct plat *P, int t, u64 off, void *buf, u64 cap)
+{
+    char dir[32];
+    fmt(dir, sizeof(dir), "%sMETA", P->cat[t].prefix);
+    return read_in(P, dir, "meta.bin", off, buf, cap);
+}
+
+/* What META says about the names, from its start (head, n bytes) */
+void cat_meta_names(struct plat *P, int t, const u8 *head, u64 n)
+{
+    struct cat_title *c = &P->cat[t];
+    const struct meta_sect *sf = &c->meta.s[META_SFO];
+    if (sf->size && sf->size <= 0x10000 && (u64)sf->off + sf->size <= n)
+        sfo_names(P, c, head + sf->off, sf->size);
+    str_copy(c->meta_name, c->meta.name, sizeof(c->meta_name));
+    if (!c->version[0])
+        str_copy(c->version, c->meta.version, sizeof(c->version));
+    cat_pick_name(c);
 }
 
 int cat_load(struct sel *S, struct plat *P, int n)
@@ -158,6 +233,8 @@ int cat_load(struct sel *S, struct plat *P, int n)
     if (!P->ghostfs) { /* one title at the app root */
         P->cat[0].indexed = 1;
         read_sfo(S, P, 0);
+        profile_name(P, &P->cat[0]);
+        cat_pick_name(&P->cat[0]);
         return 0;
     }
     if (P->catalogue) {
@@ -179,7 +256,7 @@ int cat_load(struct sel *S, struct plat *P, int n)
                 copy_str(c->id, e, 16, sizeof(c->id));
                 copy_str(c->prefix, e + 0x10, 16, sizeof(c->prefix));
                 copy_str(c->index, e + 0x20, 32, sizeof(c->index));
-                copy_str(c->name, e + 0x40, 64, sizeof(c->name));
+                copy_str(c->cat_name, e + 0x40, 64, sizeof(c->cat_name));
                 copy_str(c->version, e + 0x80, 16, sizeof(c->version));
                 memcpy(&c->total, e + 0x98, 8);
                 memcpy(&c->containers, e + 0xA0, 4);
@@ -190,6 +267,10 @@ int cat_load(struct sel *S, struct plat *P, int n)
         }
         sel_release(S, m);
         P->ncat = n;
+        for (int i = 0; i < n; i++) {
+            profile_name(P, &P->cat[i]);
+            cat_pick_name(&P->cat[i]);
+        }
         return n ? 0 : -1;
     }
     u8 h[128];
@@ -204,6 +285,8 @@ int cat_load(struct sel *S, struct plat *P, int n)
     memcpy(&c->total, h + 24, 8);
     memcpy(&c->containers, h + 8, 4);
     c->flags = CAT_LEGACY | (version >= 2 && (*(u32 *)(h + 60) & 1) ? CAT_INCOMPLETE : 0);
+    profile_name(P, c);
+    cat_pick_name(c);
     return 0;
 }
 
@@ -258,10 +341,15 @@ static void index_title(struct sel *S, struct plat *P, int t)
         }
     }
     sel_release(S, m);
-    if (c->indexed == 1 && (!c->name[0] || !c->version[0] || !c->id[0]))
+    if (c->indexed == 1 && c->file[FILE_SFO].size) {
         read_sfo(S, P, t);
-    LOG(P, "title %d (%s): index %s, icon0 %lu, pic1 %lu, param.sfo %lu bytes; '%s' %s", t, c->id, c->index,
-        c->file[FILE_ICON].size, c->file[FILE_PIC].size, c->file[FILE_SFO].size, c->name, c->version);
+        if (!c->prof_name[0])
+            profile_name(P, c); /* an ID first learnt from param.sfo */
+        cat_pick_name(c);
+    }
+    LOG(P, "title %d (%s): index %s, icon0 %lu, pic1 %lu, pic0 %lu, param.sfo %lu bytes; '%s' %s", t, c->id,
+        c->index, c->file[FILE_ICON].size, c->file[FILE_PIC].size, c->file[FILE_PIC0].size, c->file[FILE_SFO].size,
+        c->name, c->version);
 }
 
 /* A title's file: its size (buf NULL), or the bytes read into buf (at most cap). */

@@ -76,5 +76,6 @@ int png_decode_to(struct sel *S, struct plat *P, const u8 *data, u64 n, surface 
         return -1;
     }
     out->px = px, out->w = (int)info.width, out->h = (int)info.height, out->stride = (int)info.width;
+    out->cy0 = out->cy1 = 0;
     return 0;
 }

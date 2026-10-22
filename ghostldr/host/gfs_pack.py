@@ -18,10 +18,13 @@ the boot group first, then the traced files, then the rest by its groups.
 
     python3 ghostldr/host/gfs_pack.py                     # the dump in build/ghost/app0
     python3 ghostldr/host/gfs_pack.py --src DIR [--title CUSA12345] [--prefix NAME] [--order FILE]
+                                      [--name NAME] [--icon FILE] [--backdrop FILE] [--fetch-art]
 
 The title comes from --title, else sce_sys/param.sfo, else the profile whose
 eboot fingerprint matches.  Writes build/ghostfs/<TITLE>/layout.json and
-index.bin.
+index.bin, and meta.bin: the name and art the game selector shows
+(gfs_meta.py; the title's own sce_sys files first, then --name, --icon,
+--backdrop, then the PlayStation Store's with --fetch-art).
 
 Index (little endian): 128-byte header "GFS1", version 2, containers, entries,
 cap u64, total u64, names_off, names_size, prefix[16] @40, header_size @56,
@@ -42,6 +45,7 @@ import struct
 from pathlib import Path
 
 import gfs_catalog as gc
+import gfs_meta as gm
 import profiles as titles
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -235,6 +239,7 @@ def main() -> int:
     ap.add_argument("--prefix", help="container name prefix, unique per title (default: the profile's, else G + "
                     "the ID's digits)")
     ap.add_argument("--order", type=Path, help="open-order file to use instead of the profile's (capture_order.py)")
+    gm.add_args(ap)
     args = ap.parse_args()
     src = args.src
     if not (src / "eboot.bin").is_file():
@@ -252,6 +257,12 @@ def main() -> int:
     if why:
         raise SystemExit(f"prefix {prefix}: {why} (--prefix picks another)")
     info = pack(src, title, prefix, OUT_ROOT / title, prof, args.order)
+    try:
+        meta = gm.write_pack_meta(info, OUT_ROOT / title, prof, args.name, args.icon, args.backdrop,
+                                  args.fetch_art, args.art_dir, args.refetch)
+    except gm.ArtError as e:
+        raise SystemExit(str(e))
+    print(f"selector: {meta['summary'] if meta else gm.summary(gm.Meta(title, info.get('name', '')))}")
     cs = info["containers"]
     how = "own profile" if prof["_has_profile"] else "no profile: generic layout"
     print(f"{title} ({how}): {info['files']} files ({info['traced']} from the open order first), {info['dirs']} "
