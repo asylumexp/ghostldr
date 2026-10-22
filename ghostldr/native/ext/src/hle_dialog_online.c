@@ -160,6 +160,7 @@ static s32 hle_sceNpCommerceDialogGetResult(void *r)
 {
     s32 rc = dlg_check_result(&g_comm, r);
     if (rc == 0) {
+        memset(r, 0, 0x30); /* the whole result struct, as hle_np.c's copy does */
         WR32(r, 0, g_comm.result);
         *((u8 *)r + 4) = 0;
         WR64(r, 8, g_comm.user_data);
