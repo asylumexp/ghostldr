@@ -70,4 +70,6 @@ const struct ghost_api g_ghost_api = {
     .profile_has = profile_has,
     .tls_thread_exit = tls_thread_exit,
     .tls_thunk = tls_thunk,
+    .flex_map = hle_map_flex,
+    .flex_unmap = budget_flex_unmap,
 };

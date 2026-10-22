@@ -8,7 +8,11 @@ struct dm_ent {
     u64 addr, size;
     off_t phys;
 };
-static struct dm_ent g_dm[256];
+/* every block direct_alloc mapped; the table grows when full (anonymous mmap
+ * makes one block per large allocation of a title's malloc) */
+static struct dm_ent g_dm0[256];
+static struct dm_ent *volatile g_dm = g_dm0;
+static volatile u32 g_dm_cap = ARRAY_SIZE(g_dm0);
 static volatile int g_dm_lock;
 
 /* Keep the loader's own blocks out of the large free run the title's pools
@@ -22,6 +26,29 @@ static int alloc_phys(size_t size, off_t *phys)
     if (K.alloc_direct(top - 0x2000000, top, size, 0x4000, 0, phys) == 0)
         return 0;
     return K.alloc_direct(0, top, size, 0x4000, 0, phys);
+}
+
+/* a free entry (g_dm_lock held), growing the table 4x into memory of its own;
+ * the old table stays mapped, so lookups without the lock stay safe */
+static struct dm_ent *dm_free_slot(void)
+{
+    struct dm_ent *t = g_dm;
+    u32 cap = g_dm_cap;
+    for (u32 i = 0; i < cap; i++)
+        if (!t[i].addr)
+            return &t[i];
+    u64 bytes = ALIGN_UP((u64)cap * 4 * sizeof(*t), 0x4000);
+    off_t phys = 0;
+    void *a = NULL;
+    if (alloc_phys(bytes, &phys) != 0 || K.map_direct(&a, bytes, PROT_READ | PROT_WRITE, 0, phys, 0x4000) != 0)
+        return NULL;
+    struct dm_ent *n = a;
+    memset(n, 0, bytes);
+    memcpy(n, t, (u64)cap * sizeof(*t));
+    g_dm = n;
+    __atomic_store_n(&g_dm_cap, cap * 4, __ATOMIC_RELEASE);
+    logf("direct_alloc: block table grown to %u entries", cap * 4);
+    return &n[cap];
 }
 
 void *direct_alloc(size_t size, int prot, u64 fixed)
@@ -43,12 +70,12 @@ void *direct_alloc(size_t size, int prot, u64 fixed)
         return NULL;
     }
     spin_lock(&g_dm_lock);
-    for (u32 i = 0; i < ARRAY_SIZE(g_dm); i++)
-        if (!g_dm[i].addr) {
-            g_dm[i] = (struct dm_ent){(u64)addr, size, phys};
-            break;
-        }
+    struct dm_ent *e = dm_free_slot();
+    if (e)
+        *e = (struct dm_ent){(u64)addr, size, phys};
     spin_unlock(&g_dm_lock);
+    if (!e)
+        logf("direct_alloc(%lx): no room to record the block", size);
     return addr;
 }
 
@@ -56,7 +83,7 @@ void direct_free(void *addr)
 {
     int (*rel)(off_t, size_t) = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelReleaseDirectMemory");
     spin_lock(&g_dm_lock);
-    for (u32 i = 0; i < ARRAY_SIZE(g_dm); i++)
+    for (u32 i = 0; i < g_dm_cap; i++)
         if (g_dm[i].addr == (u64)addr) {
             struct dm_ent e = g_dm[i];
             g_dm[i].addr = 0;
@@ -72,16 +99,20 @@ void direct_free(void *addr)
 /* size of the block direct_alloc returned at `addr` (0: none starts there) */
 u64 direct_block_size(u64 addr)
 {
-    for (u32 i = 0; i < ARRAY_SIZE(g_dm); i++)
-        if (g_dm[i].addr == addr && addr)
-            return g_dm[i].size;
+    u32 cap = __atomic_load_n(&g_dm_cap, __ATOMIC_ACQUIRE); /* before the table: it grows first */
+    const struct dm_ent *t = g_dm;
+    for (u32 i = 0; i < cap; i++)
+        if (t[i].addr == addr && addr)
+            return t[i].size;
     return 0;
 }
 
 bool direct_is_ours(u64 addr)
 {
-    for (u32 i = 0; i < ARRAY_SIZE(g_dm); i++)
-        if (g_dm[i].addr && addr >= g_dm[i].addr && addr < g_dm[i].addr + g_dm[i].size)
+    u32 cap = __atomic_load_n(&g_dm_cap, __ATOMIC_ACQUIRE); /* before the table: it grows first */
+    const struct dm_ent *t = g_dm;
+    for (u32 i = 0; i < cap; i++)
+        if (t[i].addr && addr >= t[i].addr && addr < t[i].addr + t[i].size)
             return true;
     return false;
 }

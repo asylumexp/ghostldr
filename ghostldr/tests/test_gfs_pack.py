@@ -23,7 +23,7 @@ import capture_order as co  # noqa: E402
 import gfs_meta as gm  # noqa: E402
 import gfs_pack as gp  # noqa: E402
 import profiles  # noqa: E402
-from test_profiles import make_sfo  # noqa: E402
+from test_profiles import make_sfo, orbis_eboot  # noqa: E402
 
 
 def tree(root: Path, files: dict[str, int | bytes]) -> Path:
@@ -128,6 +128,25 @@ class HomebrewPackTests(unittest.TestCase):
         info = json.loads((out / "BREW00042/layout.json").read_text())
         self.assertEqual((info["prefix"], info["name"], info["version"]), ("G00042", "Some Homebrew", "01.02"))
         self.assertEqual(info["app_params"], [3, 5, 0, 0, 0])
+
+    def test_openorbis_homebrew_without_param_sfo(self) -> None:
+        # OpenOrbis homebrew: the title ID and display name come from the module name
+        src = tree(self.root / "oo", {"eboot.bin": orbis_eboot("hello_world"), "assets/fonts/a.ttf": 5000,
+                                      "sce_module/libc.prx": 3000})
+        out = self.pack_main(src)
+        info = json.loads((out / "HELLO_WORLD/layout.json").read_text())
+        self.assertEqual((info["title"], info["prefix"], info["name"]), ("HELLO_WORLD", "GHELLOWORLD", "hello_world"))
+        self.assertEqual(order_of(info), ["eboot.bin", "sce_module/libc.prx", "assets/fonts/a.ttf"])
+        self.assertEqual([c["blocks"] for c in info["containers"]], [gp.MIN_BLOCKS])   # 16 MiB, not 1 GiB
+
+    def test_container_sizes(self) -> None:
+        self.assertEqual(gp.data_blocks(0), gp.MIN_BLOCKS)
+        self.assertEqual(gp.data_blocks(992 << 20), gp.DATA_BLOCKS)                   # full: 1 GiB
+        self.assertEqual(gp.data_blocks(100 << 20), 3200 + 48 + 200)                   # data + 1.5 MiB + 1/16
+        src = tree(self.root / "big", {"eboot.bin": 1 << 20, "data/a.bin": 300 << 10})  # CAP is 1 MiB here
+        info = gp.pack(src, "BREW00009", "G00009", self.root / "big-out", profiles.load(None))
+        self.assertEqual([(c["size"], c["blocks"]) for c in info["containers"]],
+                         [(1 << 20, gp.MIN_BLOCKS), (300 << 10, gp.MIN_BLOCKS)])
 
     def test_bad_prefix_is_refused(self) -> None:
         src = tree(self.root / "p", {"eboot.bin": 50})

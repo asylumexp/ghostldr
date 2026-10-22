@@ -132,14 +132,37 @@ def hle_entries(text: str, tables_only: bool) -> list[tuple[str, str]]:
     return out
 
 
+# budget.c's plan-free memory calls ({"name", fn} in k_mem[]): resolved by NID
+# ahead of everything else when the title has no memory plan (the default)
+_PLAN_FREE_TABLE = re.compile(r"\bk_mem\s*\[\s*\]\s*=\s*\{(.*?)\n\s*\}\s*;", re.S)
+_PLAN_FREE_ENTRY = re.compile(r'\{\s*"(\w+)"\s*,\s*\w+\s*\}')
+
+
 def load_core_hle(native: Path) -> dict[tuple[str, str], str]:
-    """Core HLE entries: every struct hle_ent table in native/src/*.c."""
+    """Core HLE entries: every struct hle_ent table in native/src/*.c, and
+    budget.c's plan-free memory calls (libkernel)."""
 
     table: dict[tuple[str, str], str] = {}
     for path in sorted((native / "src").glob("*.c")):
-        for key in hle_entries(path.read_text(errors="replace"), tables_only=True):
+        text = path.read_text(errors="replace")
+        for key in hle_entries(text, tables_only=True):
             table.setdefault(key, path.name)
+        for body in _PLAN_FREE_TABLE.findall(strip_comments(text)):
+            for name in _PLAN_FREE_ENTRY.findall(body):
+                table.setdefault(("libkernel", name), f"{path.name} (plan-free)")
     return table
+
+
+def load_module_files(native: Path) -> dict[str, str]:
+    """resolve.c's k_module_files: modules a sysmodule file of another name
+    provides (libSceFreeType in libSceFreeTypeOl.sprx)."""
+
+    try:
+        text = strip_comments((native / "src/resolve.c").read_text(errors="replace"))
+    except OSError:
+        return {}
+    m = re.search(r"k_module_files\s*\[\s*\]\s*\[\s*2\s*\]\s*=\s*\{(.*?)\}\s*;", text, re.S)
+    return dict(re.findall(r'\{\s*"(\w+)"\s*,\s*"(\w+)"\s*\}', m.group(1))) if m else {}
 
 
 def load_ext_hle(paths: list[Path]) -> dict[tuple[str, str], str]:
@@ -213,6 +236,9 @@ def shares_prefix(base: str, modname: str) -> bool:
     return n >= 8 and base[:n] == modname[:n] and base != modname
 
 
+MODULE_FILES = load_module_files(ROOT / "ghostldr/native")
+
+
 def host_file(modname: str | None, needed: list[str], sysmods: dict[str, list[SysModule]]) -> tuple[str | None, str]:
     """The system file resolve.c would load for a module, and how it got it."""
 
@@ -227,6 +253,9 @@ def host_file(modname: str | None, needed: list[str], sysmods: dict[str, list[Sy
         base = dep[:-4] if dep.endswith(".prx") else dep
         if shares_prefix(base, modname) and app_visible(sysmods, base + ".sprx"):
             return base + ".sprx", f"DT_NEEDED {dep}"
+    alias = MODULE_FILES.get(modname)
+    if alias and app_visible(sysmods, alias + ".sprx"):
+        return alias + ".sprx", "resolve.c's module files"
     return None, "missing"
 
 

@@ -7,7 +7,7 @@ Everything here lives in SWRR's saved data for the signed-in user, in the SWRR r
 ## Limits that shape the names
 
 - **Directory names** are `char[32]`: at most 31 characters. ghostldr only generates `A`–`Z` and `0`–`9`. (SWRR's own saves, `SLUS-20268` and `SLES-50366`, contain `-`, so no generated name can collide with them.)
-- **Container size:** at most 32768 blocks of 32 KiB (1 GiB). A data container holds 992 MiB of the title, so a title has at most 96 data containers (`GFS_MAX_CONT`, about 93 GiB).
+- **Container size:** at most 32768 blocks of 32 KiB (1 GiB). A data container holds 992 MiB of the title, so a title has at most 96 data containers (`GFS_MAX_CONT`, about 93 GiB). The last data container (all of a small title, homebrew) is created with only the blocks its data needs, at least 512 (16 MiB).
 - **Mount points:** an app has 16, `/savedata0`–`/savedata15`. SWRR holds `/savedata0`. The core's ghostfs keeps at most 12 data containers mounted (least recently used goes first). `<prefix>SAVE` takes one more for the length of a save call. That leaves 2 spare, for the title's save directories later.
 
 ## Names

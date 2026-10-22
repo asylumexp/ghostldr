@@ -103,9 +103,38 @@ def param_sfo(src: Path | None) -> dict:
         return {}
 
 
+# fingerprints a toolchain gives every executable it builds: they name no build
+GENERIC_FINGERPRINTS = {
+    b"OPENORBIS-HOMEBREW\0\0".hex(): "OpenOrbis",   # create-fself, every version so far
+}
+
+
 def eboot_fingerprint(src: Path | None) -> str | None:
     """DT_SCE_FINGERPRINT of app0/eboot.bin (20 bytes, hex): names one build of
-    a title whatever tool made the dump.  None for a plain ELF without one."""
+    a title whatever tool made the dump.  None for a plain ELF without one, and
+    for a toolchain's generic one (homebrew_toolchain)."""
+    fp = _raw_fingerprint(src)
+    return None if fp in GENERIC_FINGERPRINTS else fp
+
+
+def homebrew_toolchain(src: Path | None) -> str | None:
+    """"OpenOrbis" for an eboot.bin built by the OpenOrbis toolchain (its
+    generic fingerprint), else None."""
+    return GENERIC_FINGERPRINTS.get(_raw_fingerprint(src) or "")
+
+
+def eboot_module_name(src: Path | None) -> str | None:
+    """The executable's module name (DT_SCE_MODULE_INFO): an OpenOrbis
+    build's project name."""
+    try:
+        import orbis_elf as oe
+        mod = oe.parse(Path(src) / "eboot.bin").module_info
+        return mod.name if mod and mod.name else None
+    except (OSError, ValueError, struct.error, ImportError, TypeError):
+        return None
+
+
+def _raw_fingerprint(src: Path | None) -> str | None:
     try:
         import orbis_elf as oe
         elf = oe.unwrap_self((Path(src) / "eboot.bin").read_bytes())
@@ -149,7 +178,8 @@ def known_titles() -> list[str]:
 
 def detect_title(src: Path | None) -> str | None:
     """The dump's title ID: param.sfo's TITLE_ID, else the profile whose eboot
-    fingerprint matches (dumps without sce_sys/param.sfo)."""
+    fingerprint matches (dumps without sce_sys/param.sfo), else for OpenOrbis
+    homebrew its module name (homebrew_title)."""
     t = normalize_title(str(param_sfo(src).get("TITLE_ID", "")))
     if t:
         return t
@@ -158,7 +188,17 @@ def detect_title(src: Path | None) -> str | None:
         for title in known_titles():
             if raw_profile(title).get("eboot", {}).get("fingerprint", "").lower() == fp:
                 return title
-    return None
+    return homebrew_title(src)
+
+
+def homebrew_title(src: Path | None) -> str | None:
+    """A title ID for OpenOrbis homebrew without a usable param.sfo: its
+    module name (the project's name), upper-cased, A-Z 0-9 _ - kept, at most
+    15 characters."""
+    if not src or not homebrew_toolchain(src):
+        return None
+    name = re.sub(r"[^A-Z0-9_-]", "", (eboot_module_name(src) or "").upper())[:15]
+    return normalize_title(name)
 
 
 # ---- loading ----
@@ -255,6 +295,9 @@ def validate(p: dict) -> list[str]:
         fp = p["eboot"].get("fingerprint", "")
         if fp and not re.fullmatch(r"[0-9a-fA-F]{40}", fp):
             e.append("eboot.fingerprint must be 40 hex digits (profiles.py detect prints it)")
+        elif fp and fp.lower() in GENERIC_FINGERPRINTS:
+            e.append(f"eboot.fingerprint: every {GENERIC_FINGERPRINTS[fp.lower()]} build has this one, so it names "
+                     "no build: leave it out")
     pk = p.get("pack", {})
     if _keys(e, "pack", pk, {"prefix", "order", "late", "exclude", "groups"}):
         if "prefix" in pk:
@@ -627,8 +670,11 @@ def main() -> int:
             return 0
         if args.cmd == "detect":
             sfo = param_sfo(args.src)
+            kit = homebrew_toolchain(args.src)
+            fp = f"{kit}'s generic one" if kit else eboot_fingerprint(args.src) or "-"
             print(f"title {detect_title(args.src) or '?'} (param.sfo TITLE_ID {sfo.get('TITLE_ID', '-')}, "
-                  f"APP_VER {sfo.get('APP_VER', '-')}), eboot fingerprint {eboot_fingerprint(args.src) or '-'}")
+                  f"APP_VER {sfo.get('APP_VER', '-')}), eboot fingerprint {fp}"
+                  + (f", module {eboot_module_name(args.src)}" if kit else ""))
             return 0
         print(json.dumps(starter(args.src), indent=1))
         return 0

@@ -31,6 +31,7 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define E_NOMEM 0x8002000c
 #define E_AGAIN 0x80020023
+#define E_INVAL 0x80020016
 #define DEFAULT_FLEX (448 * MiB)
 #define VIDEO_MIB 100
 #define COLD __attribute__((minsize, cold)) /* runs once per boot (or rarely): small beats fast */
@@ -166,15 +167,6 @@ COLD static bool modules_import(const char *prefix)
     return false;
 }
 
-COLD static bool modules_export(const char *lib)
-{
-    for (struct module *m = g_modules; m; m = m->next)
-        for (u32 i = 0; i < m->n_export_libs; i++)
-            if (strcmp(m->export_libs[i].name, lib) == 0)
-                return true;
-    return false;
-}
-
 COLD static int plan_free(struct module *m, const u8 *text)
 {
     const struct prof_hdr *h = profile_hdr();
@@ -192,9 +184,6 @@ COLD static int plan_free(struct module *m, const u8 *text)
     logf("budget: plan-free: %lu MiB free in %u holes (largest %lu) - %lu ghostldr - %ld video - %lu flex = "
          "%ld MiB direct memory, one run; Neo mode 0",
          total / MiB, nfree, nfree ? (free[largest].e - free[largest].s) / MiB : 0, reserve, video, flex / MiB, d);
-    if (!modules_export("libc"))
-        logf("budget: no bundled libc.prx: the title's malloc uses SWRR's own heap (about 38 MiB of flexible "
-             "memory)");
     if (d < (s64)h->min_mib) {
         logf("budget: %ld MiB of direct memory is below the profile's minimum of %u MiB: the title would fail "
              "later, so it is not started (it needs a memory plan or a smaller flex budget)", d, h->min_mib);
@@ -299,7 +288,7 @@ COLD static int b_sys_flex(void **addr, size_t len, int prot, int flags, const c
 }
 
 /* unmapping a whole flex-as-direct block gives its memory back */
-COLD NOINLINE static int b_munmap(void *addr, size_t len)
+COLD NOINLINE int budget_flex_unmap(void *addr, size_t len)
 {
     u64 size = direct_block_size((u64)addr);
     if (size && ALIGN_UP(len, 0x4000) == size) {
@@ -310,7 +299,72 @@ COLD NOINLINE static int b_munmap(void *addr, size_t len)
     return ((int (*)(void *, size_t))host_real("sceKernelMunmap"))(addr, len);
 }
 
-COLD static int b_posix_munmap(void *addr, size_t len) { return b_munmap(addr, len) == 0 ? 0 : -1; }
+COLD static int b_posix_munmap(void *addr, size_t len) { return budget_flex_unmap(addr, len) == 0 ? 0 : -1; }
+
+/* Anonymous mmap is flexible memory too (musl's malloc in OpenOrbis homebrew
+ * grows through it): flex-as-direct within F, zero-filled; PROT_NONE only
+ * reserves address space.  Other mappings go to the extension's mmap (a
+ * ghostfs file), else SWRR's. */
+COLD static void *mmap_next(const char *name)
+{
+    char nid[12];
+    compute_nid(name, nid);
+    u64 f = ext_hle_lookup("libkernel", nid, name);
+    return f ? (void *)f : host_real(name);
+}
+
+COLD static int anon_map(void **addr, size_t len, int prot, int flags)
+{
+    static u32 logged;
+    u64 size = ALIGN_UP(len, 0x4000);
+    void *a = (flags & MAP_FIXED) ? *addr : NULL;
+    int rc;
+    if (!len)
+        rc = (int)E_INVAL;
+    else if (prot == PROT_NONE)
+        rc = K.reserve_va(&a, size, flags & MAP_FIXED, 0x4000);
+    else if ((rc = hle_map_flex(&a, size, PROT_READ | PROT_WRITE, flags & MAP_FIXED)) == 0 &&
+             prot != (PROT_READ | PROT_WRITE))
+        K.mprotect(a, size, prot); /* zeroed by hle_map_flex */
+    if (rc || logged < 8) {
+        logged++;
+        logf("mmap anonymous %lx prot %x flags %x -> %x at %p (flexible memory used %lu of %lu MiB)", len, prot,
+             flags, rc, a, g_flex_used / MiB, g_flex_cap / MiB);
+    }
+    if (rc == 0)
+        *addr = a;
+    return rc;
+}
+
+COLD static void *b_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
+{
+    static void *(*next)(void *, size_t, int, int, int, off_t);
+    if (!(flags & MAP_ANON)) {
+        if (!next)
+            next = mmap_next("mmap");
+        return next ? next(addr, len, prot, flags, fd, off) : (void *)-1;
+    }
+    int rc = anon_map(&addr, len, prot, flags);
+    if (rc == 0)
+        return addr;
+    if (K.errno_fn)
+        *K.errno_fn() = rc & 0xFFFF;
+    return (void *)-1;
+}
+
+COLD static int b_kmmap(void *addr, size_t len, int prot, int flags, int fd, off_t off, void **res)
+{
+    static int (*next)(void *, size_t, int, int, int, off_t, void **);
+    if (!(flags & MAP_ANON)) {
+        if (!next)
+            next = mmap_next("sceKernelMmap");
+        return next ? next(addr, len, prot, flags, fd, off, res) : (int)E_INVAL;
+    }
+    int rc = anon_map(&addr, len, prot, flags);
+    if (rc == 0 && res)
+        *res = addr;
+    return rc;
+}
 
 static const struct {
     const char *name;
@@ -322,8 +376,10 @@ static const struct {
     {"sceKernelAvailableFlexibleMemorySize", b_avail_flex},
     {"sceKernelIsNeoMode", b_zero},
     {"sceKernelMapNamedSystemFlexibleMemory", b_sys_flex},
-    {"sceKernelMunmap", b_munmap},
+    {"sceKernelMunmap", budget_flex_unmap},
     {"munmap", b_posix_munmap},
+    {"mmap", b_mmap},
+    {"sceKernelMmap", b_kmmap},
 };
 
 COLD u64 budget_resolve(const char *nid)

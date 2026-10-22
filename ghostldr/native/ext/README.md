@@ -38,6 +38,8 @@ With the core at 208 KiB, the small area has 48 KiB. The extension gets up to 32
 | `ext/src/ext_main.c` | `ext_init`: walks the families (linker section `ext_families`), runs their `init`, merges policies and entries (computing NIDs from names), drops duplicates, and answers the core's `lookup` and `lib_policy`. |
 | `ext/src/selftest.c` | The family the core self-tests with (`libGhostldrExt`, alias `libGhostldrExtAlias`, which no title imports). |
 | `ext/include/hle_mode.h`, `ext/src/hle_mode.c` | Per-library modes (PASS, MASKED, VIRT, chosen once and logged) for libraries SWRR may refuse or already own, and the trampolines that route a call to the host or to a virtual body with the title's registers and stack untouched. No family of its own. |
+| `ext/src/hle_homebrew.c`, `ext/src/hle_tsd.c` | What OpenOrbis homebrew calls beyond the kernel families (docs/compatibility.md, Homebrew): stdout/stderr `writev` to the log, `TIOCGWINSZ`, `_exit`/`raise` logged, FreeType faces from ghostfs (`homebrew`); POSIX thread-specific data of its own, since SWRR's faults on a homebrew thread, with destructors run from the thread-exit hook (`tsd`). |
+| `ext/src/hle_libc_heap.c`, `ext/src/hle_libc_stdio.c` | For titles without a libc of their own (no title module exports `malloc`; both families are off otherwise): `libSceLibcInternal`'s malloc family in a heap in the title's flexible memory (`libc_heap`); its stdout/stderr calls to the log and read-only `FILE`/`DIR`s for ghostfs files (`libc_stdio`). |
 | `ext/src/hle_media.c`, `ext/src/hle_peripheral.c` | Capture, sharing and voice libraries (GameLiveStreaming, ScreenShot, ShareUtility, SharePlay, Remoteplay, VideoRecording, Companion, ContentExport, Voice, VoiceQoS, Audio3d, Rudp, RazorCpu) and peripherals (Camera, Move, MoveTracker, Hmd, VrTracker, Usbd, Keyboard, Mouse, SystemGesture). |
 | `ext/ext.ld` | Text at 0, data at the next 16 KiB boundary. |
 | `src/ext.c`, `src/ext_api.c` | The core side: fetch, verify, place, relocate, lookups, dlsym; the API table. |
@@ -45,6 +47,7 @@ With the core at 208 KiB, the small area has 48 KiB. The extension gets up to 32
 | `tools/mkext.py`, `tools/gen_nids.py`, `tools/elf64.py` | Build `ext.bin` from `ext.elf` and the name lists. |
 | `tools/check_ext.py` | Offline checks (see below). |
 | `tests/test_ext.py`, `tests/ext_host/` | Runs the core's real `ext.c`, `resolve.c`, `elf.c` and `nid.c` on the built blob as x86-64 (Rosetta on Apple silicon), stubs included. |
+| `tests/test_homebrew.py`, `tests/ext_native/` | Builds the homebrew families from source for the computer (no x86-64 needed) and runs them against a fake core; `ext_native/ext.h` registers each family with the harness. |
 
 ## Adding a family
 

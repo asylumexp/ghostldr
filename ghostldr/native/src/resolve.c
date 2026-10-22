@@ -52,11 +52,24 @@ int host_module_handle(const char *modname, u32 *out)
 
 /* Module names and file names differ for a few libraries (module
  * libSceAppContentUtil lives in libSceAppContent.sprx): fall back to the
- * importing module's DT_NEEDED entries that share a prefix. */
+ * importing module's DT_NEEDED entries that share a prefix, then to the
+ * files of the sysmodules that provide a module under another name. */
+static const char *const k_module_files[][2] = {
+    {"libSceFreeType", "libSceFreeTypeOl"}, /* SCE_SYSMODULE_FREETYPE_OL; OpenOrbis links "libSceFreeType" */
+};
+
 int host_module_handle_for(struct module *m, const char *modname, u32 *out)
 {
     if (host_module_handle(modname, out) == 0)
         return 0;
+    static bool said[ARRAY_SIZE(k_module_files)];
+    for (u32 i = 0; i < ARRAY_SIZE(k_module_files); i++)
+        if (strcmp(modname, k_module_files[i][0]) == 0 && host_module_handle(k_module_files[i][1], out) == 0) {
+            if (!said[i])
+                logf("host: module %s found as %s", modname, k_module_files[i][1]);
+            said[i] = true;
+            return 0;
+        }
     size_t ml = strlen(modname);
     for (u32 i = 0; i < m->n_needed_files; i++) {
         char base[96];

@@ -21,12 +21,12 @@ the boot group first, then the traced files, then the rest by its groups.
                                       [--name NAME] [--icon FILE] [--backdrop FILE] [--fetch-art]
 
 The title comes from --title, else sce_sys/param.sfo, else the profile whose
-eboot fingerprint matches.  Writes build/ghostfs/<TITLE>/layout.json and
-index.bin, and meta.bin: the name and art the game selector shows
-(gfs_meta.py; the title's own sce_sys files first, then --name, --icon,
---backdrop, then the PlayStation Store's with --fetch-art).  It prints
-whether the title's code fits the executable memory ghostldr has inside
-SWRR (tools/exec_fit.py).
+eboot fingerprint matches, else (OpenOrbis homebrew) the eboot's module name.
+Writes build/ghostfs/<TITLE>/layout.json and index.bin, and meta.bin: the
+name and art the game selector shows (gfs_meta.py; the title's own sce_sys
+files first, then --name, --icon, --backdrop, then the PlayStation Store's
+with --fetch-art).  It prints whether the title's code fits the executable
+memory ghostldr has inside SWRR (tools/exec_fit.py).
 
 Index (little endian): 128-byte header "GFS1", version 2, containers, entries,
 cap u64, total u64, names_off, names_size, prefix[16] @40, header_size @56,
@@ -58,8 +58,18 @@ DATA_BLOCKS = 32768                  # 32 KiB blocks: the 1 GiB maximum
 HEADER_SIZE = 128
 FLAG_DIR = 1
 FLAG_INCOMPLETE = 1                  # header flags: written before the data, cleared by the final index
+MIN_BLOCKS = 512                     # a container smaller than a full one: at least 16 MiB...
 SMALL = 64 << 10                     # heuristic: "small" files go right after the boot files...
 SMALL_BUDGET = 256 << 20             # ...as long as they stay under this together
+
+
+def data_blocks(size: int) -> int:
+    """Blocks of a data container holding `size` bytes: full ones get the 1 GiB
+    maximum, a partly filled one (the last; all of a small title) its data and
+    room for the filesystem (as the manager sizes save copies), at least
+    MIN_BLOCKS."""
+    needed = (size + 32767) // 32768
+    return min(DATA_BLOCKS, max(MIN_BLOCKS, needed + 48 + max(64, needed // 16)))
 
 
 def small_limit(files: dict[str, int]) -> int:
@@ -166,8 +176,8 @@ def pack(src: Path, title: str, prefix: str, out: Path, prof: dict | None = None
         offset += files[rel]
     total = offset
     count = (total + CAP - 1) // CAP
-    containers = [{"dir": f"{prefix}{i:03d}", "blocks": DATA_BLOCKS, "size": min(CAP, total - i * CAP), "pieces": []}
-                  for i in range(count)]
+    containers = [{"dir": f"{prefix}{i:03d}", "blocks": data_blocks(min(CAP, total - i * CAP)),
+                   "size": min(CAP, total - i * CAP), "pieces": []} for i in range(count)]
     for rel, off, size in layout:
         pos, end = off, off + size
         while pos < end:
@@ -203,7 +213,9 @@ def pack(src: Path, title: str, prefix: str, out: Path, prof: dict | None = None
         "total": total, "entries": len(packed), "index_blocks": idx_blocks, "containers": containers,
         "traced": traced, "files": len(files), "dirs": len(dirs),
         # for the catalogue entry and run.py (not part of the layout)
-        "name": prof.get("name") or str(sfo.get("TITLE", "")), "version": prof.get("version") or
+        "name": prof.get("name") or str(sfo.get("TITLE", "")) or (titles.eboot_module_name(src) or ""
+                                                                 if titles.homebrew_toolchain(src) else ""),
+        "version": prof.get("version") or
         str(sfo.get("APP_VER", "")), "app_params": titles.app_params(prof, src),
     }
     (out / "layout.json").write_text(json.dumps(info, indent=1))
@@ -251,6 +263,9 @@ def main() -> int:
     if not title:
         raise SystemExit("pass --title (e.g. CUSA12345): the dump's sce_sys/param.sfo has no usable TITLE_ID "
                          "and no profile matches its eboot")
+    if not args.title and title == titles.homebrew_title(src) and not titles.param_sfo(src).get("TITLE_ID"):
+        print(f"{title}: {titles.homebrew_toolchain(src)} homebrew without a usable param.sfo TITLE_ID: the title "
+              f"ID comes from its module name (--title picks another)")
     try:
         prof = titles.load(title)
     except titles.ProfileError as e:
@@ -260,8 +275,11 @@ def main() -> int:
     if why:
         raise SystemExit(f"prefix {prefix}: {why} (--prefix picks another)")
     info = pack(src, title, prefix, OUT_ROOT / title, prof, args.order)
+    name = args.name
+    if not name and not prof.get("name") and not titles.param_sfo(src).get("TITLE") and titles.homebrew_toolchain(src):
+        name = titles.eboot_module_name(src)   # OpenOrbis homebrew without a param.sfo: its module name
     try:
-        meta = gm.write_pack_meta(info, OUT_ROOT / title, prof, args.name, args.icon, args.backdrop,
+        meta = gm.write_pack_meta(info, OUT_ROOT / title, prof, name, args.icon, args.backdrop,
                                   args.fetch_art, args.art_dir, args.refetch)
     except gm.ArtError as e:
         raise SystemExit(str(e))

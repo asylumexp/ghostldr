@@ -7,6 +7,7 @@
  *
  *     profile_host BUNDLE plan|planfree|select FINGERPRINT_HEX|- [TITLE [OPTIONS]]
  *     profile_host BUNDLE rules FINGERPRINT_HEX|- TITLE FUNCTION LIB
+ *     profile_host BUNDLE mmap - TITLE        (plan-free anonymous mmap)
  *
  * OPTIONS: v = the title imports a video decoder, n = it has no proc param.
  */
@@ -75,18 +76,54 @@ void *host_dlsym(u32 handle, const char *name)
 
 void *host_real(const char *name) { return NULL; }
 u64 stub_alloc_code(const u8 *code, u32 len) { return 0x5000 + code[1]; } /* mov eax, idx: index in byte 1 */
-int hle_map_flex(void **addr, size_t len, int prot, int flags) { return 0; }
 int hle_alloc_direct(off_t start, off_t end, size_t len, size_t align, int type, off_t *out) { return 0; }
-u64 direct_block_size(u64 addr) { return 0; }
-void direct_free(void *addr) {}
+int budget_flex_gate(u64 len);
+void budget_flex_note(s64 len);
+
+/* flexible memory as hle.c maps it (gate, direct memory zeroed for a
+ * plan-free title, note), from a pool that starts out dirty */
+#define POOL (8UL << 20)
+static u8 g_pool[POOL] __attribute__((aligned(0x4000)));
+static u64 g_pool_used, g_last_block, g_last_size;
+int hle_map_flex(void **addr, size_t len, int prot, int flags)
+{
+    int rc = budget_flex_gate(len);
+    if (rc)
+        return rc;
+    if (g_pool_used + len > POOL)
+        return (int)0x8002000c;
+    if (!g_pool_used)
+        memset(g_pool, 0xA5, POOL);
+    *addr = g_pool + g_pool_used;
+    if (!profile_has(PF_PLAN))
+        memset(*addr, 0, ALIGN_UP(len, 0x4000));
+    g_last_block = (u64)*addr, g_last_size = ALIGN_UP(len, 0x4000);
+    g_pool_used += g_last_size;
+    budget_flex_note((s64)g_last_size);
+    return 0;
+}
+u64 direct_block_size(u64 addr) { return addr && addr == g_last_block ? g_last_size : 0; }
+void direct_free(void *addr) { g_last_block = 0; }
+static int g_errno;
+static int *fake_errno(void) { return &g_errno; }
+static int fake_reserve(void **addr, size_t len, int flags, size_t align)
+{
+    *addr = (void *)0x7000000000UL;
+    return 0;
+}
+static int g_mprotect;
+static int fake_mprotect(const void *addr, size_t len, int prot) { return g_mprotect = prot, 0; }
+static void *fake_file_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) { return (void *)0x1234000; }
+u64 ext_hle_lookup(const char *lib, const char *nid, const char *name)
+{
+    return strcmp(name, "mmap") == 0 ? (u64)fake_file_mmap : 0;
+}
 u64 c_rule(u32 idx, const u64 *args);
 #if defined(__APPLE__) && defined(__x86_64__)
 /* profile.c's rule_entry calls the ELF name; Mach-O prefixes C symbols with _ */
 __asm__(".globl c_rule\nc_rule: jmp _c_rule");
 #endif
 int budget_alloc_gate(u64 len);
-int budget_flex_gate(u64 len);
-void budget_flex_note(s64 len);
 u64 budget_resolve(const char *nid);
 void compute_nid(const char *name, char out[12]);
 
@@ -193,6 +230,44 @@ int main(int argc, char **argv)
         for (u32 i = 0; i < 16; i++)
             fmt(hex + 2 * i, 3, "%02x", out[i]);
         logf("rule stub %lx returns %lx, out %s", stub, ret, hex);
+        return 0;
+    }
+    if (strcmp(sc, "mmap") == 0) {
+        /* a title with no mem param (448 MiB of flexible memory), as OpenOrbis homebrew */
+        profile_select(argv[4]);
+        make_text("n");
+        profile_bind(NULL);
+        if (budget_patch_text(&g_main, g_text) != 0)
+            return 5;
+        K.errno_fn = fake_errno, K.reserve_va = fake_reserve, K.mprotect = fake_mprotect;
+        char nid[12];
+        compute_nid("mmap", nid);
+        void *(*mm)(void *, size_t, int, int, int, off_t) = (void *)budget_resolve(nid);
+        compute_nid("sceKernelMmap", nid);
+        int (*kmm)(void *, size_t, int, int, int, off_t, void **) = (void *)budget_resolve(nid);
+        compute_nid("munmap", nid);
+        int (*unmap)(void *, size_t) = (void *)budget_resolve(nid);
+        compute_nid("sceKernelAvailableFlexibleMemorySize", nid);
+        int (*avail)(size_t *) = (void *)budget_resolve(nid);
+        if (!mm || !kmm || !unmap || !avail)
+            return 6;
+        size_t left = 0;
+        u8 *p = mm(NULL, 0x5000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        bool zero = p != (void *)-1;
+        for (u32 i = 0; zero && i < 0x8000; i++)
+            zero = p[i] == 0;
+        avail(&left);
+        logf("anon %s, zeroed %d, flexible left %lu MiB", p == (void *)-1 ? "failed" : "mapped", zero, left / MiB);
+        logf("munmap %d", unmap(p, 0x5000));
+        avail(&left);
+        logf("after munmap flexible left %lu MiB", left / MiB);
+        void *big = mm(NULL, 449 * MiB, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        logf("too big %s errno %d", big == (void *)-1 ? "MAP_FAILED" : "mapped", g_errno);
+        void *res = NULL;
+        int rc = kmm(NULL, 0x4000, PROT_READ, MAP_PRIVATE | MAP_ANON, -1, 0, &res);
+        logf("sceKernelMmap read-only %x mapped %d mprotect %d", rc, res != NULL, g_mprotect);
+        logf("reserve %p", mm(NULL, 1UL << 30, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0));
+        logf("file %p", mm(NULL, 0x4000, PROT_READ, MAP_PRIVATE, 5, 0));
         return 0;
     }
     return 4;

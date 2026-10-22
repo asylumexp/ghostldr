@@ -123,6 +123,11 @@ struct ghost_api {
     u32 (*profile_has)(u32 mask); /* the title profile's PF_* flags (profile.c) */
     void (*tls_thread_exit)(void); /* a title thread ends: its TLS blocks go back (tls.c) */
     u64 (*tls_thunk)(u64 fn);      /* fn behind a stub that gives the calling thread its TLS block */
+    /* flexible memory as the title gets it (budget.c): mapped from direct
+     * memory within the title's flexible budget, and a whole mapping given
+     * back (its budget too) */
+    int (*flex_map)(void **addr, size_t len, int prot, int flags);
+    int (*flex_unmap)(void *addr, size_t len);
 };
 
 /* ---- what the extension registers and returns ---- */

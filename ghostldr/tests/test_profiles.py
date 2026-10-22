@@ -162,6 +162,30 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(profiles.default_prefix("HB-TEST_1"), "GHBTEST1")
         self.assertEqual(profiles.normalize_title(" lapy10010 "), "LAPY10010")
 
+    def test_openorbis_homebrew(self) -> None:
+        # every OpenOrbis build has the fingerprint "OPENORBIS-HOMEBREW": it names no build
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)
+            (src / "eboot.bin").write_bytes(orbis_eboot("hello_world"))
+            self.assertIsNone(profiles.eboot_fingerprint(src))
+            self.assertEqual(profiles.homebrew_toolchain(src), "OpenOrbis")
+            self.assertEqual(profiles.eboot_module_name(src), "hello_world")
+            self.assertEqual(profiles.detect_title(src), "HELLO_WORLD")        # no param.sfo: the module name
+            self.assertNotIn("eboot", profiles.starter(src))
+            (src / "eboot.bin").write_bytes(orbis_eboot("a very long name for a project"))
+            self.assertEqual(profiles.detect_title(src), "AVERYLONGNAMEFO")
+            (src / "sce_sys").mkdir()
+            (src / "sce_sys/param.sfo").write_bytes(make_sfo({"TITLE_ID": "BREW00083"}))
+            self.assertEqual(profiles.detect_title(src), "BREW00083")         # a usable param.sfo wins
+            (src / "sce_sys/param.sfo").write_bytes(make_sfo({"TITLE_ID": "not an id!"}))
+            self.assertEqual(profiles.detect_title(src), "AVERYLONGNAMEFO")
+            (src / "eboot.bin").write_bytes(orbis_eboot("game", bytes(range(1, 21))))
+            self.assertEqual(profiles.eboot_fingerprint(src), bytes(range(1, 21)).hex())
+            self.assertIsNone(profiles.homebrew_toolchain(src))
+            self.assertIsNone(profiles.detect_title(src))                     # not homebrew: no guess
+        bad = profiles.merge(profiles.raw_profile("default"), {"title": "HB1", "eboot": {"fingerprint": OPENORBIS_FP.hex()}})
+        self.assertTrue([e for e in profiles.validate(bad) if "names no build" in e])
+
     def test_param_sfo_title(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp)
@@ -177,6 +201,27 @@ class ProfileTests(unittest.TestCase):
             self.skipTest("needs the CUSA11456 dump in build/ghost/app0")
         self.assertEqual(profiles.eboot_fingerprint(src), GHOST_FP)
         self.assertEqual(profiles.detect_title(src), "CUSA11456")
+
+
+OPENORBIS_FP = b"OPENORBIS-HOMEBREW\0\0"
+
+
+def orbis_eboot(module: str, fingerprint: bytes = OPENORBIS_FP) -> bytes:
+    """An eboot.bin with nothing but what the tools read: PT_DYNAMIC and
+    PT_SCE_DYNLIBDATA with a string table, the module's name and a
+    fingerprint (an OpenOrbis build's, unless told otherwise)."""
+    import orbis_elf as oe
+    strtab = b"\0" + module.encode() + b"\0"
+    data = strtab.ljust(32, b"\0") + fingerprint
+    dyn = b"".join(struct.pack("<qQ", t, v) for t, v in (
+        (oe.DT_SCE_STRTAB, 0), (oe.DT_SCE_STRSZ, len(strtab)), (oe.DT_SCE_FINGERPRINT, 32),
+        (oe.DT_SCE_MODULE_INFO, 1 | 1 << 40 | 1 << 32), (oe.DT_NULL, 0)))
+    dyn_off, data_off = 64 + 2 * 56, 64 + 2 * 56 + len(dyn)
+    ehdr = b"\x7fELF\x02\x01\x01\x09" + bytes(8) + struct.pack("<HHIQQQIHHHHHH", oe.ET_SCE_DYNEXEC, 0x3E, 1, 0, 64,
+                                                                  0, 0, 64, 56, 2, 0, 0, 0)
+    phdrs = struct.pack("<IIQQQQQQ", oe.PT_DYNAMIC, 6, dyn_off, 0, 0, len(dyn), len(dyn), 8)
+    phdrs += struct.pack("<IIQQQQQQ", oe.PT_SCE_DYNLIBDATA, 4, data_off, 0, 0, len(data), 0, 16)
+    return ehdr + phdrs + dyn + data
 
 
 def make_sfo(entries: dict) -> bytes:
@@ -280,10 +325,22 @@ class CoreProfileTests(unittest.TestCase):
     def test_plan_free_homebrew(self) -> None:
         lines = self.run_host("planfree", "-", "BREW00042", "n")
         self.assertIn("patch rc 0 reported 4020 MiB, stream table 1120 MiB, cpu heap 384 MiB", lines)  # 448 flex
-        self.assertTrue([ln for ln in lines if "no bundled libc.prx" in ln])
         self.assertIn("neo 0, available direct 0: 0 + 4020 MiB", lines)
         lines = self.run_host("planfree", "-", "BREW00042", "nv")
         self.assertIn("neo 0, available direct 0: 0 + 3920 MiB", lines)
+
+    def test_plan_free_anonymous_mmap_is_flexible_memory(self) -> None:
+        # musl's malloc (OpenOrbis homebrew) grows through mmap(MAP_ANON): it gets the
+        # title's flexible budget (448 MiB without a mem param), zero-filled, never SWRR's
+        lines = self.run_host("mmap", "-", "BREW00042")
+        self.assertIn("anon mapped, zeroed 1, flexible left 447 MiB", lines)
+        self.assertIn("munmap 0", lines)
+        self.assertIn("after munmap flexible left 448 MiB", lines)
+        self.assertIn("too big MAP_FAILED errno 12", lines)                       # ENOMEM past the budget
+        self.assertIn("sceKernelMmap read-only 0 mapped 1 mprotect 1", lines)     # mapped RW, zeroed, then read-only
+        self.assertIn("reserve 0x7000000000", lines)                             # PROT_NONE: address space only
+        self.assertIn("file 0x1234000", lines)                                   # a file: the extension's mmap
+        self.assertTrue([ln for ln in lines if ln.startswith("mmap anonymous 1c100000 ") and " -> 8002000c " in ln])
 
     def test_hle_rule_fills_and_returns(self) -> None:
         lines = self.run_host("rules", "-", "CUSA22222", "sceNpGetState", "libSceNpManager")

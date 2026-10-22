@@ -2,7 +2,9 @@
 
 Runs PS4 game backups and homebrew inside *Star Wars Racer Revenge* (SWRR, PS4 US CUSA03474 or EU CUSA03492) on a PS5. It goes through [Luac0re](https://github.com/Gezine/Luac0re)'s userland JIT exploit, with no kernel exploit and no jailbreak.
 
-**Ghost of Tsushima (CUSA11456 v2.18) is the only title tested so far.** The loader itself is title-agnostic: what Ghost needs beyond the defaults is in its profile. Another title boots as far as its imports and memory needs allow; [docs/compatibility.md](docs/compatibility.md) is how to bring one up.
+**Ghost of Tsushima (CUSA11456 v2.18) is the only game tested so far.** The loader itself is title-agnostic: what Ghost needs beyond the defaults is in its profile. Another title boots as far as its imports and memory needs allow; [docs/compatibility.md](docs/compatibility.md) is how to bring one up.
+
+**Homebrew** built with the [OpenOrbis PS4 toolchain](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain) runs with no profile: its stdout goes to the log, its files come from the save containers, and it gets its framebuffers, the pad and its malloc memory. See [Homebrew](docs/compatibility.md#homebrew) for packing and booting it, and what doesn't work yet.
 
 [![Ghost of Tsushima gameplay running inside SWRR on a stock PS5 (click for the full video)](docs/media/ghostldr-demo-preview.gif)](docs/media/ghostldr-demo.mp4?raw=true)
 
@@ -29,7 +31,7 @@ To back up and restore saves from a browser, see [docs/manager.md](docs/manager.
 | `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the web manager, the save resigner, and the sandbox/save probes. |
 | `ghostldr/tools/` | **Build and analysis helpers:** ELF/NID parsing, the extension packer and its offline checker (`mkext.py`, `check_ext.py`), the import coverage report (`import_report.py`), disassembler, cross-references, Luac0re bundler. |
 | `ghostldr/data/` | Title profiles (`titles/<TITLE>.json` over `titles/default.json`), Ghost's file open order (file names only), and the system modules a PS4 app can load on a 13.60 PS5. |
-| `ghostldr/tests/` | Offline tests: the installer and the web manager against fake consoles (the manager's need a desktop Lua 5.3 or 5.4), profiles, the pack order, the core's profile, memory-budget and ghostfs code built for the computer, the extension loader run on the built `ext.bin`, the import report against a synthetic title, and the game selector (screenshots of its UI, and the built `selector.bin` against a fake console). |
+| `ghostldr/tests/` | Offline tests: the installer and the web manager against fake consoles (the manager's need a desktop Lua 5.3 or 5.4), profiles, the pack order, the core's profile, memory-budget, ghostfs and module-loading code built for the computer, the extension loader run on the built `ext.bin`, the homebrew families built for the computer, the import report against a synthetic title, and the game selector (screenshots of its UI, and the built `selector.bin` against a fake console). `tests/homebrew/` is a small test homebrew (needs the OpenOrbis toolchain). |
 | `host/payloads/` | **Dev-only console payloads** (ps5-payload-sdk), for a jailbroken console: launch or close SWRR (US or EU), unjail it, save watcher, ps, df, module dump. |
 | `tools/fetch_deps.sh` | Fetches the public build inputs (see Setup). |
 

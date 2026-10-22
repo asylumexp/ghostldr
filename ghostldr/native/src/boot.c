@@ -11,10 +11,14 @@ static void *ghost_main_thread(void *unused)
 {
     logf("main thread: starting %s", g_main_mod->name);
     modules_start_boot();
+    /* argv, then an empty environment and auxiliary vector: musl's
+     * __libc_start_main (OpenOrbis homebrew) reads on past argv's NULL */
     static struct {
         u64 argc;
-        const char *argv[3];
-    } args = {1, {"/app0/eboot.bin", NULL, NULL}};
+        const char *argv[2];
+        const char *envp[1];
+        u64 auxv[2];
+    } args = {1, {"/app0/eboot.bin", NULL}, {NULL}, {0, 0}};
     void (*entry)(void *, void (*)(void)) = (void *)(g_main_mod->base + g_main_mod->entry);
     logf("calling title entry %p", entry);
     entry(&args, ghost_exit_handler);

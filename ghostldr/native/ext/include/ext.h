@@ -104,6 +104,8 @@ extern const struct ghost_api *G HIDDEN;
 #define profile_has G->profile_has
 #define tls_thread_exit G->tls_thread_exit
 #define tls_thunk G->tls_thunk
+#define flex_map G->flex_map
+#define flex_unmap G->flex_unmap
 
 /* the extension's own tables (ext_main.c): the function registered for an
  * import of nid from lib (NULL: any library), and a library's policy */
