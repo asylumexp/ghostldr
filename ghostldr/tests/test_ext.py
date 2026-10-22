@@ -50,13 +50,14 @@ class ExtensionOnHost(unittest.TestCase):
             raise unittest.SkipTest("no way to build and run x86-64 code here")
         cls.blob = EXT.read_bytes()
         cls.crc = hex(zlib.crc32(cls.blob))
+        cls.sha = __import__("hashlib").sha256(cls.blob).hexdigest()
         abi, = struct.unpack_from("<I", cls.blob, 20)
         cls.tmp = tempfile.TemporaryDirectory()
         out = Path(cls.tmp.name) / "ext_host"
         flags = ["-O1", "-std=gnu11", "-fno-builtin", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Werror",
                  f"-I{ROOT / 'ghostldr/native/include'}", f"-DGHOST_ABI={abi}u"]
         core = ROOT / "ghostldr/native/src"
-        base = [(core / f"{name}.c", flags) for name in ("ext", "resolve", "elf", "nid")] + \
+        base = [(core / f"{name}.c", flags) for name in ("ext", "resolve", "elf", "nid", "sha256")] + \
             [(HERE / "ext_host/sys.c", ["-O1"])]
         # ext_host: the extension's boot; kernel_host: the loader, TLS and the kernel families too
         loader = [(core / f"{name}.c", flags) for name in ("loader", "modules")] + \
@@ -77,7 +78,7 @@ class ExtensionOnHost(unittest.TestCase):
         cls.tmp.cleanup()
 
     def run_host(self, mode: str, *extra: str) -> str:
-        p = subprocess.run([str(self.host), mode, str(EXT), self.crc, *extra], capture_output=True, text=True)
+        p = subprocess.run([str(self.host), mode, str(EXT), self.crc, self.sha, *extra], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertNotIn("FAILED", p.stdout)
         return p.stdout

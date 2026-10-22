@@ -7,9 +7,9 @@ The core has to fit in 240 KiB of the emulator's IPU JIT buffer, and the Lua pay
 
 ## Boot
 
-1. `run.py boot` serves `ext.bin` on **TCP 18195** (the UDP log is on 18194). It passes the blob's size and CRC-32 to `ghostldr.lua`.
-2. `ghostldr.lua` creates a TCP socket (through the compiler, as `create_socket` does for AF_INET) and connects it to the computer. It passes the socket, size and CRC in `struct boot_ctx` (`ext_fd`, `ext_size`, `ext_crc`). The Lua side never holds the blob.
-3. **`ext_fetch`** (`src/ext.c`) runs first in `ghost_boot`. It reads the blob and checks the CRC, the header, API version and ABI, the bounds, and the NID table order.
+1. `run.py boot` serves `ext.bin` on **TCP 18195** (the UDP log is on 18194). It passes the blob's size, CRC-32 and SHA-256 to `ghostldr.lua`.
+2. `ghostldr.lua` creates a TCP socket (through the compiler, as `create_socket` does for AF_INET) and connects it to the computer. It passes the socket, size and CRC in `struct boot_ctx` (`ext_fd`, `ext_size`, `ext_crc`), plus the first 24 bytes of the SHA-256 (`ext_sha256`, the last field before the profile slot). The Lua side never holds the blob.
+3. **`ext_fetch`** (`src/ext.c`) runs first in `ghost_boot`. It reads the blob and checks the CRC, then the SHA-256 pin when the context carries one (a CRC is a checksum, not a fingerprint: a swapped blob with a recomputed CRC passes the first screen and fails this one), then the header, API version and ABI, the bounds, and the NID table order.
    - The blob goes in app flexible memory, which the title never gets (its flexible requests become direct memory). The direct memory the loader and the memory plan see is therefore laid out as before. Direct memory is used only if the flexible map fails.
    - **Without a valid extension the boot stops here** (`ghost_boot` returns -7). Nothing has touched the title or SWRR's state yet, so you can fix it and send `run.py boot` again in the same SWRR session. Without the NID table nothing could be resolved by name, so there is no fallback.
 4. **`ext_start`** runs once the title's modules are placed, **before the first relocation**, so every import binds with the extension in place. Module starts run later still.

@@ -8,7 +8,9 @@
  * extension writing to its own text faults as it would on the console.
  * test_ext.py builds and drives it:
  *
- *     ext_host MODE EXT_BIN CRC [NID_FILE]
+ *     ext_host MODE EXT_BIN CRC SHA256|- [NID_FILE]
+ *     SHA256 pins the blob as run.py does (GHOSTLDR_EXT_SHA256); "-"
+ *     leaves the boot context's pin bytes zero, the unpinned path.
  *     MODE: small | jit | tiny (small area too small: falls back to a JIT
  *           block) | badcrc | short (the server sends fewer bytes) | nosock
  *           | resolve (imports bound through the self-test family)
@@ -17,6 +19,7 @@
  * NAME" for each; exits 0 when every step of the mode behaved as expected.
  */
 #include "ghost_api.h"
+#include <stdio.h> /* sscanf: the SHA256 argument */
 
 /* sys.c: the host OS, kept out of this file's ghost.h world */
 void *sys_map(u64 size);
@@ -254,8 +257,8 @@ static void lookup_nids(const char *path)
 
 int main(int argc, char **argv)
 {
-    if (argc < 4) {
-        logf("usage: ext_host MODE EXT_BIN CRC [NID_FILE]");
+    if (argc < 5) {
+        logf("usage: ext_host MODE EXT_BIN CRC SHA256|- [NID_FILE]");
         return 2;
     }
     const char *mode = argv[1];
@@ -263,6 +266,16 @@ int main(int argc, char **argv)
     ctx.magic = BOOT_MAGIC;
     ctx.size = sizeof(ctx);
     ctx.ext_crc = sys_strtoul(argv[3]);
+    if (strcmp(argv[4], "-") != 0) {   /* the pin: 24 digest bytes as 48 hex chars */
+        for (int i = 0; i < (int)sizeof(ctx.ext_sha256); i++) {
+            unsigned v = 0;
+            if (sscanf(argv[4] + 2 * i, "%2x", &v) != 1) {
+                logf("ext_host: bad SHA256 argument");
+                return 2;
+            }
+            ctx.ext_sha256[i] = (u8)v;
+        }
+    }
     g_ctx = &ctx;
     K.read = k_read;
     K.close = k_close;
@@ -328,8 +341,8 @@ int main(int argc, char **argv)
     expect(pol && (pol->flags & EXT_LIB_NO_HOST) && !ext_lib_policy("libkernel"), "library policy by alias");
     if (strcmp(mode, "resolve") == 0)
         resolve_tests();
-    if (argc > 4)
-        lookup_nids(argv[4]);
+    if (argc > 5)
+        lookup_nids(argv[5]);
     ext_boot_done();
     expect(nid_to_name("1jfXLRVzisc") == NULL, "NID table freed after boot");
     expect(g_flex_maps == g_flex_unmaps, "flexible memory returned");

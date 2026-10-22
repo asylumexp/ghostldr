@@ -8,6 +8,8 @@
 --                       this script adds 8192 on a PS4 (Luac0re's PLATFORM)
 --   GHOSTLDR_APP_ROOT   path of the title's app0 directory
 --   GHOSTLDR_EXT_PORT / GHOSTLDR_EXT_SIZE / GHOSTLDR_EXT_CRC
+--   GHOSTLDR_EXT_SHA256 (the blob's SHA-256 hex; the core pins its
+--   first 24 bytes against the served blob after the CRC screen)
 --                       the runtime extension (build/ghostldr/ext.bin, with the
 --                       NID table): run.py serves it over TCP on the log IP;
 --                       size 0 = none.  This script only connects the socket:
@@ -142,7 +144,7 @@ local fields = {
 local ctx = malloc(0x200)
 for i = 0, 0x1F8, 8 do write64(ctx + i, 0) end
 for i, v in ipairs(fields) do write64(ctx + (i - 1) * 8, v) end
-write64(ctx + 8, #fields * 8 + 8 * 8 + 7 * 8)    -- fields, reserved[8], ext_fd/size/crc, sel_fd/size/crc, fw
+write64(ctx + 8, #fields * 8 + 8 * 8 + 7 * 8 + 3 * 8)    -- fields, reserved[8], ext_fd/size/crc, sel_fd/size/crc, fw, ext SHA-256 pin[24]
 local app_root = malloc(#GHOSTLDR_APP_ROOT + 1)
 write_string(app_root, GHOSTLDR_APP_ROOT)
 write64(ctx + (#fields - 2) * 8, app_root)
@@ -157,12 +159,19 @@ write64(ctx + #fields * 8 + 0x38, GHOSTLDR_CPU_HEAP_MIB or 0)
 write64(ctx + #fields * 8 + 0x40, ext_fd)
 write64(ctx + #fields * 8 + 0x48, GHOSTLDR_EXT_SIZE or 0)
 write64(ctx + #fields * 8 + 0x50, GHOSTLDR_EXT_CRC or 0)
--- the selector's fields and fw end at +0x78: they must stay below the profile slot (0x1F8)
-if #fields * 8 + 0x78 > 0x1F8 then fail("the boot context reaches the profile slot") end
+-- the selector's fields and fw end at +0x78, the ext SHA-256 pin fills
+-- +0x78..+0x90: both must stay below the profile slot (0x1F8)
+if #fields * 8 + 0x90 > 0x1F8 then fail("the boot context reaches the profile slot") end
 write64(ctx + #fields * 8 + 0x58, sel_fd)
 write64(ctx + #fields * 8 + 0x60, GHOSTLDR_SEL_SIZE or 0)
 write64(ctx + #fields * 8 + 0x68, GHOSTLDR_SEL_CRC or 0)
 write64(ctx + #fields * 8 + 0x70, fw_number())   -- "12.02" -> 0x1202
+-- the extension's SHA-256 pin (first 24 bytes of the digest): ext.c checks
+-- the served blob against it after the CRC-32 screen; absent or short
+-- leaves zero bytes, which the core reads as "not pinned"
+if GHOSTLDR_EXT_SHA256 and #GHOSTLDR_EXT_SHA256 >= 48 then
+    write_buffer(ctx + #fields * 8 + 0x78, hex_to_binary(GHOSTLDR_EXT_SHA256:sub(1, 48)))
+end
 -- title profiles: blobs ended by 8 zero bytes, pointed to by the context's last
 -- u64 (profile.c PROFILE_SLOT); without them the core uses its generic defaults
 if GHOSTLDR_PROFILE_HEX and #GHOSTLDR_PROFILE_HEX > 0 then
