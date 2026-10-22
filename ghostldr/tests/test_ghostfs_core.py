@@ -8,6 +8,7 @@ sceSaveDataMount.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -68,14 +69,17 @@ class GhostfsCoreTests(unittest.TestCase):
                              int(info["layout_id"], 16), info["total"], len(info["containers"]), flags))
         self.files[f"{gc.CATALOG}/{gc.CATALOG_FILE}"] = gc.build(cat)
 
-    def boot(self, want: str = "-") -> list[str]:
+    def boot(self, want: str = "-", select: bool = False, choice: str = "") -> list[str]:
+        """choice: what the game selector picks when the core asks it ("": no selector);
+        select: run.py --select."""
         args = []
         for i, (name, data) in enumerate(self.files.items()):
             path = self.root / f"f{i}.bin"
             path.write_bytes(data)
             args.append(f"{name}={path}")
+        env = dict(os.environ, SEL_FLAG="1" if select else "0", SEL_CHOICE=choice)
         out = subprocess.run([str(self.exe), want, "/app0/eboot.bin", *args], capture_output=True, text=True,
-                             timeout=60)
+                             timeout=60, env=env)
         self.assertEqual(out.returncode, 0, out.stderr)
         return out.stdout.splitlines()
 
@@ -110,12 +114,30 @@ class GhostfsCoreTests(unittest.TestCase):
         self.install("CUSA11111")
         self.install("CUSA22222")
         self.catalogue(("CUSA11111", 0, None), ("CUSA22222", 0, None))
-        lines = self.boot()
+        lines = self.boot()                                       # the selector isn't there
         self.assertIn("ghostfs: installed: CUSA11111 (name of CUSA11111), CUSA22222 (name of CUSA22222)", lines)
+        self.assertIn("deferred to the game selector; it chose nothing", lines)
         self.assertIn("ghostfs: several titles: pick one with run.py boot --title TITLE", lines)
         self.assertTrue([ln for ln in lines if ln.startswith("init -1")], lines)
-        self.assert_booted(self.boot("CUSA22222"), "CUSA22222")
+        lines = self.boot(choice="CUSA11111")                      # the selector picks
+        self.assertIn("deferred to the game selector; it chose CUSA11111", lines)
+        self.assert_booted(lines, "CUSA11111")
+        self.assert_booted(self.boot("CUSA22222"), "CUSA22222")     # --title: no selector
         self.assert_booted(self.boot("CUSA11111"), "CUSA11111")
+
+    def test_select_shows_the_selector_anyway(self) -> None:
+        self.install("CUSA11111")
+        self.install("CUSA22222")
+        self.catalogue(("CUSA11111", 0, None), ("CUSA22222", gc.INCOMPLETE, None))
+        lines = self.boot()                                       # one complete title: no selector
+        self.assertNotIn("deferred", " ".join(lines))
+        self.assert_booted(lines, "CUSA11111")
+        lines = self.boot(select=True, choice="CUSA11111")         # run.py --select
+        self.assertIn("deferred to the game selector; it chose CUSA11111", lines)
+        self.assert_booted(lines, "CUSA11111")
+        lines = self.boot("CUSA11111", select=True)                # --select wins over --title; no selector served
+        self.assertIn("deferred to the game selector; it chose nothing", lines)
+        self.assert_booted(lines, "CUSA11111")                     # falls back to --title
 
     def test_incomplete_titles_never_boot(self) -> None:
         self.install("CUSA11111")

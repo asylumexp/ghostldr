@@ -96,7 +96,7 @@ The data lands in SWRR's saved data under the signed-in user, as 58 entries: `GH
 
 The first boot takes a minute or two. On a new save Ghost goes through brightness, audio output, difficulty and experience (keep Standard: only English audio is installed), then the opening. Its saves go into a separate entry, `GHOSTSAVE`, and SWRR's own save is never touched.
 
-The computer logs the session to `build/ghostldr/run.log`. That file is what to look at, or share, if something goes wrong.
+`run.py` keeps printing the console's log until you press Ctrl+C; stopping it doesn't stop the game. The session is also written to `build/ghostldr/run.log`. That file is what to look at, or share, if something goes wrong.
 
 **Every later session:** close SWRR, start it again, open HALL OF FAME, and run the same `run.py` command. The install is only needed once per PSN user.
 

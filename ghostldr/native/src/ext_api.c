@@ -63,4 +63,11 @@ const struct ghost_api g_ghost_api = {
     .gfs_slot_release = gfs_slot_release,
     .gfs_title = gfs_title,
     .remap_hook_add = remap_hook_add,
+    .module_load_runtime = module_load_runtime,
+    .module_start = module_start,
+    .thread_dtors = &g_thread_dtors,
+    .ghost_thread_start = ghost_thread_start,
+    .profile_has = profile_has,
+    .tls_thread_exit = tls_thread_exit,
+    .tls_thunk = tls_thunk,
 };

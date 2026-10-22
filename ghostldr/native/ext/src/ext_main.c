@@ -71,6 +71,9 @@ void ext_sysmodule_failed(u32 id, s32 rc)
         k++;
     }
 }
+/* for the families (dlsym answers from these) */
+u64 ext_find(const char *lib, const char *nid) { return ext_lookup(lib, nid); }
+const struct ext_lib *ext_find_policy(const char *lib) { return policy_of(lib); }
 
 static bool valid_nid(const char *nid)
 {

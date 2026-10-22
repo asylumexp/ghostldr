@@ -14,7 +14,8 @@ ghostldr's resolver (native/src/resolve.c) would bind it, in its order:
 
 Inputs: the NID name lists (build/nid/known_names.txt), the HLE tables, the
 system module list (ghostldr/data/ps5_ps4_sysmodules.txt; only
-/system/common/lib is visible to a PS4 app), and boot.c's BUNDLED list. HOST
+/system/common/lib is visible to a PS4 app), and the sce_module files the boot
+loads (gen_nids.boot_modules; a BUNDLED[] list in boot.c if one exists). HOST
 only means the module file exists; whether it exports the name isn't checked.
 
 Extension HLE entries are read from C files ({"libX", "name", fn} or
@@ -534,7 +535,7 @@ def classify(imp: Import, needed: list[str], core: dict, ext: dict,
         if imp.library in tm.export_libs and imp.nid in tm.exports:
             imp.cls, imp.provider = "TITLE", tm.file
             if tm.loaded_by_boot is False:
-                imp.reason = f"{tm.file} isn't in boot.c's BUNDLED list"
+                imp.reason = f"{tm.file} isn't loaded at boot (no import needs it)"
             return
     if not imp.library:
         imp.cls, imp.reason = "UNRESOLVED", "unknown library id"
@@ -876,7 +877,11 @@ def main(argv: list[str] | None = None) -> int:
     shad = ShadPS4(args.shadps4) if (args.shadps4 / "src" / "core" / "libraries").is_dir() else None
     if shad is None:
         print(f"note: no shadPS4 tree at {args.shadps4}; skipping its column", file=sys.stderr)
-    rep = build_report(args.app0, names, core, ext, sysmods, shad, load_bundled(args.native))
+    bundled = load_bundled(args.native)
+    if bundled is None and (args.app0 / "eboot.bin").is_file():
+        import gen_nids  # the boot's own choice (modules.c): Fios2, libc and what the imports need
+        bundled = [f.name for f in gen_nids.boot_modules(args.app0)]
+    rep = build_report(args.app0, names, core, ext, sysmods, shad, bundled)
     md = render_markdown(rep, args.title)
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)

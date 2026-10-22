@@ -109,6 +109,7 @@ python3 ghostldr/host/profiles.py show CUSA12345
 | `memory.min_mib` | 1024 | Plan-free: stop the boot below this direct size. |
 | `memory.plan` | | See [Memory plans](#memory-plans). |
 | `hle` | none | [HLE rules](#6-hle-rules). |
+| `tls_sites` | none | `{"eboot.bin": "<TITLE>-tls-eboot.txt"}`: the module's thread-pointer loads (`mov`/`add r64, fs:[0]`) as found by `ghostldr/tools/tls_sites.py MODULE --out FILE`, which disassembles the functions `.eh_frame` describes. The core patches exactly these, each checked first, instead of scanning the whole text (rodata included). Bound to the build: needs `eboot.fingerprint`. The tool also lists fs: accesses it cannot patch. |
 
 ### Memory plans
 

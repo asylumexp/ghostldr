@@ -67,153 +67,6 @@ const char *remap_path(const char *path, char *buf, size_t size)
     return s ? s : path;
 }
 
-#define REAL(name) ((u64(*)())host_real(name))
-
-/* fds of movie files: their reads are logged (splash playback diagnosis) */
-static volatile int g_watch_fd[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-
-static bool watched(int fd)
-{
-    for (u32 i = 0; i < ARRAY_SIZE(g_watch_fd); i++)
-        if (g_watch_fd[i] == fd)
-            return true;
-    return false;
-}
-
-static s64 hle_read(int fd, void *buf, size_t len)
-{
-    if (gfs_owns(fd))
-        return gfs_read(fd, buf, len);
-    s64 r = ((s64(*)(int, void *, size_t))host_real("sceKernelRead"))(fd, buf, len);
-    if (watched(fd))
-        logf("read(fd %x, %lx) -> %lx", fd, len, (u64)r);
-    return r;
-}
-
-static s64 hle_pread(int fd, void *buf, size_t len, s64 off)
-{
-    if (gfs_owns(fd))
-        return gfs_pread(fd, buf, len, off);
-    s64 r = ((s64(*)(int, void *, size_t, s64))host_real("sceKernelPread"))(fd, buf, len, off);
-    if (watched(fd))
-        logf("pread(fd %x, %lx @ %lx) -> %lx", fd, len, (u64)off, (u64)r);
-    return r;
-}
-
-static int hle_close(int fd)
-{
-    if (gfs_close(fd) == 0)
-        return 0;
-    if (watched(fd)) {
-        logf("close(fd %x)", fd);
-        for (u32 i = 0; i < ARRAY_SIZE(g_watch_fd); i++)
-            if (g_watch_fd[i] == fd)
-                g_watch_fd[i] = -1;
-    }
-    return ((int (*)(int))host_real("sceKernelClose"))(fd);
-}
-
-static int hle_open(const char *path, int flags, int mode)
-{
-    int gfd;
-    if (gfs_open(path, flags, &gfd) == 0)
-        return gfd;
-    char buf[512];
-    const char *p = remap_path(path, buf, sizeof(buf));
-    int fd = ((int (*)(const char *, int, int))host_real("sceKernelOpen"))(p, flags, mode);
-    static u32 opens;
-    if (fd < 0 || profile_has(PF_TRACE_OPENS) || __atomic_fetch_add(&opens, 1, __ATOMIC_RELAXED) < 400)
-        logf("open %s (%s) flags %x -> %x", path, p, flags, fd);
-    if (fd >= 0 && strstr(path, "movies/"))
-        for (u32 i = 0; i < ARRAY_SIZE(g_watch_fd); i++)
-            if (g_watch_fd[i] < 0) {
-                g_watch_fd[i] = fd;
-                break;
-            }
-    return fd;
-}
-
-static int hle_stat(const char *path, void *st)
-{
-    int grc;
-    if (gfs_stat(path, st, &grc) == 0)
-        return grc;
-    char buf[512];
-    return ((int (*)(const char *, void *))host_real("sceKernelStat"))(remap_path(path, buf, sizeof(buf)), st);
-}
-
-static s64 hle_lseek(int fd, s64 off, int whence)
-{
-    if (gfs_owns(fd))
-        return gfs_lseek(fd, off, whence);
-    return ((s64(*)(int, s64, int))host_real("sceKernelLseek"))(fd, off, whence);
-}
-
-static int hle_fstat(int fd, void *st)
-{
-    if (gfs_owns(fd))
-        return gfs_fstat(fd, st);
-    return ((int (*)(int, void *))host_real("sceKernelFstat"))(fd, st);
-}
-
-static int hle_getdents(int fd, void *buf, int n)
-{
-    if (gfs_owns(fd))
-        return gfs_getdents(fd, buf, n);
-    return ((int (*)(int, void *, int))host_real("sceKernelGetdents"))(fd, buf, n);
-}
-
-/* libSceFios2's directory listing */
-static int hle_getdirentries(int fd, void *buf, int n, s64 *basep)
-{
-    if (gfs_owns(fd)) {
-        if (basep)
-            *basep = gfs_lseek(fd, 0, 1);
-        return gfs_getdents(fd, buf, n);
-    }
-    return ((int (*)(int, void *, int, s64 *))host_real("sceKernelGetdirentries"))(fd, buf, n, basep);
-}
-
-/* libc's fread() path */
-static s64 hle_posix_read(int fd, void *buf, size_t n)
-{
-    if (gfs_owns(fd)) {
-        s64 r = gfs_read(fd, buf, n);
-        return r < 0 ? -1 : r;
-    }
-    return ((s64(*)(int, void *, size_t))host_real("_read"))(fd, buf, n);
-}
-
-#define PATH1(fn, real, T)                                                          \
-    static int fn(const char *path, T a)                                            \
-    {                                                                               \
-        char buf[512];                                                              \
-        return ((int (*)(const char *, T))host_real(real))(remap_path(path, buf, sizeof(buf)), a); \
-    }
-PATH1(hle_mkdir, "sceKernelMkdir", int)
-PATH1(hle_chmod, "sceKernelChmod", int)
-PATH1(hle_truncate, "sceKernelTruncate", off_t)
-PATH1(hle_utimes, "sceKernelUtimes", const void *)
-
-static int hle_unlink(const char *path)
-{
-    char buf[512];
-    return ((int (*)(const char *))host_real("sceKernelUnlink"))(remap_path(path, buf, sizeof(buf)));
-}
-
-static int hle_rmdir(const char *path)
-{
-    char buf[512];
-    return ((int (*)(const char *))host_real("sceKernelRmdir"))(remap_path(path, buf, sizeof(buf)));
-}
-
-static int hle_rename(const char *from, const char *to)
-{
-    char a[512], b[512];
-    return ((int (*)(const char *, const char *))host_real("sceKernelRename"))(
-        remap_path(from, a, sizeof(a)), remap_path(to, b, sizeof(b)));
-}
-
 static void *hle_get_proc_param(void)
 {
     struct module *m = ghost_main_module();
@@ -222,111 +75,11 @@ static void *hle_get_proc_param(void)
 
 static int hle_zero(void) { return 0; }
 
-static int hle_dlsym(u32 handle, const char *name, void **out)
-{
-    for (struct module *m = g_modules; m; m = m->next) {
-        if (m->fake_handle == handle) {
-            /* NID of the plain name */
-            extern void compute_nid(const char *name, char out[12]);
-            char nid[12];
-            compute_nid(name, nid);
-            u64 a = module_export(m, nid);
-            *out = (void *)a;
-            logf("dlsym(%s, %s) -> %lx", m->name, name, a);
-            return a ? 0 : -1;
-        }
-    }
-    /* the extension's functions first; its no-host-fallback libraries are
-     * refused rather than handed SWRR's */
-    int erc = ext_dlsym(handle, name, out);
-    if (erc <= 0) {
-        logf("dlsym(host %x, %s) -> %s %p", handle, name, erc == 0 ? "extension" : "refused", *out);
-        return erc == 0 ? 0 : (int)0x80020002; /* ENOENT */
-    }
-    int rc = (int)call_gadget6(g_ctx->dlsym, handle, (u64)name, (u64)out, 0, 0, 0);
-    logf("dlsym(host %x, %s) -> %d %p", handle, name, rc, *out);
-    return rc;
-}
-
-static int hle_load_start_module(const char *path, size_t argc, const void *argv, u32 flags, void *opt,
-                                 int *res)
-{
-    const char *base = strrchr_c(path, '/');
-    base = base ? base + 1 : path;
-    for (struct module *m = g_modules; m; m = m->next)
-        if (strcmp(m->name, base) == 0) {
-            logf("LoadStartModule(%s) -> ours %x", path, m->fake_handle);
-            if (res)
-                *res = 0;
-            return (int)m->fake_handle;
-        }
-    char buf[512];
-    const char *p = remap_path(path, buf, sizeof(buf));
-    int h = (int)call_gadget6((u64)K.load_start_module, (u64)p, argc, (u64)argv, flags, (u64)opt, (u64)res);
-    logf("LoadStartModule(%s) -> host %x", path, h);
-    return h;
-}
-
-static int hle_sysmodule_load(u32 id)
-{
-    int rc = ((int (*)(u32))host_real("sceSysmoduleLoadModule"))(id);
-    logf("sceSysmoduleLoadModule(%x) -> %x", id, rc);
-    if (rc < 0)
-        ext_note_sysmodule(id, rc);
-    return rc < 0 ? 0 : rc;
-}
-
-static int hle_sysmodule_load_internal_arg(u32 id, size_t argc, const void *argv, u32 flags, int *res)
-{
-    int rc = ((int (*)(u32, size_t, const void *, u32, int *))host_real(
-        "sceSysmoduleLoadModuleInternalWithArg"))(id, argc, argv, flags, res);
-    logf("sceSysmoduleLoadModuleInternalWithArg(%x) -> %x", id, rc);
-    if (rc < 0) {
-        ext_note_sysmodule(id, rc);
-        if (res)
-            *res = 0;
-        return 0;
-    }
-    return rc;
-}
-
-static int hle_sysmodule_unload(u32 id)
-{
-    logf("sceSysmoduleUnloadModule(%x) ignored", id);
-    return 0;
-}
-
 static int hle_discmap_on_hdd(const char *path, u64 off, u64 size, int *ret)
 {
     if (ret)
         *ret = 1;
     return 0;
-}
-
-/* Ghost's stdout/stderr (printf, puts, asserts) goes to the UDP log, one
- * line per log record. */
-static volatile int g_out_lock;
-static char g_out_line[512];
-static u32 g_out_len;
-
-static s64 hle_write(int fd, const void *buf, size_t len)
-{
-    if (fd != 1 && fd != 2)
-        return ((s64(*)(int, const void *, size_t))host_real("_write"))(fd, buf, len);
-    const char *c = buf;
-    spin_lock(&g_out_lock);
-    for (size_t i = 0; i < len; i++) {
-        if (c[i] == '\n' || g_out_len == sizeof(g_out_line) - 1) {
-            g_out_line[g_out_len] = 0;
-            logf("ghost%d: %s", fd, g_out_line);
-            g_out_len = 0;
-            if (c[i] == '\n')
-                continue;
-        }
-        g_out_line[g_out_len++] = c[i];
-    }
-    spin_unlock(&g_out_lock);
-    return (s64)len;
 }
 
 int budget_alloc_gate(u64 len);
@@ -533,7 +286,6 @@ static size_t hle_direct_size(void)
     return g_reported_dmem ? g_reported_dmem : v;
 }
 
-static int hle_is_prospero(void) { return 0; } /* present as a PS4 */
 static int hle_one(void) { return 1; }
 
 static int hle_open_psid(u8 *out)
@@ -563,35 +315,8 @@ static const struct hle_ent g_hle[] = {
     {LK, "__tls_get_addr", tls_get_addr},
     {LK, "scePthreadCreate", ghost_thread_create},
     {LK, "_sceKernelRtldSetApplicationHeapAPI", hle_zero},
-    {LK, "_sceKernelSetThreadDtors", hle_zero},
-    {LK, "_sceKernelSetThreadAtexitCount", hle_zero},
-    {LK, "_sceKernelSetThreadAtexitReport", hle_zero},
-    {LK, "sceKernelOpen", hle_open},
-    {LK, "sceKernelRead", hle_read},
-    {LK, "sceKernelPread", hle_pread},
-    {LK, "sceKernelClose", hle_close},
-    {LK, "_write", hle_write},
-    {LK, "write", hle_write},
-    {LK, "sceKernelWrite", hle_write},
-    {LK, "sceKernelStat", hle_stat},
-    {LK, "sceKernelLseek", hle_lseek},
-    {LK, "sceKernelFstat", hle_fstat},
-    {LK, "sceKernelGetdents", hle_getdents},
-    {LK, "sceKernelGetdirentries", hle_getdirentries},
-    {LK, "_read", hle_posix_read},
-    {LK, "sceKernelMkdir", hle_mkdir},
-    {LK, "sceKernelChmod", hle_chmod},
-    {LK, "sceKernelTruncate", hle_truncate},
-    {LK, "sceKernelUtimes", hle_utimes},
-    {LK, "sceKernelUnlink", hle_unlink},
-    {LK, "sceKernelRmdir", hle_rmdir},
-    {"libScePosix", "rmdir", hle_rmdir},
-    {LK, "rmdir", hle_rmdir},
-    {LK, "sceKernelRename", hle_rename},
-    {LK, "sceKernelDlsym", hle_dlsym},
-    {LK, "sceKernelLoadStartModule", hle_load_start_module},
+    {LK, "_sceKernelSetThreadDtors", tls_set_thread_dtors},
     {LK, "sceKernelMapFlexibleMemory", hle_map_flex},
-    {"libkernel_cpumode_platform", "sceKernelIsProspero", hle_is_prospero},
     {LK, "sceKernelAllocateDirectMemory", hle_alloc_direct},
     {LK, "sceKernelMapDirectMemory", hle_map_direct},
     {LK, "sceKernelBatchMap", hle_batch_map},
@@ -612,11 +337,7 @@ static const struct hle_ent g_hle[] = {
     {"libSceCoredump", "sceCoredumpAttachMemoryRegionAsUserFile", hle_zero},
     {"libSceCoredump", "sceCoredumpSetUserDataType", hle_zero},
     {"libSceCoredump", "sceCoredumpWriteUserData", hle_zero},
-    {"libSceLibcInternalExt", "sceLibcHeapGetTraceInfo", hle_zero},
     {LK, "sceKernelMapNamedFlexibleMemory", hle_map_named_flex},
-    {"libSceSysmodule", "sceSysmoduleLoadModule", hle_sysmodule_load},
-    {"libSceSysmodule", "sceSysmoduleLoadModuleInternalWithArg", hle_sysmodule_load_internal_arg},
-    {"libSceSysmodule", "sceSysmoduleUnloadModule", hle_sysmodule_unload},
     {"libSceDiscMap", "sceDiscMapIsRequestOnHDD", hle_discmap_on_hdd},
 };
 

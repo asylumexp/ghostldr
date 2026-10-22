@@ -11,6 +11,8 @@
 --                       NID table): run.py serves it over TCP on the log IP;
 --                       size 0 = none.  This script only connects the socket:
 --                       the core reads the blob itself and checks size and CRC.
+--   GHOSTLDR_SEL_PORT / GHOSTLDR_SEL_SIZE / GHOSTLDR_SEL_CRC
+--                       the same for the game selector (build/ghostldr/selector.bin)
 --   GHOSTLDR_PROFILE_HEX  the title profiles (host/profiles.py boot_bundle); the
 --                       core finds them through the last u64 of the context
 
@@ -77,28 +79,31 @@ write8(log_addr + 1, AF_INET)
 write16(log_addr + 2, ((GHOSTLDR_LOG_PORT << 8) | (GHOSTLDR_LOG_PORT >> 8)) & 0xFFFF)
 write32(log_addr + 4, u32le_ip(GHOSTLDR_LOG_IP))
 
--- 6. extension socket (created through the compiler like the log socket)
-local ext_fd = -1
-if (GHOSTLDR_EXT_SIZE or 0) > 0 then
+-- 6. extension and selector sockets (created through the compiler like the log socket)
+local function blob_socket(port, size, what)
+    if (size or 0) <= 0 then return -1 end
     local sa, tv = malloc(16), malloc(16)
     for i = 0, 15 do write8(sa + i, 0) end
     write8(sa + 1, AF_INET)
-    write16(sa + 2, ((GHOSTLDR_EXT_PORT << 8) | (GHOSTLDR_EXT_PORT >> 8)) & 0xFFFF)
+    write16(sa + 2, ((port << 8) | (port >> 8)) & 0xFFFF)
     write32(sa + 4, u32le_ip(GHOSTLDR_LOG_IP))
     write64(tv, 15)     -- SO_RCVTIMEO: a stalled transfer fails instead of hanging the core
     write64(tv + 8, 0)
-    ext_fd = create_socket(AF_INET, SOCK_STREAM, 0)
-    if ext_fd >= 0 then
-        syscall.setsockopt(ext_fd, SOL_SOCKET, 0x1006, tv, 16)
-        local rc = syscall.connect(ext_fd, sa, 16)
+    local fd = create_socket(AF_INET, SOCK_STREAM, 0)
+    if fd >= 0 then
+        syscall.setsockopt(fd, SOL_SOCKET, 0x1006, tv, 16)
+        local rc = syscall.connect(fd, sa, 16)
         if rc ~= 0 then
-            send_notification(string.format("ghostldr: extension server %s:%d: connect failed (%s)",
-                GHOSTLDR_LOG_IP, GHOSTLDR_EXT_PORT, get_error_string()))
-            syscall.close(ext_fd)
-            ext_fd = -1
+            send_notification(string.format("ghostldr: %s server %s:%d: connect failed (%s)",
+                what, GHOSTLDR_LOG_IP, port, get_error_string()))
+            syscall.close(fd)
+            fd = -1
         end
     end
+    return fd
 end
+local ext_fd = blob_socket(GHOSTLDR_EXT_PORT, GHOSTLDR_EXT_SIZE, "extension")
+local sel_fd = blob_socket(GHOSTLDR_SEL_PORT, GHOSTLDR_SEL_SIZE, "selector")
 
 -- 7. boot context (field order must match struct boot_ctx in ghost.h)
 local fields = {
@@ -121,7 +126,7 @@ local fields = {
 local ctx = malloc(0x200)
 for i = 0, 0x1F8, 8 do write64(ctx + i, 0) end
 for i, v in ipairs(fields) do write64(ctx + (i - 1) * 8, v) end
-write64(ctx + 8, #fields * 8 + 8 * 8 + 3 * 8)    -- fields, reserved[8], ext_fd/size/crc
+write64(ctx + 8, #fields * 8 + 8 * 8 + 6 * 8)    -- fields, reserved[8], ext_fd/size/crc, sel_fd/size/crc
 local app_root = malloc(#GHOSTLDR_APP_ROOT + 1)
 write_string(app_root, GHOSTLDR_APP_ROOT)
 write64(ctx + (#fields - 2) * 8, app_root)
@@ -136,6 +141,11 @@ write64(ctx + #fields * 8 + 0x38, GHOSTLDR_CPU_HEAP_MIB or 0)
 write64(ctx + #fields * 8 + 0x40, ext_fd)
 write64(ctx + #fields * 8 + 0x48, GHOSTLDR_EXT_SIZE or 0)
 write64(ctx + #fields * 8 + 0x50, GHOSTLDR_EXT_CRC or 0)
+-- the selector's fields end at +0x70: they must stay below the profile slot (0x1F8)
+if #fields * 8 + 0x70 > 0x1F8 then fail("the boot context reaches the profile slot") end
+write64(ctx + #fields * 8 + 0x58, sel_fd)
+write64(ctx + #fields * 8 + 0x60, GHOSTLDR_SEL_SIZE or 0)
+write64(ctx + #fields * 8 + 0x68, GHOSTLDR_SEL_CRC or 0)
 -- title profiles: blobs ended by 8 zero bytes, pointed to by the context's last
 -- u64 (profile.c PROFILE_SLOT); without them the core uses its generic defaults
 if GHOSTLDR_PROFILE_HEX and #GHOSTLDR_PROFILE_HEX > 0 then

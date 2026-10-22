@@ -244,8 +244,9 @@ static u64 maybe_count(struct module *m, u64 target, const char *lib, const char
     return counting_stub(target, lib ? lib : "?", nid, name);
 }
 
-u64 resolve_import(struct module *m, const char *encoded, bool weak, bool plt_func)
+u64 resolve_import(struct module *m, const char *encoded, bool weak, int kind)
 {
+    bool plt_func = kind == IMPORT_PLT;
     char nid[12];
     const char *modname = NULL;
     const char *lib = module_import_lib(m, encoded, nid, &modname);
@@ -279,7 +280,7 @@ u64 resolve_import(struct module *m, const char *encoded, bool weak, bool plt_fu
         if (g_logged_denied++ < 200)
             logf("denied: %s needs %s:%s (%s): %s has no host fallback, the stub returns %x", m->name, lib, nid,
                  name ? name : "?", pol->name, (u32)ret);
-        return unresolved_stub(lib, nid, ret, true);
+        return kind == IMPORT_OBJECT ? 0 : unresolved_stub(lib, nid, ret, true);
     }
     if (name) {
         u32 handle;
@@ -290,7 +291,8 @@ u64 resolve_import(struct module *m, const char *encoded, bool weak, bool plt_fu
         }
     }
     if (g_logged_misses++ < 200)
-        logf("unresolved%s: %s needs %s:%s (%s) from module %s", weak ? " (weak)" : "", m->name,
-             lib ? lib : "?", nid, name ? name : "?", modname ? modname : "?");
-    return unresolved_stub(lib ? lib : "?", nid, ret, false);
+        logf("unresolved%s: %s needs %s:%s (%s) from module %s%s", weak ? " (weak)" : "", m->name,
+             lib ? lib : "?", nid, name ? name : "?", modname ? modname : "?",
+             kind == IMPORT_OBJECT ? ": a variable, bound to 0" : "");
+    return kind == IMPORT_OBJECT ? 0 : unresolved_stub(lib ? lib : "?", nid, ret, false);
 }

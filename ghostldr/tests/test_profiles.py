@@ -102,7 +102,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual((b["save_blocks"], b["runtime_reserve_mib"], b["video_reserve_mib"], b["flex_mib"]),
                          (256, 32, 100, 0))
         kinds = [k for k, _ in b["records"]]
-        self.assertEqual(kinds, [profiles.REC_PLAN] + [profiles.REC_TABLE] * 4)
+        self.assertEqual(kinds, [profiles.REC_PLAN] + [profiles.REC_TABLE] * 4 + [profiles.REC_TLS])  # tls_sites
         fixed, over, n, *sites = struct.unpack_from("<6I", b["records"][0][1])
         self.assertEqual((fixed, over, n, sites), (3996, 120, 3, [0x896126, 0x89614A, 0xEEE2CF]))
         table, role, knob, nexp, mib, min_mib = struct.unpack_from("<IBBHII", b["records"][1][1])

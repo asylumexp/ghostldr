@@ -17,11 +17,14 @@ struct rx_region {
 static struct rx_region g_rx[8];
 static u32 g_nrx;
 static u64 g_small_cur, g_small_end; /* bump area for stubs/trampolines */
+u64 g_punched;
 
 static int (*qmp)(void *, void **, void **, int *);
 
 int arena_init(void)
 {
+    if (g_nrx)
+        return 0; /* already done (the game selector runs before the title is placed) */
     qmp = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelQueryMemoryProtection");
     u64 from = g_ctx->reserved[2] ? g_ctx->reserved[2] : 0x9009d4000;
     u64 last_end = 0;
@@ -70,6 +73,19 @@ int arena_code_region(u64 *start, u64 *end)
     *start = g_rx[best].start;
     *end = g_rx[best].end;
     return 0;
+}
+
+/* Module bases, in load order: boot modules, then run-time loads (loader.c). */
+u64 arena_code_alloc(u64 size)
+{
+    static u64 cur;
+    u64 lo, hi;
+    if (!cur && arena_code_region(&lo, &hi) == 0)
+        cur = ALIGN_UP(lo, 0x10000);
+    u64 at = cur;
+    if (cur)
+        cur = ALIGN_UP(cur + size, 0x10000);
+    return at;
 }
 
 bool arena_is_rx(u64 addr, u64 size)
@@ -125,6 +141,7 @@ int arena_punch_rw(u64 addr, u64 size)
         logf("punch: system flex %lx+%lx rc=%x got %p", addr, size, rc, va);
         return -1;
     }
+    g_punched += size;
     memset((void *)addr, 0, size);
     return 0;
 }

@@ -24,10 +24,10 @@ The core has to fit in 240 KiB of the emulator's IPU JIT buffer, and the Lua pay
    5. host modules by name, using the full table;
    6. a logging stub (`UNRESOLVED call ...`). It returns 0, or the library policy's `stub_ret` when there is one.
 6. **`ext_boot_done`** runs after relocation. It frees the blob (about 2.2 MiB: the NID table and the image copy) before the memory plan is computed. The extension's code and data stay. `nid_to_name` returns NULL from then on, so stubs keep their own copies of names.
-7. **At run time,** `sceKernelDlsym` on a host module (`hle_dlsym`) first asks the extension, by the NID of the name. If the module's library has `EXT_LIB_NO_HOST` and the extension lacks the function, the call is refused with ENOENT rather than given SWRR's.
-8. **Failed sysmodule loads.** `sceSysmoduleLoadModule` (and `...InternalWithArg`) hide a failure from the title by returning 0. They also pass the id and error to `ext_note_sysmodule`, which calls every family's `sysmodule_failed` hook (`EXT_FAMILY_HOOKS`). A family that replaces `sceSysmoduleLoadModule` in the extension calls `ext_sysmodule_failed(id, rc)` itself, so the hooks keep hearing of failures.
+7. **At run time,** `sceKernelDlsym` on a host module (the module family, `ext/src/hle_module.c`) first asks the extension, by the NID of the name. If the module's library has `EXT_LIB_NO_HOST` and the extension lacks the function, the call is refused with ENOENT rather than given SWRR's. A title prx loaded after boot (`sceKernelLoadStartModule`, `sceSysmoduleLoadModule`) binds the same way; the names of its host imports are kept from boot (`nid_keep`) for the sce_module files the boot did not load.
+8. **Sysmodule loads.** The sysmodule family (`ext/src/hle_sysmodule.c`) owns `sceSysmoduleLoadModule`, `IsLoaded` and `Unload` and their Internal forms: IsGame ids start the title's own module, dialog ids go to the dialogs family (`dialog_sysmod_virtual`), DiscMap answers without loading, and other ids reach SWRR's library with its real result. A failure is passed to `ext_sysmodule_failed(id, rc)`, which calls every family's `sysmodule_failed` hook (`EXT_FAMILY_HOOKS`); the core's `ext_note_sysmodule` does the same for callers in the core.
 
-With the core at 192 KiB, the small area has 64 KiB. The extension gets up to 48 KiB of it (text and data, each rounded to 16 KiB). With the media and peripheral families it needs about 128 KiB, so it goes in a new JIT block.
+With the core at 192 KiB, the small area has 64 KiB. The extension gets up to 48 KiB of it (text and data, each rounded to 16 KiB). The image holds code, rodata and data only: `ext.ld` keeps the relocation and symbol tables out of it (`mkext.py` reads them from the ELF). With the media and peripheral families it needs more than 48 KiB, so it goes in a new JIT block.
 
 ## Files
 
@@ -41,6 +41,7 @@ With the core at 192 KiB, the small area has 64 KiB. The extension gets up to 48
 | `ext/src/hle_media.c`, `ext/src/hle_peripheral.c` | Capture, sharing and voice libraries (GameLiveStreaming, ScreenShot, ShareUtility, SharePlay, Remoteplay, VideoRecording, Companion, ContentExport, Voice, VoiceQoS, Audio3d, Rudp, RazorCpu) and peripherals (Camera, Move, MoveTracker, Hmd, VrTracker, Usbd, Keyboard, Mouse, SystemGesture). |
 | `ext/ext.ld` | Text at 0, data at the next 16 KiB boundary. |
 | `src/ext.c`, `src/ext_api.c` | The core side: fetch, verify, place, relocate, lookups, dlsym; the API table. |
+| `ext/src/hle_kernel.c`, `hle_module.c`, `hle_sysmodule.c`, `hle_file.c` (+ `kmod.h`) | The kernel families (research spec kernel-modules.md): libc and process identity, title modules (load, start, dlsym, module queries), the sysmodule router, and file calls on ghostfs fds. |
 | `tools/mkext.py`, `tools/gen_nids.py`, `tools/elf64.py` | Build `ext.bin` from `ext.elf` and the name lists. |
 | `tools/check_ext.py` | Offline checks (see below). |
 | `tests/test_ext.py`, `tests/ext_host/` | Runs the core's real `ext.c`, `resolve.c`, `elf.c` and `nid.c` on the built blob as x86-64 (Rosetta on Apple silicon), stubs included. |

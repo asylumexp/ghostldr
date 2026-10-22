@@ -7,7 +7,10 @@
 
 A boot also serves the runtime extension (build/ghostldr/ext.bin: the NID
 table and the extension's HLE code) on TCP 18195; the core fetches it first
-and stops before touching the title when it cannot.
+and stops before touching the title when it cannot.  The game selector
+(build/ghostldr/selector.bin, docs/selector.md) is served on TCP 18196: the
+core runs it before the title when more than one title is installed, or with
+--select.
 """
 
 from __future__ import annotations
@@ -27,11 +30,13 @@ ROOT = Path(__file__).resolve().parents[2]
 CORE = ROOT / "build/ghostldr/core.bin"
 LAYOUT = ROOT / "build/ghostldr/core.json"
 EXT = ROOT / "build/ghostldr/ext.bin"
+SELECTOR = ROOT / "build/ghostldr/selector.bin"
 BOOT_LUA = ROOT / "ghostldr/lua/ghostldr.lua"
 from console import console_ip
 import profiles
 LOG_PORT = 18194
 EXT_PORT = LOG_PORT + 1   # TCP
+SEL_PORT = LOG_PORT + 2   # TCP
 LUA_MAX = 500 * 1024      # Luac0re's remote Lua loader reads at most this much
 
 
@@ -49,7 +54,8 @@ def build_core() -> None:
         raise SystemExit(f"building the core failed: {e}{hint}")
 
 
-def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int], ext: bytes = b"") -> bytes:
+def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int], ext: bytes = b"",
+                  sel: bytes = b"") -> bytes:
     core = CORE.read_bytes()
     layout = json.loads(LAYOUT.read_text())
     text_size = (layout["__text_end"] + 0x3FFF) & ~0x3FFF
@@ -66,6 +72,9 @@ def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int],
         f"GHOSTLDR_EXT_PORT = {EXT_PORT}",
         f"GHOSTLDR_EXT_SIZE = {len(ext)}",
         f"GHOSTLDR_EXT_CRC = {zlib.crc32(ext):#x}",
+        f"GHOSTLDR_SEL_PORT = {SEL_PORT}",
+        f"GHOSTLDR_SEL_SIZE = {len(sel)}",
+        f"GHOSTLDR_SEL_CRC = {zlib.crc32(sel):#x}",
         *[f"GHOSTLDR_{k.upper()}_MIB = {v}" for k, v in knobs.items()],
         "",
     ])
@@ -76,17 +85,17 @@ def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int],
 
 
 class ExtServer(threading.Thread):
-    """Serves ext.bin to the core: each connection gets the whole blob."""
+    """Serves ext.bin (or selector.bin) to the core: each connection gets the whole blob."""
 
-    def __init__(self, blob: bytes) -> None:
+    def __init__(self, blob: bytes, port: int = EXT_PORT, label: str = "extension") -> None:
         super().__init__(daemon=True)
-        self.blob = blob
+        self.blob, self.label = blob, label
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            self.sock.bind(("0.0.0.0", EXT_PORT))
+            self.sock.bind(("0.0.0.0", port))
         except OSError as e:
-            raise SystemExit(f"cannot serve the extension on TCP {EXT_PORT}: {e}")
+            raise SystemExit(f"cannot serve the {label} on TCP {port}: {e}")
         self.sock.listen(4)
         self.sock.settimeout(0.5)
         self.stop = threading.Event()
@@ -103,9 +112,11 @@ class ExtServer(threading.Thread):
                 try:
                     conn.sendall(self.blob)
                     self.sent.set()
-                    print(f"extension: sent {len(self.blob)} bytes to {peer[0]}", flush=True)
+                    print(f"{self.label}: sent {len(self.blob)} bytes to {peer[0]}", flush=True)
                 except OSError as e:
-                    print(f"extension: sending to {peer[0]} failed: {e}", flush=True)
+                    print(f"{self.label}: sending to {peer[0]} failed: {e}"
+                          + (" (the core closes it unread when no choice is needed)" if self.label == "selector" else ""),
+                          flush=True)
 
 
 class LogListener(threading.Thread):
@@ -184,8 +195,20 @@ def main() -> int:
                         help="text input answers \"Player\" instead of the console user's name")
     parser.add_argument("--keep-remote-play", action="store_true",
                         help="dev: ignore the title's sceRemoteplayProhibit, so a Remote Play viewer keeps its picture")
+    parser.add_argument("--select", action="store_true",
+                        help="show the game selector even with one title installed or --title given "
+                             "(docs/selector.md); every profile is sent and --title is not used")
+    parser.add_argument("--select-font", choices=["auto", "builtin"], default="builtin",
+                        help="selector text: the built-in Noto Sans (default), or try the console's system "
+                             "font first (auto; experimental: it crashed SWRR on a 13.60 PS5)")
+    parser.add_argument("--no-selector", action="store_true", help="do not serve the game selector")
+    parser.add_argument("--boot-start-modules", action="store_true",
+                        help="start IsGame modules (NpToolkit2, ...) at boot as before, not at the title's "
+                             "sceSysmoduleLoadModule")
     parser.add_argument("--host", default=None, help="console address (default: looked up by host-id)")
-    parser.add_argument("--wait", type=float, default=20.0)
+    parser.add_argument("--wait", type=float, default=None,
+                        help="seconds to keep printing the console's log (default: boot keeps listening until "
+                             "Ctrl+C; probe and logs stop after 20 s)")
     parser.add_argument("--app-root", default="ghostfs",
                         help="where the title's app0 is: ghostfs (the installed titles, the default) or a "
                         "directory on a dev console, e.g. /data/ghost/app0")
@@ -213,7 +236,8 @@ def main() -> int:
             | (16 if args.profile else 0) \
             | (8 if args.count_imports else 0) | (32 if args.force_title_ready else 0) \
             | (64 if args.ext_jit else 0) | (128 if args.dialog_cancel else 0) | (256 if args.ime_fixed_name else 0) \
-            | (512 if args.keep_remote_play else 0)
+            | (512 if args.keep_remote_play else 0) | (1024 if args.boot_start_modules else 0) \
+            | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0)
         knobs = {"gpu_heap": args.gpu_heap_mib, "slack": args.slack_mib, "pool1": args.pool1_mib,
                  "cpu_heap": args.cpu_heap_mib}
         ext = EXT.read_bytes() if args.mode == "boot" else b""
@@ -221,9 +245,18 @@ def main() -> int:
             ext_server = ExtServer(ext)
             ext_server.start()
             print(f"serving the extension ({len(ext)} bytes) on TCP {EXT_PORT}", flush=True)
-        payload = build_payload(flags, local_ip_for(args.host), args.app_root, knobs, ext)
+        sel = SELECTOR.read_bytes() if args.mode == "boot" and not args.no_selector and SELECTOR.exists() else b""
+        if args.select and not sel:
+            raise SystemExit(f"--select needs {SELECTOR.relative_to(ROOT)} (make -C ghostldr/native)")
+        if sel:
+            ExtServer(sel, SEL_PORT, "selector").start()
+            print(f"serving the game selector ({len(sel)} bytes) on TCP {SEL_PORT}", flush=True)
+        payload = build_payload(flags, local_ip_for(args.host), args.app_root, knobs, ext, sel)
+        if args.select and args.title:   # every profile, so whichever title is picked gets its own
+            print(f"--select: the selector picks the title (--title {args.title} is not used)", flush=True)
         try:   # the title profiles (host/profiles.py; read by native/src/profile.c)
-            bundle = profiles.boot_bundle(args.title, ("trace_opens",) if args.trace_opens else ())
+            bundle = profiles.boot_bundle(None if args.select else args.title,
+                                          ("trace_opens",) if args.trace_opens else ())
         except profiles.ProfileError as e:
             raise SystemExit(str(e))
         payload = f'GHOSTLDR_PROFILE_HEX = "{bundle.hex()}"\n'.encode() + payload
@@ -235,8 +268,14 @@ def main() -> int:
     elif args.mode == "lua":
         send_lua(args.host, args.file.read_bytes())
     if listener:
+        wait = args.wait if args.wait is not None else (None if args.mode == "boot" else 20.0)
+        if wait is None:
+            print("listening for the console's log; press Ctrl+C to stop (the game keeps running)", flush=True)
         try:
-            time.sleep(args.wait)
+            if wait is None:
+                while True:
+                    time.sleep(3600)
+            time.sleep(wait)
         except KeyboardInterrupt:
             pass
         listener.stop.set()

@@ -619,10 +619,15 @@ static void test_catch_alls(void)
         check_eq(stub[i] ? (s32)((s64(*)(void))stub[i])() : (s32)0xBAD, A ? k[i].want_a : k[i].want, what);
     }
     check_eq((s32)((fn6)internal)(0, 0, 0, 0, 0, 0), (s32)0x80550C0A, "Matching2 CreateContextInternal");
+    /* sceKernelDlsym is the extension's (the module family) */
+    void *dlsym_fn = (void *)lookup("libkernel", "sceKernelDlsym");
+    s32 (*dlsym)(s32, const char *, void **) = dlsym_fn;
     void *out = NULL;
-    check(ext_dlsym(0x55, "sceNpWebApi2Initialize", &out) == 0 && out == (void *)lookup(WA2, "sceNpWebApi2Initialize"),
+    check(dlsym && dlsym(0x55, "sceNpWebApi2Initialize", &out) == 0 &&
+              out == (void *)lookup(WA2, "sceNpWebApi2Initialize"),
           "dlsym finds the extension's WebApi2 Initialize");
-    check(ext_dlsym(0x99, "sceNpTusNotAFunction", &out) == -1, "dlsym refuses the rest of libSceNpTus");
+    check(dlsym && dlsym(0x99, "sceNpTusNotAFunction", &out) == (s32)0x80020002 && !out,
+          "dlsym refuses the rest of libSceNpTus");
 }
 
 int main(int argc, char **argv)

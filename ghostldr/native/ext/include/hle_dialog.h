@@ -155,11 +155,12 @@ u32 dlg_title_sdk(void) HIDDEN; /* the title's SDK version (proc param), 0 if un
 
 /* sysmodule ids whose libraries the dialog families implement completely
  * (every import of them binds here or to a denied stub): loading one may
- * return 0 without mapping the real sprx into SWRR (hle_dialog_sysmod.c,
- * which passes other ids on to a sysmodule router family).  A router that
- * links before hle_dialog_sysmod.c should ask this itself. */
+ * return 0 without mapping the real sprx into SWRR.  The sysmodule router
+ * (hle_sysmodule.c) asks these first (hle_dialog_sysmod.c). */
 bool dialog_sysmod_virtual(u32 id) HIDDEN;
 const char *dialog_sysmod_name(u32 id) HIDDEN;
+bool dialog_sysmod_load(u32 id) HIDDEN;   /* a dialog id: mark it loaded (true), else false */
+bool dialog_sysmod_loaded(u32 id) HIDDEN; /* a dialog id the title loaded */
 
 #define RD32(p, off) (*(const u32 *)((const u8 *)(p) + (off)))
 #define RD64(p, off) (*(const u64 *)((const u8 *)(p) + (off)))

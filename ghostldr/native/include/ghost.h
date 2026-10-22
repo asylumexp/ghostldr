@@ -64,6 +64,8 @@ struct boot_ctx {
     /* runtime extension (ext.c): a TCP socket connected to run.py's extension
      * server (-1: none), and the blob's size and CRC-32 */
     u64 ext_fd, ext_size, ext_crc;
+    /* game selector (sel.c): the same for its module */
+    u64 sel_fd, sel_size, sel_crc;
 };
 
 /* ---- runtime (rt.c) ---- */
@@ -210,6 +212,7 @@ struct elf_rela {
 #define PT_SCE_PROCPARAM 0x61000001
 #define PT_SCE_MODULE_PARAM 0x61000002
 #define PT_SCE_RELRO 0x61000010
+#define PT_GNU_EH_FRAME 0x6474E550
 
 #define MAX_LIBS 64
 struct libref {
@@ -256,7 +259,28 @@ struct module {
     struct export_ent *exports;
     u32 nexports;
     struct module *next;
+    /* start (modules.c): DT_INIT when the module has one, else e_entry */
+    bool has_init;
+    u8 start_state;            /* MOD_* */
+    s32 start_rc;              /* what its init entry returned */
+    /* what the kernel's module queries report (module_parse; the extension
+     * answers sceKernelGetModuleInfo* for title modules from these) */
+    u64 eh_frame_hdr, eh_frame_hdr_size;  /* PT_GNU_EH_FRAME (vaddr, memsz), 0 if none */
+    struct {
+        u64 vaddr;
+        u32 size;
+        s32 prot;                         /* ELF p_flags */
+    } segs[4];                            /* PT_LOAD and PT_SCE_RELRO in header order */
+    u32 nsegs;
+    u8 fingerprint[20];                   /* DT_SCE_FINGERPRINT */
+    u64 tls_offset;            /* static TLS: image at thread pointer - tls_offset (tls.c); 0: dynamic */
 };
+
+/* struct module.start_state */
+#define MOD_BOOT 0     /* started by the title's main thread before the entry */
+#define MOD_DEFERRED 1 /* an IsGame module: started by its sceSysmoduleLoadModule (extension) */
+#define MOD_STARTING 2
+#define MOD_STARTED 3
 
 struct export_ent {
     char nid[12];
@@ -311,6 +335,7 @@ s64 vfs_read(int fd, void *buf, u64 n);
 s64 vfs_lseek(int fd, s64 off, int whence);
 int vfs_close(int fd);
 int vfs_stat(const char *path, void *st);
+int vfs_getdents(int fd, void *buf, int size);
 void vdm_log_lazy(void);
 bool budget_lazy_site(u64 eboot_off);
 
@@ -327,6 +352,7 @@ struct gfs_cat_entry {
 u32 gfs_titles(void);                             /* read the catalogue: number of entries (0: none) */
 const struct gfs_cat_entry *gfs_title_at(u32 i);
 int gfs_mount_title(const char *title);           /* its index: its containers become /app0 */
+int gfs_pick(const char *title); /* mount title; NULL: the requested one, else the only complete one */
 
 /* ---- title profiles (profile.c; host/profiles.py writes them) ---- */
 struct prof_hdr {
@@ -357,6 +383,12 @@ struct prof_rec {
 #define REC_PLAN 1
 #define REC_TABLE 2
 #define REC_RULE 3
+#define REC_TLS 4
+struct prof_tls {       /* tools/tls_sites.py: one module's thread-pointer loads, checked before patching */
+    struct prof_rec r;
+    char module[32];    /* its file name, e.g. "eboot.bin" */
+    u32 count, off[];   /* text offsets of each "mov/add r64, fs:[0]"'s fs prefix */
+};
 struct prof_plan {
     struct prof_rec r;
     u32 title_fixed_mib, overcommit_mib, nsites, sites[]; /* lazily backed allocation sites (return addresses) */
@@ -398,14 +430,28 @@ int module_parse(struct module *m, u8 *file, u64 size);
 int module_place(struct module *m, u64 base);
 int module_relocate(struct module *m);
 int module_finish(struct module *m);
-struct module *module_load_file(const char *path, bool is_main);
+struct module *module_open(const char *path, bool is_main); /* read and parse; not in g_modules yet */
+void module_publish(struct module *m);                       /* handle, TLS id, append to g_modules */
+struct module *module_load_runtime(const char *path, int *err); /* a title prx after boot (SCE error in *err) */
+int module_write_text(struct module *m);
+void stubs_flush(void);
+/* modules.c: which sce_module files load at boot, and starting them */
+int modules_load_boot(const char *root, struct module **main_out);
+void modules_start_boot(void);
+int module_start(struct module *m, u64 argc, const void *argp);
 u64 module_export(struct module *m, const char *nid);
 const char *module_sym_name(struct module *m, const struct elf_sym *s);
 
 /* ---- resolution (resolve.c, nid.c) ---- */
 const char *nid_to_name(const char *nid); /* ext.c: the extension's table, until ext_boot_done */
+void nid_keep(const char *nid);           /* keep this NID's name after ext_boot_done (run-time loads) */
 void compute_nid(const char *name, char out[12]);
-u64 resolve_import(struct module *m, const char *encoded, bool weak, bool plt_func);
+/* kind: what the import is used as.  An unresolved variable binds to 0 (a
+ * code stub would be read as data or faulted on when written). */
+#define IMPORT_DATA 0   /* a function's address (GLOB_DAT, R_X86_64_64) */
+#define IMPORT_PLT 1    /* a PLT slot of a function */
+#define IMPORT_OBJECT 2 /* a variable (STT_OBJECT, or STT_NOTYPE outside the PLT) */
+u64 resolve_import(struct module *m, const char *encoded, bool weak, int kind);
 u64 stub_alloc_code(const u8 *code, u32 len);
 int host_module_handle(const char *modname, u32 *out);
 int host_module_handle_for(struct module *m, const char *modname, u32 *out);
@@ -418,7 +464,15 @@ struct module *ghost_main_module(void);
 void tls_setup(struct module *main_mod);
 void *tls_get_addr(void *ti);
 int ghost_thread_create(void *thr, const void *attr, void *(*fn)(void *), void *arg, const char *name);
+int ghost_thread_start(void *real, void *thr, const void *attr, void *(*fn)(void *), void *arg, const char *name);
+bool module_has_tpoff(const struct module *m);
+void tls_thread_exit(void);   /* a title thread ends: its TLS blocks go back */
+u64 tls_thunk(u64 fn);        /* fn behind a stub that gives the calling thread its TLS block */
+void rpc_lock(void);          /* one user of the compiler-process RPC at a time (loader.c) */
+void rpc_unlock(void);
 void tls_ensure_thread(void);
+extern void (*g_thread_dtors)(void);
+void tls_set_thread_dtors(void (*fn)(void));
 const char *remap_path(const char *path, char *buf, size_t size);
 /* more title path namespaces (registered by the extension's families during
  * ext_init): remap_path asks fn about paths that start with prefix */
@@ -431,6 +485,8 @@ int arena_code_region(u64 *start, u64 *end);
 bool arena_is_rx(u64 addr, u64 size);
 u64 arena_small_alloc(u64 size);
 u64 arena_small_alloc_top(u64 size, u64 keep);
+u64 arena_code_alloc(u64 size); /* next 64 KiB-aligned module base in the code region */
+extern u64 g_punched;           /* bytes arena_punch_rw has mapped */
 int arena_write(u64 dst, const void *src, u64 size);
 int arena_punch_rw(u64 addr, u64 size);
 
@@ -438,12 +494,18 @@ int arena_punch_rw(u64 addr, u64 size);
 #define CTX_FLAG_EXT_JIT 64 /* place the extension in a new JIT block (run.py --ext-jit) */
 /* ctx flag bits: 1 probe, 2 release host memory, 4 snap, 8 count imports, 16 profile,
  * 32 force title ready, 64 ext in a JIT block, 128 dialog cancel, 256 IME fixed name,
- * 512 keep Remote Play, 1024 start game modules at boot */
+ * 512 keep Remote Play, 1024 start game modules at boot, 2048 show the game selector,
+ * 4096 selector: built-in font only (sel_api.h) */
 #define CTX_FLAG_KEEP_REMOTE_PLAY 512 /* the title's sceRemoteplayProhibit is a no-op (run.py --keep-remote-play) */
+#define CTX_FLAG_BOOT_START_ALL 1024 /* start IsGame modules at boot too (run.py --boot-start-modules) */
+#define CTX_FLAG_SELECT 2048           /* game selector: show it even when the title is known (run.py --select) */
+#define CTX_FLAG_SEL_FONT_BUILTIN 4096 /* game selector: never try libSceFont (run.py --select-font builtin) */
 int ext_fetch(void);     /* receive and verify ext.bin (the NID table lives there) */
 int ext_start(void);     /* place, relocate and initialize its code */
 void ext_boot_done(void); /* imports resolved: free the blob */
 u64 ext_hle_lookup(const char *lib, const char *nid, const char *name);
 const struct ext_lib *ext_lib_policy(const char *lib);
-int ext_dlsym(u32 handle, const char *name, void **out);
 void ext_note_sysmodule(u32 id, s32 rc); /* a failed sysmodule load, for the extension's families */
+
+/* ---- game selector (sel.c; module interface in sel_api.h) ---- */
+int sel_run(bool show, char title[16]); /* the chosen title's catalogue index and ID, or -1 */

@@ -132,8 +132,8 @@ s32 profile_app_param(u32 id) { return id < 5 ? g_prof->app_param[id] : 0; }
 /* the n-th record of `kind`; plan records only on the profile's build */
 COLD const void *profile_record(u32 kind, u32 n)
 {
-    if (kind != REC_RULE && !profile_has(PF_PLAN))
-        return NULL;
+    if (kind == REC_TLS ? !(g_gated && g_bound) : kind != REC_RULE && !profile_has(PF_PLAN))
+        return NULL; /* TLS site lists: on the profile's build only, plan or not */
     const u8 *p = (const u8 *)g_prof + g_prof->header_size, *end = (const u8 *)g_prof + g_prof->total;
     while (p + sizeof(struct prof_rec) <= end) {
         const struct prof_rec *r = (const struct prof_rec *)p;

@@ -26,9 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 NAME_FILES = (ROOT / "build/nid/known_names.txt", ROOT / "ghostldr/data/extra_names.txt")
 # names the loader itself looks up by NID
 LOADER_NAMES = ("module_start", "module_stop")
-# the files ghost_boot loads (boot.c BUNDLED, then the executable)
-BUNDLED = ("libSceFios2.prx", "libc.prx", "libSceNpToolkit2.prx", "libSceNpToolkit.prx",
-           "libSceJson2.prx", "libSceJson.prx", "libSceNgs2.prx", "libSceAudioLatencyEstimation.prx")
+# sce_module files the boot always loads, first (modules.c k_first)
+BOOT_FIRST = ("libSceFios2.prx", "libc.prx")
 
 
 def name_db(files=NAME_FILES) -> dict[str, str]:
@@ -73,10 +72,38 @@ def encode_table(db: dict[str, str]) -> tuple[int, bytes, bytes, bytes]:
     return len(entries), bytes(keys), bytes(offs), bytes(pool)
 
 
+def boot_modules(app0: Path) -> list[Path]:
+    """The sce_module files ghost_boot loads, in load order (modules.c): libSceFios2.prx
+    and libc.prx, then every file exporting a library the executable or a chosen
+    module imports, by name."""
+    mod_dir = app0 / "sce_module"
+    cands = sorted(mod_dir.glob("*.prx")) if mod_dir.is_dir() else []
+    imgs = {}
+    for f in cands:
+        try:
+            imgs[f] = oe.parse(f)
+        except Exception:   # the core skips files it cannot parse, too
+            continue
+    main = oe.parse(app0 / "eboot.bin")
+
+    def imports_from(a, b) -> bool:
+        return bool({lib.name for lib in a.import_libs.values()} & {lib.name for lib in b.export_libs.values()})
+
+    sel = {f for f in imgs if f.name in BOOT_FIRST}
+    more = True
+    while more:
+        more = False
+        for f, img in imgs.items():
+            if f not in sel and (imports_from(main, img) or any(imports_from(imgs[g], img) for g in sel)):
+                sel.add(f)
+                more = True
+    first = [f for n in BOOT_FIRST for f in imgs if f.name == n and f in sel]
+    return first + [f for f in imgs if f in sel and f.name not in BOOT_FIRST]
+
+
 def title_files(app0: Path) -> list[Path]:
     """The modules ghost_boot loads from a title's app0, in load order."""
-    files = [app0 / "sce_module" / n for n in BUNDLED if (app0 / "sce_module" / n).is_file()]
-    return files + [app0 / "eboot.bin"]
+    return boot_modules(app0) + [app0 / "eboot.bin"]
 
 
 def title_table(app0: Path, db: dict[str, str] | None = None) -> dict[str, str]:

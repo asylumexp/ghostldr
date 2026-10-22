@@ -121,6 +121,6 @@ PUT, DELETE and WRITE refuse names that end in `SAVE` and SWRR's own saves (stat
 
 ## The core
 
-- At boot ghostfs reads the catalogue and picks the title: the one `run.py boot --title T` asked for; else the only bootable title; with several it stops and logs the list (`ghostfs: 2 titles installed: ...: pick one with run.py boot --title`). Without a catalogue it boots the legacy `GFSINDEX`/`GHOSTIDX` title.
+- At boot ghostfs reads the catalogue and picks the title: the one `run.py boot --title T` asked for; else the only bootable title. With several, the game selector picks (docs/selector.md): `gfs_init` returns 1 without mounting anything, and `boot.c` runs the selector once SWRR's memory is free, then `gfs_pick(title)`. Without the selector it stops and logs the list (`ghostfs: several titles: pick one with run.py boot --title TITLE`). `run.py --select` leaves the choice to the selector even with one title or `--title`. Without a catalogue it boots the legacy `GFSINDEX`/`GHOSTIDX` title.
 - Only the picked title's containers are mounted.
 - `gfs_titles()` lists the catalogue and `gfs_mount_title(title)` loads one title's index (`ghostldr/native/src/ghostfs.c`, declared in `ghost.h`): an on-console selector chooses with these before the title's modules are loaded.

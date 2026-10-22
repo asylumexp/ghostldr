@@ -28,6 +28,7 @@
  "app_params": {"0": 3, "1": 11456},
  "save_blocks": 256,
  "features": ["ghost_hooks", "ghost_diagnostics"],
+ "tls_sites": {"eboot.bin": "CUSA11456-tls-eboot.txt"},
  "memory": {
   "mode": "plan",
   "runtime_reserve_mib": 32,

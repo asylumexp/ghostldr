@@ -34,12 +34,13 @@ void *host_real_in(const char *modname, const char *name);
 #define GFS_SLOTS 12          /* of /savedata1..15: leave room for <prefix>SAVE and a spare */
 #define GFS_FILES 512
 #define SWRR_SAVEDATA_MOUNT 0x3893F0  /* sceSaveDataMount import slot (SWRR US and EU: same executable) */
-#define E_NOENT 0x80020002
-#define E_BADF 0x80020009
-#define E_ISDIR 0x80020015
-#define E_INVAL 0x80020016
-#define E_ROFS 0x8002001e
-#define E_NOMEM 0x8002000c
+/* signed, so they stay negative in the s64 results */
+#define E_NOENT ((s32)0x80020002)
+#define E_BADF ((s32)0x80020009)
+#define E_ISDIR ((s32)0x80020015)
+#define E_INVAL ((s32)0x80020016)
+#define E_ROFS ((s32)0x8002001e)
+#define E_NOMEM ((s32)0x8002000c)
 #define COLD __attribute__((minsize, cold)) /* boot-time code: small beats fast */
 
 /* gfs_pack.py: version 2 has a 128-byte header (title, layout id, flags);
@@ -502,7 +503,6 @@ COLD int gfs_init(void)
     }
     char list[400];
     int len = 0;
-    const struct gfs_cat_entry *only = NULL;
     list[0] = 0;
     for (u32 i = 0; i < n; i++) {
         const struct gfs_cat_entry *e = gfs_title_at(i);
@@ -510,18 +510,34 @@ COLD int gfs_init(void)
             len += fmt(list + len, sizeof(list) - len, "%s%.16s (%.40s%s)", i ? ", " : "", e->title, e->name,
                        (e->flags & GFS_CAT_INCOMPLETE) ? ", incomplete" : "");
         if (!(e->flags & GFS_CAT_INCOMPLETE))
-            ready++, only = e;
+            ready++;
     }
     logf("ghostfs: installed: %s", list);
-    if (want)
-        return gfs_mount_title(want);
-    if (ready != 1) {
+    /* game selector: several titles and none asked for, or run.py --select;
+     * boot.c runs it once SWRR's memory is free, then calls gfs_pick */
+    if (ready && ((g_ctx->flags & CTX_FLAG_SELECT) || (!want && ready > 1)))
+        return 1;
+    return gfs_pick(NULL);
+}
+
+/* Serve title (the selector's choice); NULL: the one run.py --title asked
+ * for, else the only complete one. */
+COLD int gfs_pick(const char *title)
+{
+    if (!title)
+        title = profile_requested();
+    const struct gfs_cat_entry *only = NULL;
+    u32 ready = 0;
+    for (u32 i = 0; i < gfs_titles() && !title; i++)
+        if (!(gfs_title_at(i)->flags & GFS_CAT_INCOMPLETE))
+            ready++, only = gfs_title_at(i);
+    if (!title && ready != 1) {
         logf("ghostfs: %s: pick one with run.py boot --title TITLE", ready ? "several titles" : "none is complete");
         return -1;
     }
-    char title[17];
-    strlcpy(title, only->title, sizeof(title));
-    return gfs_mount_title(title);
+    char t[17];
+    strlcpy(t, title ? title : only->title, sizeof(t));
+    return gfs_mount_title(t);
 }
 
 /* the title's progress container: <prefix>SAVE (GHOSTSAVE for Ghost of Tsushima) */
@@ -542,13 +558,11 @@ const char *title_id(void)
     return id;
 }
 
-/* the installed title's ID from the index (version 2), or NULL */
+/* the same, or NULL when unknown */
 const char *gfs_title(void)
 {
-    static char title[17];
-    if (!title[0] && g_hdr && g_hdr->version >= 2)
-        memcpy(title, g_hdr->title, 16);
-    return title[0] ? title : NULL;
+    const char *t = title_id();
+    return t[0] ? t : NULL;
 }
 
 /* ---- open files ---- */
@@ -600,12 +614,24 @@ int gfs_open(const char *path, int flags, int *fd_out)
         *fd_out = (int)E_NOENT;
         return 0;
     }
-    /* SWRR's own eboot.bin: a harmless real fd (its sandbox refuses
+    /* A real fd, so the title's fd numbers and their limit stay the
+     * kernel's: SWRR's /app0 directory, so a call that misses the wrappers
+     * fails (EISDIR, EBADF) instead of reading SWRR's files; SWRR's
+     * eboot.bin if the sandbox refuses the directory (its sandbox refuses
      * /app0/sce_sys).  The path is copied to the stack first, as kernel paths
      * are everywhere else; literals live in the core's JIT (RX) image */
+    static int dir_ok = -1;
     char placeholder[32];
-    strlcpy(placeholder, "/app0/eboot.bin", sizeof(placeholder));
+    strlcpy(placeholder, dir_ok ? "/app0" : "/app0/eboot.bin", sizeof(placeholder));
     int fd = k_open(placeholder, 0, 0);
+    if (dir_ok == -1) {
+        dir_ok = fd >= 0;
+        logf("ghostfs: placeholder fds are %s (%x)", dir_ok ? "SWRR's /app0 directory" : "SWRR's eboot.bin", fd);
+        if (!dir_ok) {
+            strlcpy(placeholder, "/app0/eboot.bin", sizeof(placeholder));
+            fd = k_open(placeholder, 0, 0);
+        }
+    }
     if (fd < 0) {
         *fd_out = fd;
         return 0;
@@ -764,6 +790,12 @@ int vfs_open(const char *path, int flags, int mode)
 s64 vfs_read(int fd, void *buf, u64 n) { return gfs_owns(fd) ? gfs_read(fd, buf, n) : K.read(fd, buf, n); }
 s64 vfs_lseek(int fd, s64 off, int whence) { return gfs_owns(fd) ? gfs_lseek(fd, off, whence) : K.lseek(fd, off, whence); }
 int vfs_close(int fd) { return gfs_close(fd) == 0 ? 0 : K.close(fd); }
+int vfs_getdents(int fd, void *buf, int size)
+{
+    if (gfs_owns(fd))
+        return gfs_getdents(fd, buf, size);
+    return ((int (*)(int, void *, int))host_real("sceKernelGetdents"))(fd, buf, size);
+}
 int vfs_stat(const char *path, void *st)
 {
     int rc;

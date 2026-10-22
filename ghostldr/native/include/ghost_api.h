@@ -111,6 +111,18 @@ struct ghost_api {
     void (*gfs_slot_release)(void);
     const char *(*gfs_title)(void);
     int (*remap_hook_add)(const char *(*fn)(const char *path, char *buf, size_t size));
+    /* the title's modules after boot: load a prx (loader.c; *err an SCE
+     * kernel error) and start one at most once (modules.c) */
+    struct module *(*module_load_runtime)(const char *path, int *err);
+    int (*module_start)(struct module *m, u64 argc, const void *argp);
+    void (**thread_dtors)(void); /* the title libc's thread-exit hook (tls.c) */
+    /* a title thread created through real (a host function with
+     * scePthreadCreate's arguments), with its TLS block */
+    int (*ghost_thread_start)(void *real, void *thr, const void *attr, void *(*fn)(void *), void *arg,
+                              const char *name);
+    u32 (*profile_has)(u32 mask); /* the title profile's PF_* flags (profile.c) */
+    void (*tls_thread_exit)(void); /* a title thread ends: its TLS blocks go back (tls.c) */
+    u64 (*tls_thunk)(u64 fn);      /* fn behind a stub that gives the calling thread its TLS block */
 };
 
 /* ---- what the extension registers and returns ---- */

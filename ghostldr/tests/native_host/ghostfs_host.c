@@ -12,6 +12,7 @@
 long write(int fd, const void *buf, unsigned long n);
 int open(const char *path, int flags, ...);
 long read(int fd, void *buf, unsigned long n);
+char *getenv(const char *name);
 int close(int fd);
 int vsnprintf(char *buf, unsigned long size, const char *fmt, __builtin_va_list ap);
 void *calloc(unsigned long n, unsigned long size);
@@ -217,7 +218,15 @@ int main(int argc, char **argv)
     g_eboot_slot = (u64)fake_mount;
     g_ctx->eboot_base = (u64)&g_eboot_slot - 0x3893F0;
     K.usleep = fake_usleep;
+    /* game selector: SEL_FLAG=1 is run.py --select; SEL_CHOICE what it picked ("": no selector) */
+    const char *flag = getenv("SEL_FLAG"), *choice = getenv("SEL_CHOICE");
+    if (flag && *flag == '1')
+        g_ctx->flags |= CTX_FLAG_SELECT;
     int rc = gfs_init();
+    if (rc == 1) { /* boot.c runs the selector here, then gfs_pick */
+        logf("deferred to the game selector; it chose %s", choice && *choice ? choice : "nothing");
+        rc = gfs_pick(choice && *choice ? choice : NULL);
+    }
     logf("init %d, selected %s, titles %u, still mounted %s", rc, g_selected, gfs_titles(),
          g_mounted[1][0] ? g_mounted[1] : "-");
     if (rc != 0)

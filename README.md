@@ -22,12 +22,12 @@ To back up and restore saves from a browser, see [docs/manager.md](docs/manager.
 
 | Path | What it is |
 |---|---|
-| `ghostldr/native/` | **The loader core** (C, about 6,400 lines). Runs inside SWRR from Luac0re's JIT buffer. Its runtime extension (`ext/`, see [ext/README.md](ghostldr/native/ext/README.md)) carries the NID table and more HLE code, and is fetched from the computer at boot. |
+| `ghostldr/native/` | **The loader core** (C, about 6,400 lines). Runs inside SWRR from Luac0re's JIT buffer. Its runtime extension (`ext/`, see [ext/README.md](ghostldr/native/ext/README.md)) carries the NID table and more HLE code, and is fetched from the computer at boot. The game selector (`selector/`, see [docs/selector.md](docs/selector.md)) is a second module that picks the title to boot and is gone before it loads. |
 | `ghostldr/host/` | **Computer-side tools** (Python). |
 | `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the web manager, the save resigner, and the sandbox/save probes. |
 | `ghostldr/tools/` | **Build and analysis helpers:** ELF/NID parsing, the extension packer and its offline checker (`mkext.py`, `check_ext.py`), the import coverage report (`import_report.py`), disassembler, cross-references, Luac0re bundler. |
 | `ghostldr/data/` | Title profiles (`titles/<TITLE>.json` over `titles/default.json`), Ghost's file open order (file names only), and the system modules a PS4 app can load on a 13.60 PS5. |
-| `ghostldr/tests/` | Offline tests: the installer and the web manager against fake consoles (the manager's need a desktop Lua 5.3 or 5.4), profiles, the pack order, the core's profile, memory-budget and ghostfs code built for the computer, the extension loader run on the built `ext.bin`, and the import report against a synthetic title. |
+| `ghostldr/tests/` | Offline tests: the installer and the web manager against fake consoles (the manager's need a desktop Lua 5.3 or 5.4), profiles, the pack order, the core's profile, memory-budget and ghostfs code built for the computer, the extension loader run on the built `ext.bin`, the import report against a synthetic title, and the game selector (screenshots of its UI, and the built `selector.bin` against a fake console). |
 | `host/payloads/` | **Dev-only console payloads** (ps5-payload-sdk), for a jailbroken console: launch or close SWRR (US or EU), unjail it, save watcher, ps, df, module dump. |
 | `tools/fetch_deps.sh` | Fetches the public build inputs (see Setup). |
 
@@ -38,6 +38,7 @@ What the core contains:
 - **Memory:** a stable direct-memory budget every title gets without a plan, per-title memory plans (Ghost's fits its ~5 GiB plan into SWRR's 4.5 GiB), and allocations scattered over the free holes.
 - **Title profiles:** the title's memory plan, save size, app parameters and HLE rules, as data; bound to its executable's build.
 - **ghostfs:** serves the chosen title's `/app0` from save containers.
+- **Game selector:** loads, runs and clears the selector module before the title (`sel.c`).
 - **Diagnostics:** a crash handler and watchdog.
 
 The host tools:
@@ -52,7 +53,7 @@ The host tools:
 
 ## Releases
 
-A release zip is this repo plus a prebuilt core and extension (`build/ghostldr/core.bin`, `core.json`, `ext.bin`, all from one build); [docs/using-the-release.md](docs/using-the-release.md) walks through it from download to gameplay. With it, booting needs only Python 3, no LLVM or symbol list:
+A release zip is this repo plus a prebuilt core and extension (`build/ghostldr/core.bin`, `core.json`, `ext.bin`, all from one build; `selector.bin`, the game selector, is optional and must come from the same build); [docs/using-the-release.md](docs/using-the-release.md) walks through it from download to gameplay. With it, booting needs only Python 3, no LLVM or symbol list:
 
 ```bash
 python3 ghostldr/host/run.py boot --app-root ghostfs --no-build
@@ -111,7 +112,8 @@ The dev setup is a jailbroken console with elfldr, FTP and klog, plus `/data` fo
 - mast1c0re, by CTurt and McCaulay.
 - PS4 symbol names from idc/ps4libdoc.
 - ps5-payload-sdk, by John Törnblom.
+- Noto Sans, by the Noto Project Authors (SIL Open Font License 1.1): the game selector's built-in font.
 
 ## License
 
-MIT, see [LICENSE](LICENSE). This covers ghostldr's own code only: no game files are included, and Luac0re, ps4libdoc and ps5-payload-sdk keep their own licenses.
+MIT, see [LICENSE](LICENSE). This covers ghostldr's own code only: no game files are included, and Luac0re, ps4libdoc and ps5-payload-sdk keep their own licenses. The selector's built-in font (`ghostldr/native/selector/font/`, also inside `selector.bin`) is under the SIL Open Font License 1.1, in `OFL.txt` there.

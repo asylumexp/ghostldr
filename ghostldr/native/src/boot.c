@@ -1,36 +1,16 @@
 /* Load the title's modules and executable and start its main thread. */
 #include "ghost.h"
 
-int module_write_text(struct module *m);
 void module_protect_relro(struct module *m);
-void stubs_flush(void);
-
-static const char *const BUNDLED[] = {
-    "libSceFios2.prx", "libc.prx", "libSceNpToolkit2.prx", "libSceNpToolkit.prx",
-    "libSceJson2.prx", "libSceJson.prx", "libSceNgs2.prx", "libSceAudioLatencyEstimation.prx",
-};
 
 struct module *g_main_mod;
 
 static void ghost_exit_handler(void) { logf("title called its atexit handler"); }
 
-static bool file_exists(const char *path)
-{
-    u8 st[0x80];
-    return vfs_stat(path, st) == 0;
-}
-
 static void *ghost_main_thread(void *unused)
 {
     logf("main thread: starting %s", g_main_mod->name);
-    for (struct module *m = g_modules; m; m = m->next) {
-        if (m->is_main)
-            continue;
-        int (*start)(u64, u64, u64) = (void *)(m->base + m->entry);
-        logf("module_start %s at %p", m->name, start);
-        int rc = start(0, 0, 0);
-        logf("module_start %s -> %x", m->name, rc);
-    }
+    modules_start_boot();
     static struct {
         u64 argc;
         const char *argv[3];
@@ -45,16 +25,16 @@ static void *ghost_main_thread(void *unused)
 int ghost_boot(void)
 {
     const char *root = (const char *)g_ctx->app_root;
-    char path[512];
     logf("boot: app root %s", root);
     crash_install();
     /* the extension carries the NID table: without it nothing resolves, so
      * stop before anything touches the title or SWRR's state */
     if (ext_fetch() != 0)
         return -7;
+    int choose = 0; /* game selector: 1 when ghostfs left the choice to it */
     if (strcmp(root, "ghostfs") == 0) {
         /* the title's files live in SWRR save containers (no kernel exploit) */
-        if (gfs_init() != 0)
+        if ((choose = gfs_init()) < 0)
             return -6;
         root = "/app0";
     }
@@ -77,34 +57,30 @@ int ghost_boot(void)
         void host_dmem_census(void);
         host_dmem_census();
     }
+    /* ---- game selector (sel.c): it picks the title before its index is
+     * loaded and its memory planned, and frees all it used first ---- */
+    char title[16];
+    int picked = sel_run(choose || (g_ctx->flags & CTX_FLAG_SELECT), title);
+    if (choose && gfs_pick(picked >= 0 ? title : NULL) != 0)
+        return -6;
 
-    for (u32 i = 0; i < ARRAY_SIZE(BUNDLED); i++) {
-        fmt(path, sizeof(path), "%s/sce_module/%s", root, BUNDLED[i]);
-        if (file_exists(path) && !module_load_file(path, false))
-            return -1;
-    }
-    fmt(path, sizeof(path), "%s/eboot.bin", root);
-    g_main_mod = module_load_file(path, true);
-    if (!g_main_mod)
-        return -2;
+    int rc = modules_load_boot(root, &g_main_mod);
+    if (rc != 0)
+        return rc;
 
     u64 code_lo, code_hi;
     if (arena_init() != 0 || arena_code_region(&code_lo, &code_hi) != 0)
         return -3;
     /* bundled modules first, then the executable; its data may extend past
      * the code region (over the emulator's other, now unused, buffers) */
-    u64 cursor = ALIGN_UP(code_lo, 0x10000);
-    for (struct module *m = g_modules; m; m = m->next) {
-        if (m->is_main)
-            continue;
-        if (module_place(m, cursor) != 0)
+    for (struct module *m = g_modules; m; m = m->next)
+        if (!m->is_main && module_place(m, arena_code_alloc(m->image_size)) != 0)
             return -3;
-        cursor = ALIGN_UP(cursor + m->image_size, 0x10000);
-    }
-    if (module_place(g_main_mod, cursor) != 0)
+    u64 main_at = arena_code_alloc(g_main_mod->image_size);
+    if (module_place(g_main_mod, main_at) != 0)
         return -3;
-    logf("boot: code region %lx-%lx, main at %lx, image end %lx", code_lo, code_hi, cursor,
-         cursor + g_main_mod->image_size);
+    logf("boot: code region %lx-%lx, main at %lx, image end %lx", code_lo, code_hi, main_at,
+         main_at + g_main_mod->image_size);
     if (ext_start() != 0)
         return -8;
     for (struct module *m = g_modules; m; m = m->next)
@@ -121,11 +97,30 @@ int ghost_boot(void)
     for (struct module *m = g_modules; m; m = m->next)
         module_protect_relro(m);
 
+    /* the main thread as the proc param asks (+0x20 name, +0x28 priority,
+     * +0x30 stack size; each a pointer): otherwise <TITLE>-main (profile.c),
+     * the attribute's own priority and 8 MiB */
+    const u64 *pp = (const u64 *)g_main_mod->proc_param;
+    const char *name = pp && pp[0] > 0x20 ? (const char *)pp[4] : NULL;
+    const u32 *prio = pp && pp[0] > 0x28 ? (const u32 *)pp[5] : NULL;
+    const u32 *stack = pp && pp[0] > 0x30 ? (const u32 *)pp[6] : NULL;
+    if (!name)
+        name = profile_thread_name();
     u8 attr[0x40];
     u64 tid = 0;
     K.pthread_attr_init(attr);
-    K.pthread_attr_setstacksize(attr, 8 << 20);
-    int rc = ghost_thread_create(&tid, attr, ghost_main_thread, NULL, profile_thread_name()); /* <TITLE>-main */
+    K.pthread_attr_setstacksize(attr, stack && *stack ? *stack : 8 << 20);
+    if (prio && *prio >= 256 && *prio <= 767) {
+        void *host_real(const char *name);
+        int (*inherit)(void *, int) = host_real("scePthreadAttrSetinheritsched");
+        int (*sched)(void *, const int *) = host_real("scePthreadAttrSetschedparam");
+        int p = (int)*prio;
+        if (inherit && sched)
+            inherit(attr, 0 /* PTHREAD_EXPLICIT_SCHED */), sched(attr, &p);
+    }
+    logf("boot: main thread %s, stack %x, priority %d", name, stack && *stack ? *stack : 8 << 20,
+         prio ? (int)*prio : -1);
+    rc = ghost_thread_create(&tid, attr, ghost_main_thread, NULL, name);
     K.pthread_attr_destroy(attr);
     logf("boot: main thread created rc=%x", rc);
     if (g_ctx->flags & 4)

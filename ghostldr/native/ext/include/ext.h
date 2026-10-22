@@ -97,6 +97,18 @@ extern const struct ghost_api *G HIDDEN;
 #define gfs_slot_release G->gfs_slot_release
 #define gfs_title G->gfs_title
 #define remap_hook_add G->remap_hook_add
+#define module_load_runtime G->module_load_runtime
+#define module_start G->module_start
+#define g_thread_dtors (*G->thread_dtors)
+#define ghost_thread_start G->ghost_thread_start
+#define profile_has G->profile_has
+#define tls_thread_exit G->tls_thread_exit
+#define tls_thunk G->tls_thunk
+
+/* the extension's own tables (ext_main.c): the function registered for an
+ * import of nid from lib (NULL: any library), and a library's policy */
+u64 ext_find(const char *lib, const char *nid) HIDDEN;
+const struct ext_lib *ext_find_policy(const char *lib) HIDDEN;
 
 /* One family per file: its HLE table, its library policies and an optional
  * int init(void), run by ext_init first (nonzero: the family is skipped).

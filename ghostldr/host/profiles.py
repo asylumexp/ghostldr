@@ -66,7 +66,8 @@ MAGIC = b"GLPF"
 VERSION = 1
 HEADER = struct.Struct("<4sHHII16s20sI5iIiII4x")  # struct prof_hdr, 96 bytes
 REC = struct.Struct("<HHI")                        # struct prof_rec
-REC_PLAN, REC_TABLE, REC_RULE = 1, 2, 3
+REC_PLAN, REC_TABLE, REC_RULE, REC_TLS = 1, 2, 3, 4
+TLS_PER_REC = 15000            # offsets per REC_TLS record (its size is a u16)
 MAX_BLOB = 0x10000
 MAX_RULES = 32
 MAX_BUNDLE = 64 << 10
@@ -235,7 +236,7 @@ def _keys(errors: list, where: str, obj, allowed: set, required: set = frozenset
 
 
 TOP_KEYS = {"title", "name", "version", "status", "notes", "eboot", "pack", "app_params", "save_blocks",
-            "features", "memory", "hle"}
+            "features", "memory", "hle", "tls_sites"}
 MEMORY_KEYS = {"mode", "runtime_reserve_mib", "video_reserve_mib", "flex_mib", "min_mib", "plan"}
 
 
@@ -300,6 +301,17 @@ def validate(p: dict) -> list[str]:
                 e.append("a memory plan patches fixed eboot offsets: set eboot.fingerprint")
         elif "plan" in m:
             e.append('memory.plan is only used with "mode": "plan"')
+    tls = p.get("tls_sites", {})
+    if not isinstance(tls, dict):
+        e.append('tls_sites must map module file names to site lists ({"eboot.bin": "TITLE-tls-eboot.txt"})')
+    else:
+        for mod, f in tls.items():
+            if not (isinstance(mod, str) and 0 < len(mod) < 32 and "/" not in mod):
+                e.append(f"tls_sites: {mod!r} is not a module file name (at most 31 characters)")
+            elif not (isinstance(f, str) and (TITLES / f).is_file()):
+                e.append(f"tls_sites.{mod}: no file ghostldr/data/titles/{f} (tools/tls_sites.py --out writes it)")
+        if tls and not p.get("eboot", {}).get("fingerprint"):
+            e.append("tls_sites are text offsets of one build: set eboot.fingerprint")
     rules = p.get("hle", [])
     if not isinstance(rules, list):
         e.append("hle must be a list of rules")
@@ -406,6 +418,16 @@ def _cstr(s: str) -> bytes:
     return s.encode() + b"\0"
 
 
+def tls_site_list(name: str) -> list[int]:
+    """A tls_sites file (tools/tls_sites.py --out): hex text offsets, # comments."""
+    out = []
+    for line in (TITLES / name).read_text().splitlines():
+        line = line.split("#")[0].strip()
+        if line:
+            out.append(int(line, 16))
+    return sorted(out)
+
+
 def compile_blob(prof: dict, src: Path | None = None, flags: int = 0, extra_features: tuple[str, ...] = (),
                  params: list[int] | None = None) -> bytes:
     """One title's blob (struct prof_hdr + records).  `params` are its app
@@ -442,6 +464,11 @@ def compile_blob(prof: dict, src: Path | None = None, flags: int = 0, extra_feat
             else:
                 body += struct.pack("<BBHIQ", arg, f.get("size", 4), off, 0, _int(f.get("value", 0)) % 2**64)
         recs += _rec(REC_RULE, body + _cstr(r.get("lib", "")) + _cstr(r.get("function", r.get("nid", ""))))
+    for mod, f in sorted(prof.get("tls_sites", {}).items()):
+        offs = tls_site_list(f)
+        for i in range(0, max(len(offs), 1), TLS_PER_REC):
+            chunk = offs[i:i + TLS_PER_REC]
+            recs += _rec(REC_TLS, struct.pack("<32sI", mod.encode(), len(chunk)) + struct.pack(f"<{len(chunk)}I", *chunk))
     video = mem.get("video_reserve_mib")
     params = params if params is not None else app_params(prof, src)
     header = HEADER.pack(MAGIC, VERSION, HEADER.size, HEADER.size + len(recs), flags, prof["title"].encode(), fp,

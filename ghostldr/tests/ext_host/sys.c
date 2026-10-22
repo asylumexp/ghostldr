@@ -56,3 +56,51 @@ long sys_read_file(const char *path, char **out)
     fclose(f);
     return n;
 }
+
+/* ---- files for the loader tests (kernel.c) ---- */
+#include <dirent.h>
+#include <string.h>
+#include <sys/stat.h>
+
+int sys_open_path(const char *path) { return open(path, O_RDONLY); }
+long sys_seek(int fd, long off, int whence) { return lseek(fd, off, whence); }
+
+/* 0: regular file, 1: directory, -1: missing */
+int sys_kind(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return -1;
+    return S_ISDIR(st.st_mode) ? 1 : 0;
+}
+
+/* FreeBSD 11 dirents (u32 fileno, u16 reclen, u8 type, u8 namlen, name) of
+ * the directory open as fd, continuing where the last call stopped */
+int sys_getdents(int fd, void *buf, int size)
+{
+    static DIR *dirs[64];
+    if (fd < 0 || fd >= 64)
+        return -1;
+    if (!dirs[fd] && !(dirs[fd] = fdopendir(dup(fd))))
+        return -1;
+    int used = 0;
+    for (;;) {
+        long pos = telldir(dirs[fd]);
+        struct dirent *e = readdir(dirs[fd]);
+        if (!e)
+            break;
+        int len = (int)strlen(e->d_name), reclen = (8 + len + 1 + 3) & ~3;
+        if (used + reclen > size) {
+            seekdir(dirs[fd], pos);
+            break;
+        }
+        unsigned char *d = (unsigned char *)buf + used;
+        *(unsigned *)d = 1;
+        *(unsigned short *)(d + 4) = (unsigned short)reclen;
+        d[6] = e->d_type == DT_DIR ? 4 : 8;
+        d[7] = (unsigned char)len;
+        memcpy(d + 8, e->d_name, len + 1);
+        used += reclen;
+    }
+    return used;
+}
