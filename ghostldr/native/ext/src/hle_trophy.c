@@ -24,7 +24,9 @@
 #include "title_store.h"
 
 /* none of this is hot: optimize for size (the extension shares a 48 KiB area) */
+#if defined(__clang__)
 #pragma clang attribute push(__attribute__((minsize)), apply_to = function)
+#endif
 
 #define E(x) ((s32)(x))
 #define T_INVALID_ARGUMENT E(0x80551604)
@@ -185,7 +187,7 @@ static void load_meta(void)
     spin_lock(&lock);
     if (!g_meta_loaded) {
 #ifdef ext_title_id
-        const char *core_id = ext_title_id();
+        const char *core_id = ext_title_id ? ext_title_id() : NULL; /* a host may not offer it (test harnesses) */
         if (core_id)
             strlcpy(g_title_id, core_id, sizeof(g_title_id));
 #endif
@@ -736,4 +738,6 @@ static const struct ext_lib k_libs[] = {
 
 EXT_FAMILY_LIBS("trophy", k_hle, k_libs, NULL);
 
+#if defined(__clang__)
 #pragma clang attribute pop
+#endif

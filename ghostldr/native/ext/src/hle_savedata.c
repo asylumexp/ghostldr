@@ -39,7 +39,9 @@
 #include "title_store.h"
 
 /* nothing here is hot: every call ends in the kernel or a save mount */
+#if defined(__clang__)
 #pragma clang attribute push(__attribute__((minsize)), apply_to = function)
+#endif
 
 /* SCE_SAVE_DATA_ERROR_* (garlicsaves' PS4 table) */
 #define E_PARAMETER ((s32)0x809F0000)
@@ -2490,7 +2492,7 @@ s64 sd_mtime(const char *dir)
 
 static int sd_init(void)
 {
-    if (remap_hook_add(sd_remap) != 0) {
+    if (remap_hook_add && remap_hook_add(sd_remap) != 0) {
         logf("savedata: no room for the /savedata path hook: the core's save data is used instead");
         return -1;
     }
@@ -2553,7 +2555,9 @@ static const struct ext_lib k_libs[] = {
     {SD, NULL, EXT_LIB_NO_HOST, E_INTERNAL},
 };
 
+#if defined(__clang__)
 #pragma clang attribute pop
+#endif
 
 #ifndef SAVEDATA_HOST_TEST /* tests/ext_host/savedata_host.c compiles this file into a test program */
 EXT_FAMILY_LIBS("savedata", k_hle, k_libs, sd_init);
