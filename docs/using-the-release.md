@@ -57,6 +57,13 @@ Check it: `ls build/ghost/app0` should list `eboot.bin`, `sce_module`, `cache` a
    ```
 
    You can usually skip this: the tools find the console themselves, and with several on they pick the one where Luac0re's loader is listening. `python3 ghostldr/host/console.py --list` shows what they see.
+4. **Check the setup** with the loader still listening:
+
+   ```bash
+   python3 ghostldr/host/run.py doctor
+   ```
+
+   It prints one PASS, WARN or FAIL line per check: Python's version, the prebuilt core against `core.json`, the size of the Lua payload, whether UDP 18194 and TCP 18195 are free on this computer, and whether Luac0re's loader answers on the PS5. Fix any FAIL before going on. `WARN title dump` is normal with a release: it has no name table to check the dump against. Doctor can't see the firewall, so the ports still need allowing as above.
 
 ## 4. Pack the game data (on the computer, a few minutes)
 
@@ -83,7 +90,7 @@ python3 ghostldr/host/gfs_install.py
 The data lands in SWRR's saved data under the signed-in user, as 58 entries: `GHOST000`…`GHOST055`, `GHOSTINDEX` and `GFSCATALOG` (an install made with v0.1 has `GFSINDEX` instead of `GHOSTINDEX`, and keeps working). It belongs to the SWRR region you installed from: US and EU SWRR each keep their own saved data, so install from the one you will play in.
 
 - **Not enough space:** the installer checks before sending and stops without changing anything. Free space on the PS5 and run it again.
-- **Other titles** can be installed next to Ghost; none but Ghost has been tested ([compatibility.md](compatibility.md)).
+- **Other titles** can be installed next to Ghost. Bloodborne 1.09 reaches gameplay; other games are untested ([compatibility.md](compatibility.md)).
 
 ## 6. Play
 
@@ -93,6 +100,8 @@ The data lands in SWRR's saved data under the signed-in user, as 58 entries: `GH
    ```bash
    python3 ghostldr/host/run.py boot --app-root ghostfs --no-build
    ```
+
+Before sending, `run.py` prints a `preflight:` line. With a release it says `skipped`: the release has no name table to check the dump against, so it boots straight on.
 
 The first boot takes a minute or two. On a new save Ghost goes through brightness, audio output, difficulty and experience (keep Standard: only English audio is installed), then the opening. Its saves go into a separate entry, `GHOSTSAVE`, and SWRR's own save is never touched.
 
@@ -117,6 +126,8 @@ This downloads the art from the PlayStation Store's public pages into `build/gho
 - **The boot command times out while sending:** restart SWRR, open HALL OF FAME, and send again.
 - **Black screen with no log lines on the computer:** the firewall is blocking UDP 18194, or `PS_HOST` points at another device.
 - **`extension: the console did not fetch it`, or the log stops at `ext: no extension from the computer`:** the firewall is blocking TCP 18195. Nothing was started: allow it and run the same command again.
+- **Any other `ext:` line that stops the boot:** `run.py` follows it with a `[hint]` line giving the cause and the fix, for example a core and `ext.bin` from different builds.
+- **Not sure where it fails:** `python3 ghostldr/host/run.py doctor` checks Python, the prebuilt files, the computer's ports and the PS5's loader in one go.
 - **The PS5 asks for the disc:** the SWRR disc must be in the console that runs it.
 
 ## Removing it

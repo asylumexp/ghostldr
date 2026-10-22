@@ -32,6 +32,14 @@ asked:
 
     python3 ghostldr/host/run.py boot --force-preflight
 
+Two limits for now. The check always looks at `build/ghost/app0`,
+whichever title `--title` boots from the save containers. And
+`import_report.py` doesn't read extension entries keyed by NID alone
+(functions with no known name), so it counts them as unresolved even
+though the extension implements them: Ghost of Tsushima and Bloodborne
+each import one (`libSceDiscMap`), so they always ask. A release tree
+ships no name table, so there the check is skipped.
+
 ## `tools/stub_report.py`
 
     python3 ghostldr/tools/stub_report.py build/ghostldr/run.log [--top N] [--json out.json]

@@ -2,7 +2,7 @@
 
 Runs PS4 game backups and homebrew inside *Star Wars Racer Revenge* (SWRR, PS4 US CUSA03474 or EU CUSA03492) on a PS5. It goes through [Luac0re](https://github.com/Gezine/Luac0re)'s userland JIT exploit, with no kernel exploit and no jailbreak.
 
-**Ghost of Tsushima (CUSA11456 v2.18) is the only game tested so far.** The loader itself is title-agnostic: what Ghost needs beyond the defaults is in its profile. Another title boots as far as its imports and memory needs allow; [docs/compatibility.md](docs/compatibility.md) is how to bring one up.
+**Ghost of Tsushima (CUSA11456 v2.18) is the main tested game; Bloodborne (CUSA00900 v1.09) also reaches gameplay.** The loader itself is title-agnostic: what Ghost needs beyond the defaults is in its profile. Another title boots as far as its imports and memory needs allow; [docs/compatibility.md](docs/compatibility.md) is how to bring one up.
 
 **Homebrew** built with the [OpenOrbis PS4 toolchain](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain) runs with no profile: its stdout goes to the log, its files come from the save containers, and it gets its framebuffers, the pad and its malloc memory. See [Homebrew](docs/compatibility.md#homebrew) for packing and booting it, and what doesn't work yet.
 
@@ -21,6 +21,8 @@ The game's files live in SWRR's own save containers, installed once over the net
 Start with [docs/ghost-on-stock-ps5.md](docs/ghost-on-stock-ps5.md): triggering Luac0re, the data install, and booting. Other titles: [docs/compatibility.md](docs/compatibility.md). Container names and the title catalogue: [docs/ghostfs-catalogue.md](docs/ghostfs-catalogue.md).
 
 To back up and restore saves from a browser, see [docs/manager.md](docs/manager.md): a small web manager that runs on the PS5 through Luac0re.
+
+To check the computer and the console before a boot (`run.py doctor`), and for the boot's import check and the stub report, see [docs/host-tooling.md](docs/host-tooling.md).
 
 ## Layout
 
