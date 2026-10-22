@@ -28,7 +28,11 @@ int fclose(void *f);
 void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off);
 
 #define MAP_PRIVATE_ 0x2
+#if defined(__linux__)
+#define MAP_ANON_ 0x20 /* Linux (0x1000 there is MAP_GROWSDOWN) */
+#else
 #define MAP_ANON_ 0x1000 /* macOS and FreeBSD */
+#endif
 #define MiB (1UL << 20)
 
 struct kfuncs K;
