@@ -203,8 +203,9 @@ static void mount_ok(s32 user, const char *dir, u64 blocks, u32 mode, char mp[16
 {
     struct sd_mount_result r;
     s32 rc = mount2(user, dir, blocks, mode, &r);
-    char w[200];
-    fmt(w, sizeof(w), "%s: mount %s mode %x -> %x %s status %u", what, dir, mode, (u32)rc, r.mount_point,
+    char w[200], mp_s[17];
+    memcpy(mp_s, r.mount_point, 16), mp_s[16] = 0; /* poisoned (0xCC) when the mount failed: no NUL to stop %s */
+    fmt(w, sizeof(w), "%s: mount %s mode %x -> %x %s status %u", what, dir, mode, (u32)rc, mp_s,
         r.mount_status);
     expect(rc == 0 && r.mount_status == want_status && r.required_blocks == 0, w);
     memcpy(mp, r.mount_point, 16);
