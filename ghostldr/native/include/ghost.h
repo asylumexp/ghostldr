@@ -179,6 +179,7 @@ struct vmq {
 u32 jit_vmap(u64 lo, u64 hi, struct vmq *out, u32 max);
 int jit_peek(u64 addr, void *out, u32 n); /* compiler reads at addr, here: 0, or -1 (EFAULT, no crash) */
 int jit_stamp(u64 addr);                  /* compiler writes 16 bytes (the time) at addr: 0, or -1 (EFAULT) */
+int jit_ps4_check(void); /* PS4: the gadget, clock_gettime, the socket pair, EFAULT on known memory: 0 when all work */
 
 /* mmap constants (FreeBSD / Orbis) */
 #define PROT_NONE 0

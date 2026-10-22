@@ -41,36 +41,61 @@ static int (*qmp)(void *, void **, void **, int *);
 
 /* Can the compiler write at addr + delta, and does it show at addr here?
  * 16 bytes: the compiler's own are read first and put back.  Neither probe
- * can crash it (jit_peek, jit_stamp: EFAULT instead). */
+ * can crash it (jit_peek, jit_stamp: EFAULT instead).  Bytes that differ
+ * from these here are other memory: nothing is written there.  Each step is
+ * logged before it runs (a PS4 boot once stopped silently in here). */
 COLD static bool probe(u64 addr, s64 delta)
 {
     u64 w = addr + (u64)delta, old[2], now[2];
-    if (jit_peek(w, old, 16) != 0 || jit_stamp(w) != 0)
+    logf("arena: PS4: probe %lx: compiler write() of it to the socket pair", w);
+    if (jit_peek(w, old, 16) != 0) {
+        logf("arena: PS4: probe %lx: the compiler cannot read it", w);
         return false;
+    }
+    if (memcmp((const void *)addr, old, 16) != 0) {
+        logf("arena: PS4: probe %lx: the compiler has other bytes there than %lx here", w, addr);
+        return false;
+    }
+    logf("arena: PS4: probe %lx: compiler clock_gettime() into it", w);
+    if (jit_stamp(w) != 0) {
+        logf("arena: PS4: probe %lx: the compiler cannot write it", w);
+        return false;
+    }
+    logf("arena: PS4: probe %lx: compiler write() again", w);
     bool ok = jit_peek(w, now, 16) == 0 && memcmp(now, old, 16) != 0 && memcmp((const void *)addr, now, 16) == 0;
+    logf("arena: PS4: probe %lx: compiler memcpy() of its bytes back", w);
     jit_copy_to(w, old, 16);
-    return ok && memcmp((const void *)addr, old, 16) == 0;
+    ok = ok && memcmp((const void *)addr, old, 16) == 0;
+    logf("arena: PS4: probe %lx: %s", w, ok ? "written and seen here" : "the write does not show here");
+    return ok;
 }
 
 /* Each buffer past its header, probed at both ends (JIT objects are mapped
  * whole), and the small area.  The header is 16 KiB (32 KiB for the VU
  * buffers: a 13.60 PS5 writes neither their +16 KiB nor any buffer's first
- * bytes).  The buffer holding the core is not probed. */
+ * bytes).  The buffer holding the core is not probed, nor the core's data.
+ * First the probes themselves are checked on memory known to be good: when
+ * they do not work, nothing is probed or written through the compiler and
+ * arena_init fails (the boot stops). */
 COLD static void ps4_verify(void)
 {
+    bool usable = jit_ps4_check() == 0;
+    if (!usable)
+        logf("arena: PS4: the compiler checks failed (above): no JIT buffer is probed and nothing is written "
+             "through the compiler; the boot stops here (docs/ps4.md)");
     for (u32 i = 0; i < g_nrx; i++) {
         struct rx_region *r = &g_rx[i];
         u64 lo = r->start + JIT_BUF_HEADER;
-        bool ok = r->start > g_small_cur && lo + JIT_BUF_HEADER + 16 <= r->end &&
+        bool ok = usable && r->start > g_small_cur && lo + JIT_BUF_HEADER + 16 <= r->end &&
                   (probe(lo, 0) || probe(lo += JIT_BUF_HEADER, 0)) && probe(r->end - 16, 0);
         r->wlo = ok ? lo : 0, r->whi = ok ? r->end : 0;
         if (r->start <= g_small_cur)
             logf("arena: PS4: %lx-%lx: holds the core", r->start, r->end);
-        else
+        else if (usable)
             logf("arena: PS4: %lx-%lx: %s %lu KiB", r->start, r->end,
                  ok ? "the compiler writes it past" : "NOT writable through the compiler, even past", (lo - r->start) >> 10);
     }
-    bool ok = g_small_end >= g_small_cur + 16 && probe(g_small_cur, 0) && probe(g_small_end - 16, 0);
+    bool ok = usable && g_small_end >= g_small_cur + 16 && probe(g_small_cur, 0) && probe(g_small_end - 16, 0);
     g_small_end = ok ? g_small_end : g_small_cur;
     g_sa_lo = g_small_cur, g_sa_hi = g_small_end;
     logf("arena: PS4: small area %lx-%lx", g_small_cur, g_small_end);

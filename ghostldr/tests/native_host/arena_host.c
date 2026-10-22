@@ -15,7 +15,10 @@
  * VU1's buffer), ps4-noblock (nothing, and no new JIT block either),
  * ps4-noflag (ps4-header without the PS4 flag), and old-rule (ps4-header,
  * the first module where v0.1.1 put it).  small: the title's modules
- * fit in 16 MiB (default: Ghost's sizes from the PS4 log).
+ * fit in 16 MiB (default: Ghost's sizes from the PS4 log).  ps4-report:
+ * ps4-header with the core of the second PS4 report (12.02, text 176 KiB,
+ * image 224 KiB: core at IPU+16 KiB, small area 914b14000-914b1c000);
+ * ps4-nocheck: that layout, with the compiler checks (jit_ps4_check) failing.
  * Also: arena_host heap -- ps4_keep_heap's cases; arena_host layout -- the
  * boot context's offsets that ghostldr.lua writes; arena_host ps5 drop -- the
  * buffers bigexec.c can take, and the arena after it took two.
@@ -54,7 +57,7 @@ struct range {
 };
 static struct range g_main[16], g_comp[32];
 static u32 g_nmain, g_ncomp;
-static bool g_block_ok = true;
+static bool g_block_ok = true, g_check_ok = true;
 static u64 g_ipu; /* addresses print relative to it: the consoles' own, rebased here */
 
 static int fake_qmp(void *addr, void **st, void **en, int *prot)
@@ -129,7 +132,14 @@ int jit_block_create(struct jit_block *b, u64 size, u64 want_rx)
 
 void jit_block_destroy(struct jit_block *b) { memset(b, 0, sizeof(*b)); }
 
-/* ---- layouts (from the PS5 13.60 and PS4 12.02 logs; core image 0x34000, text 0x28000) ---- */
+int jit_ps4_check(void)
+{
+    printf("compiler check %s\n", g_check_ok ? "ok" : "FAILED");
+    return g_check_ok ? 0 : -1;
+}
+
+/* ---- layouts (from the PS5 13.60 and PS4 12.02 logs; core image 0x34000, text 0x28000,
+ * or as given: the second PS4 report's core is 0x38000 and 0x2c000) ---- */
 static void add_main(u64 s, u64 e) { g_main[g_nmain++] = (struct range){s, e, 5, NULL}; }
 
 /* a JIT program buffer: here [s, e) executable; the compiler per model */
@@ -149,7 +159,7 @@ static u64 g_ee; /* the EE buffer: the largest */
 
 /* the consoles' layout at an address this machine has free, keeping its
  * position within 64 KiB (all that placement depends on) */
-static void layout(u64 console_ipu, const char *model)
+static void layout(u64 console_ipu, const char *model, u64 core_text, u64 core_image)
 {
     u8 *p = mmap(NULL, 0x4058000 + 0x10000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (p == MAP_FAILED_) {
@@ -159,10 +169,11 @@ static void layout(u64 console_ipu, const char *model)
     u64 ipu = g_ipu = ALIGN_UP((u64)p, 0x10000) + (console_ipu & 0xffff), core = ipu + 0x4000;
     if (ipu + 0x4058000 > (u64)p + 0x4058000 + 0x10000)
         ipu = g_ipu = ipu - 0x10000, core = ipu + 0x4000;
-    ctx.reserved[2] = ipu, ctx.reserved[3] = core + 0x34000;
-    add_main(ipu, core);                      /* the IPU buffer's header (16 KiB: not a region) */
-    add_main(core, core + 0x28000);           /* the core's text */
-    add_main(core + 0x34000, ipu + 0x44000);  /* the small area (48 KiB) */
+    ctx.reserved[2] = ipu, ctx.reserved[3] = core + core_image;
+    printf("ipu %lx\n", ipu);
+    add_main(ipu, core);                         /* the IPU buffer's header (16 KiB: not a region) */
+    add_main(core, core + core_text);            /* the core's text; its data (RW) follows */
+    add_main(core + core_image, ipu + 0x44000);  /* the small area (48 or 32 KiB) */
     g_comp[g_ncomp++] = (struct range){ipu, core, 5, (u8 *)ipu};
     g_comp[g_ncomp++] = (struct range){core, ipu + 0x44000, 3, (u8 *)core};
     u64 ee = g_ee = ipu + 0x48000;
@@ -223,9 +234,12 @@ int main(int argc, char **argv)
     }
     const char *model = argv[1];
     bool ps5 = !strcmp(model, "ps5"), noflag = !strcmp(model, "ps4-noflag");
+    bool report = !strcmp(model, "ps4-report") || !strcmp(model, "ps4-nocheck");
+    g_check_ok = strcmp(model, "ps4-nocheck") != 0;
     ctx.flags = ps5 || noflag || !strcmp(model, "old-rule") ? 0 : CTX_FLAG_PS4;
     g_block_ok = strcmp(model, "ps4-noblock") != 0;
-    layout(ps5 ? 0x9009d4000 : 0x914ad8000, ps5 || model[0] == 'o' || noflag ? "ps4-header" : model);
+    layout(ps5 ? 0x9009d4000 : 0x914ad8000, ps5 || model[0] == 'o' || noflag || report ? "ps4-header" : model,
+           report ? 0x2c000 : 0x28000, report ? 0x38000 : 0x34000);
     modules(argc > 2 && !strcmp(argv[2], "small"));
     if (model[0] == 'o') { /* v0.1.1 put the first module at the EE buffer's 64 KiB-aligned start */
         u8 text[64] = {0};
@@ -234,7 +248,10 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    printf("init %d\n", arena_init());
+    int init = arena_init();
+    printf("init %d\n", init);
+    if (init != 0) /* boot.c, sel.c and diag.c stop here */
+        return 0;
     u64 lo = 0, hi = 0;
     int sel = arena_code_region(&lo, &hi);
     printf("selector region %d +%lx-+%lx\n", sel, sel ? 0 : lo - g_ipu, sel ? 0 : hi - g_ipu);

@@ -25,15 +25,60 @@ static u64 push_chain(u64 v)
     chain_idx++;
     if (chain_idx == 66) {
         /* final write releases the compiler: keep it ordered last */
+#if defined(__x86_64__)
         __asm__ volatile("mfence" ::: "memory");
+#else
+        __atomic_thread_fence(__ATOMIC_SEQ_CST); /* tests/native_host/jitrpc_host.c */
+#endif
     }
     w64(slot, v);
     return slot;
 }
 
+/* PS4: a call the compiler does not answer is given up on after this long,
+ * and the compiler is not used again (it may still run the old chain).  The
+ * spin limit below is no clock there: a PS4's usleep(50) lasts a scheduler
+ * tick (~1 ms), so 2,000,000 spins are half an hour or more, not ~100 s. */
+#define PS4_JIT_GIVE_UP_S 30
+static bool g_jit_stuck;
+
+static u64 now_us(void)
+{
+    static u64 (*ptime)(void);
+    static bool looked;
+    if (!looked)
+        ptime = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelGetProcessTime"), looked = true;
+    return ptime ? ptime() : 0;
+}
+
+/* PS4: true when the compiler has had long enough; logs while it waits */
+__attribute__((minsize, cold)) static bool ps4_given_up(u64 fn, u64 rax, u64 *t0, u32 *said)
+{
+    u64 t = now_us();
+    if (!t)
+        return false; /* no clock: the spin limit still applies */
+    if (!*t0)
+        *t0 = t;
+    u64 s = (t - *t0) / 1000000;
+    if ((s >= 2 && *said == 0) || (s >= 10 && *said == 1)) {
+        (*said)++;
+        logf("jit_call: fn %lx rax %lx: no answer from the compiler after %lu s", fn, rax, s);
+    }
+    if (s < PS4_JIT_GIVE_UP_S)
+        return false;
+    logf("jit_call: fn %lx rax %lx: no answer from the compiler in %lu s: giving up on it, no further compiler calls",
+         fn, rax, s);
+    g_jit_stuck = true;
+    return true;
+}
+
 u64 jit_call(u64 fn, u64 rax, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6)
 {
     struct boot_ctx *c = g_ctx;
+    if (g_jit_stuck) { /* PS4 only: a call before this one never came back */
+        logf("jit_call: fn %lx rax %lx skipped: the compiler stopped answering earlier", fn, rax);
+        return (u64)-1;
+    }
     chain_idx = 0;
     for (int i = 0; i < 6; i++)
         push_chain(c->rop_ret);
@@ -108,13 +153,19 @@ u64 jit_call(u64 fn, u64 rax, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6)
     push_chain(c->rop_pop_rsp);
     push_chain(c->chain_start);
 
+    u64 t0 = 0;
+    u32 said = 0;
     for (u64 spins = 0; r64(c->chain_end + 8) != c->chain_end; spins++) {
         if (spins > 2000000) {
             logf("jit_call: timeout fn=%lx", fn);
+            g_jit_stuck = is_ps4();
             return (u64)-1;
         }
-        if (spins > 64)
+        if (spins > 64) {
             K.usleep(50);
+            if (is_ps4() && ps4_given_up(fn, rax, &t0, &said))
+                return (u64)-1;
+        }
     }
     return r64(c->oob_scratch + SCRATCH_RET);
 }
@@ -142,6 +193,32 @@ int jit_copy_to(u64 dst, const void *src, size_t len)
 #define SOL_SOCKET 0xffff
 #define SCM_RIGHTS 1
 #define SYS_sendmsg 28
+#define MSG_DONTWAIT 0x80
+#define EAGAIN 35
+
+/* PS4: receive on this process's end of the socket pair without blocking
+ * (Luac0re never uses the pair there itself).  The compiler's system call
+ * has returned by now, so what it sent is queued already: up to `tries` ms
+ * of waiting covers nothing else.  Bytes received, or -1 (errno set). */
+__attribute__((minsize, cold)) static ssize_t sock_recv(void *msg, u32 tries)
+{
+    for (u32 i = 0;; i++) {
+        ssize_t r = K.recvmsg((int)g_ctx->new_main_sock, msg, MSG_DONTWAIT);
+        if (r >= 0 || i >= tries || *K.errno_fn() != EAGAIN)
+            return r;
+        K.usleep(1000);
+    }
+}
+
+__attribute__((minsize, cold)) static ssize_t sock_read(void *buf, u32 n, u32 tries)
+{
+    u64 iov[2] = {(u64)buf, n};
+    u8 msg[0x30];
+    memset(msg, 0, sizeof(msg));
+    *(u64 *)(msg + 0x10) = (u64)iov;
+    *(u32 *)(msg + 0x18) = 1;
+    return sock_recv(msg, tries);
+}
 
 /* Move a descriptor from the compiler process into this one. */
 int jit_recv_fd(int compiler_fd)
@@ -177,7 +254,7 @@ int jit_recv_fd(int compiler_fd)
     *(u32 *)(rmsg + 0x18) = 1;
     *(u64 *)(rmsg + 0x20) = (u64)rctl;
     *(u32 *)(rmsg + 0x28) = sizeof(rctl);
-    ssize_t got = K.recvmsg((int)g_ctx->new_main_sock, rmsg, 0);
+    ssize_t got = is_ps4() ? sock_recv(rmsg, 1000) : K.recvmsg((int)g_ctx->new_main_sock, rmsg, 0);
     if (got < 0 || *(u32 *)(rctl + 8) != SCM_RIGHTS) {
         logf("jit_recv_fd: recvmsg failed %ld errno %d", got, *K.errno_fn());
         return -1;
@@ -257,17 +334,33 @@ int jit_block_write(struct jit_block *b, u64 offset, const void *src, size_t len
  * of the JIT mappings (a 13.60 PS5 shows 25 entries, no bridge, no buffer).
  *
  * jit_peek: the compiler write()s n bytes at addr into its end of the
- * socket pair Luac0re connected; they are read here.  0, or -1. */
+ * socket pair Luac0re connected; they are read here, without blocking
+ * (a blocking read waited forever when they did not come).  0, or -1. */
 __attribute__((minsize, cold)) int jit_peek(u64 addr, void *out, u32 n)
 {
-    if (!g_ctx->jit_syscall)
+    struct boot_ctx *c = g_ctx;
+    if (!c->jit_syscall)
         return -1;
-    if ((s64)jit_call(g_ctx->jit_syscall, SYS_write, g_ctx->new_jit_sock, addr, n, 0, 0, 0) != (s64)n)
+    u8 junk[64];
+    u64 stale = 0;
+    for (ssize_t r; (r = sock_read(junk, sizeof(junk), 0)) > 0;)
+        stale += (u64)r;
+    if (stale)
+        logf("jit_peek: dropped %lu stale bytes from the socket pair", stale);
+    s64 rc = (s64)jit_call(c->jit_syscall, SYS_write, c->new_jit_sock, addr, n, 0, 0, 0);
+    if (rc != (s64)n) {
+        if (rc != -1)
+            logf("jit_peek: the compiler's write() of %lx returned %ld", addr, rc);
         return -1;
+    }
     for (u32 got = 0; got < n;) {
-        ssize_t r = K.read((int)g_ctx->new_main_sock, (u8 *)out + got, n - got);
-        if (r <= 0)
+        ssize_t r = sock_read((u8 *)out + got, n - got, 200);
+        if (r <= 0) {
+            logf("jit_peek: the compiler wrote %u bytes from %lx to its socket (fd %ld), %u arrived here (fd %ld): "
+                 "rc %ld errno %d",
+                 n, addr, c->new_jit_sock, got, c->new_main_sock, (s64)r, *K.errno_fn());
             return -1;
+        }
         got += (u32)r;
     }
     return 0;
@@ -281,6 +374,47 @@ __attribute__((minsize, cold)) int jit_stamp(u64 addr)
         return -1;
     return (s64)jit_call(g_ctx->jit_syscall, SYS_clock_gettime, 0 /* CLOCK_REALTIME */, addr, 0, 0, 0, 0) == 0 ? 0
                                                                                                            : -1;
+}
+
+#define SYS_getpid 20
+
+/* PS4, before any JIT buffer is probed: the syscall gadget, clock_gettime,
+ * the socket pair and the error path, each on memory known to be good (the
+ * shared scratch) or known to be absent (the first page).  Each step is
+ * logged before it runs, so the last line of a log that stops names it.
+ * 0 when all four work. */
+__attribute__((minsize, cold)) int jit_ps4_check(void)
+{
+    struct boot_ctx *c = g_ctx;
+    u64 a = priv(0x300), b = priv(0x340);
+    u8 got[16];
+    logf("jit: PS4 check: syscall gadget %lx, socket pair: compiler fd %ld, here fd %ld", c->jit_syscall,
+         c->new_jit_sock, c->new_main_sock);
+    if (!c->jit_syscall)
+        return -1;
+    logf("jit: PS4 check 1/4: getpid() in the compiler");
+    s64 pid = (s64)jit_call(c->jit_syscall, SYS_getpid, 0, 0, 0, 0, 0, 0);
+    logf("jit: PS4 check 1/4: compiler pid %ld (this process %d)", pid, K.getpid());
+    if (pid <= 0)
+        return -1;
+    logf("jit: PS4 check 2/4: clock_gettime() into the shared scratch %lx", b);
+    memset((void *)b, 0, 16);
+    int st = jit_stamp(b);
+    u64 sec = r64(b), nsec = r64(b + 8);
+    logf("jit: PS4 check 2/4: rc %d, seen here %lu s %lu ns", st, sec, nsec);
+    if (st != 0 || !sec || nsec >= 1000000000)
+        return -1;
+    logf("jit: PS4 check 3/4: write() of the shared scratch %lx to the socket pair", a);
+    for (u32 i = 0; i < 16; i++)
+        ((u8 *)a)[i] = (u8)(0xA5 ^ (i * 17));
+    int pk = jit_peek(a, got, 16);
+    logf("jit: PS4 check 3/4: rc %d, %s", pk, pk ? "nothing read" : memcmp(got, (void *)a, 16) ? "OTHER bytes" : "same bytes");
+    if (pk != 0 || memcmp(got, (void *)a, 16) != 0)
+        return -1;
+    logf("jit: PS4 check 4/4: write() from an unmapped address (EFAULT expected)");
+    pk = jit_peek(0x1000, got, 16);
+    logf("jit: PS4 check 4/4: %s", pk ? "refused, as expected" : "it read something there");
+    return 0;
 }
 
 /* Undo jit_block_create, also a partial one: the RX view and descriptor

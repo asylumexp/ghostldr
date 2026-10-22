@@ -4,6 +4,9 @@
   the executable regions a PS5 and a PS4 boot logged and a fake compiler
   process: where the title's modules go, which writes the compiler is asked
   to make, and what happens when it cannot write a buffer;
+- jitrpc.c in a host process (native_host/jitrpc_host.c) with a fake
+  compiler thread and a real socket pair: the PS4 probes and checks end,
+  whatever the compiler does (the second PS4 report stopped in them);
 - ghostldr.lua under a fake Luac0re (boot_fake.lua, needs a desktop Lua
   5.3/5.4): the platform flag, the firmware and the compiler's syscall
   gadget in the boot context, at the offsets ghost.h has;
@@ -131,8 +134,106 @@ class ArenaTests(unittest.TestCase):
         self.assertIn("need 18f0000", self.run_host("ps4-header"))
         self.assertEqual(0x370000 + 0x1580000, 0x18f0000)
 
+    def test_ps4_reported_layout(self) -> None:
+        """The second PS4 report (12.02): core at 914adc000 (IPU+16 KiB, text
+        176 KiB, data to 914b14000), small area 914b14000-914b1c000.  The
+        same regions as that log, the compiler checks before any probe, no
+        probe in the core's text or data, and Ghost placed as before."""
+        out = self.run_host("ps4-report")
+        ipu = int(re.search(r"^ipu ([0-9a-f]+)$", out, re.M)[1], 16)
+        rel = lambda m: (int(m[0], 16) - ipu, int(m[1], 16) - ipu)  # noqa: E731
+        regions = [rel(m) for m in re.findall(r"arena: RX ([0-9a-f]+)-([0-9a-f]+)", out)]
+        self.assertEqual(regions[0], (0x4000, 0x30000))           # 914adc000-914b08000 (176 KiB)
+        self.assertEqual(regions[1], (EE, EE + 0x2000000))        # 914b20000-916b20000
+        self.assertEqual(rel(re.search(r"arena: small area ([0-9a-f]+)-([0-9a-f]+)", out).groups()),
+                         (0x3c000, 0x44000))                       # 914b14000-914b1c000
+        self.assertLess(out.index("compiler check ok"), out.index("probe "))
+        self.assertLess(out.index("holds the core"), out.index("probe "))
+        probes = sorted({int(a, 16) - ipu for a in re.findall(r"probe ([0-9a-f]+):", out)})
+        self.assertEqual(probes[0], 0x3c000)                       # the lowest: the small area (probed last)
+        self.assertIn(0x43ff0, probes)
+        self.assertIn(EE + 0x4000, probes)
+        self.assertFalse([a for a in probes if a < 0x3c000])       # nothing in the core's text or data
+        self.assertEqual(offsets(out), {"libSceFios2.prx": EE + 0x10000, "libc.prx": EE + 0x1a0000,
+                                        "libSceNpToolkit2.prx": EE + 0x2c0000, "eboot.bin": EE + 0x380000})
+        self.assertIn("stubs at +3c000 write 0", out)
+
+    def test_ps4_failed_check_writes_nothing(self) -> None:
+        """When the probes do not work on known memory, no buffer is probed,
+        nothing is written through the compiler and arena_init fails."""
+        out = self.run_host("ps4-nocheck")
+        self.assertIn("compiler check FAILED", out)
+        self.assertIn("the boot stops here", out)
+        self.assertIn("init -1", out)
+        self.assertNotIn("probe ", out)
+        self.assertNotIn("module ", out)
+
     def test_heap_kept_only_while_used(self) -> None:
         self.assertIn("heap 1 0 0 0", self.run_host("heap"))
+
+
+class JitRpcTests(unittest.TestCase):
+    """jitrpc.c against a fake compiler thread: nothing in the PS4 probes can
+    block for good (the second PS4 report's log ended at the first probe)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.exe = Path(cls.tmp.name) / "jitrpc_host"
+        build_host("jitrpc_host", [HERE / "native_host/jitrpc_host.c", NATIVE / "src/jitrpc.c"], cls.exe)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp.cleanup()
+
+    def run_host(self, mode: str) -> str:
+        p = subprocess.run([str(self.exe), mode], capture_output=True, text=True, timeout=30)
+        if p.returncode == 77:
+            self.skipTest(p.stdout.strip())
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        return p.stdout
+
+    def test_working_compiler(self) -> None:
+        out = self.run_host("ok")
+        self.assertIn("check 0", out)
+        self.assertIn("peek 0 same", out)
+        self.assertIn("stamp 0", out)
+        self.assertIn("refused, as expected", out)
+
+    def test_stale_bytes_are_dropped(self) -> None:
+        out = self.run_host("stale")
+        self.assertIn("dropped 29 stale bytes", out)
+        self.assertIn("check 0", out)
+        self.assertIn("peek 0 same", out)
+
+    def test_bytes_that_never_arrive(self) -> None:
+        """write() succeeds in the compiler but nothing reaches this end: the
+        read used to block forever; now the check and the peek fail."""
+        for mode in ("lost", "pipe"):
+            with self.subTest(mode=mode):
+                out = self.run_host(mode)
+                self.assertIn("check -1", out)
+                self.assertIn("0 arrived here", out)
+                self.assertIn("peek -1", out)
+
+    def test_compiler_that_never_answers(self) -> None:
+        out = self.run_host("hang")
+        self.assertIn("no answer from the compiler after 2 s", out)
+        self.assertIn("giving up on it", out)
+        self.assertIn("check -1", out)
+        self.assertIn("skipped: the compiler stopped answering earlier", out)
+        self.assertIn("stamp -1", out)
+
+    def test_slow_compiler_is_waited_for(self) -> None:
+        out = self.run_host("slow")
+        self.assertIn("check 0", out)
+        self.assertNotIn("giving up", out)
+
+    def test_ps5_never_reads_the_clock(self) -> None:
+        out = self.run_host("ps5-slow")
+        self.assertIn("check 0", out)
+        self.assertIn("clock reads 0", out)
+        self.assertNotIn("no answer", out)
 
 
 @unittest.skipUnless(find_lua(), "needs a desktop Lua 5.3 or 5.4")

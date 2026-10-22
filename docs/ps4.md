@@ -1,8 +1,8 @@
 # ghostldr on a PS4
 
-Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions.
+Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe).
 
-**Status: experimental and unverified on a PS4.** Everything below was worked out from one kernel log, Luac0re's source and SWRR's executable. No PS4 has run the new code yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
+**Status: experimental and unverified on a PS4.** Everything below was worked out from two logs, Luac0re's source and SWRR's executable. No PS4 has got past the probes yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
 
 ## What differs on a PS4
 
@@ -117,7 +117,7 @@ What it logs:
 4. **The JIT buffers:**
    - the compiler process's map as its `sceKernelVirtualQuery` lists it (without the JIT mappings, on a PS5);
    - this process's map from the bridge to the VU heaps;
-   - per buffer, whether the compiler writes it past its header (the boot's own probes), and where a boot would put the first module.
+   - the probes checked on known memory first (`jit: PS4 check` lines), then per buffer whether the compiler writes it past its header (the boot's own probes), and where a boot would put the first module.
 5. **Writes through the compiler:** each one is put back. They go to the shared scratch, the free small area after the core, and the ends of each buffer.
 6. **New JIT blocks** of 64 KiB, 768 KiB, 1, 4, 16 and 32 MiB, each mapped here at a fixed address inside a reserved range. Mapping a JIT object without an address puts it at its "home" address, over whatever is there; on a PS5 that once replaced the core's data and crashed SWRR. Each block is created, has a function written into its last page, is called, then destroyed. This step stops at the first failure: a 13.60 PS5 makes at most 768 KiB of new JIT memory (0x8002000c past it). Only one page is written, so a block that works here shows it can be created and mapped, not that all of it can be filled.
 7. **Last, each buffer's first 16 bytes,** read and written through the compiler by the same probes. On a 13.60 PS5 both give EFAULT.
@@ -150,6 +150,36 @@ python3 ghostldr/host/run.py boot --log build/ghostldr/ps4-boot.log
 
 Before posting the logs anywhere public, remove user IDs and names from the kernel log. ghostldr's own log has none, apart from the ghostfs user ID line of a boot.
 
+## The second report: the boot stopped at the first probe
+
+A boot with the changes above (12.02, Ghost from ghostfs, `--no-build`) logged up to:
+
+```
+arena: RX 914adc000-914b08000 (176 KiB)        <- the IPU buffer from +16 KiB: the core's text
+arena: RX 914b20000-916b20000 (32768 KiB)      ... and IOP, VU0, VU1 as before
+arena: small area 914b14000-914b1c000           <- past the core's data (914b08000-914b14000)
+arena: PS4: 914adc000-914b08000: holds the core
+```
+
+and nothing after it, as far as the log went. Whether SWRR crashed (a CE error), hung, or the copy stopped there isn't known.
+
+**Where that is.** `ps4_verify` (arena.c) logs "holds the core" for the IPU buffer without probing it, then probes the EE buffer at `914b24000`; the next line comes only after that buffer's probes. They were the first compiler calls of the boot (the core itself was written by `ghostldr.lua`), and the first use of the syscall gadget and of Luac0re's second socket pair on a PS4. Luac0re never uses that pair on a PS4 below 14.00: its sockets are made directly there. Nothing touches the core's text, its data or the small area before the four buffers are done; `tests/native_host/arena_host.c` runs this exact layout (`ps4-report`) and the logic neither loops nor faults with any compiler.
+
+**What in a probe can stop.**
+- `jit_peek` read the compiler's 16 bytes with a blocking read. If the compiler's `write()` returned 16 but the bytes didn't reach this process's end of the pair (another descriptor, or the pair not connected as on a PS5), the read waited forever, with no log. That's the only way the probes could wait for good.
+- A compiler call that doesn't return. `jit_call` gave up after 2,000,000 spins with `usleep(50)`. That's about 100 s on a PS5, but a PS4's kernel (FreeBSD 9) sleeps at least a scheduler tick, so the same limit is half an hour or more. It would look like a hang.
+- A crash of the compiler process. SWRR is closed with an error, as in the first report. The probes' system calls return EFAULT rather than fault; the error path of the PS4's libkernel wrapper hadn't been used by ghostldr before.
+
+**What changed.** A PS5 boot runs none of it and places everything at the same addresses as before. The diagnostic runs the PS4 checks on any console, so it runs these too.
+1. No read on the socket pair can block. `jit_peek` drops stale bytes first, then reads with `MSG_DONTWAIT` for up to ~0.2 s; the compiler's system call has returned by then, so its bytes are queued already. `jit_recv_fd` does the same on a PS4 (up to ~1 s).
+2. On a PS4 a compiler call is given up after 30 s by the process clock, with log lines after 2 and 10 s. No compiler call is made after that; they fail at once.
+3. Before any buffer is probed, `jit_ps4_check` tests the probes on memory known to be good, each step logged before it runs: `getpid()` through the gadget, `clock_gettime()` into the shared scratch, `write()` of the shared scratch through the pair, and `write()` from the first page (EFAULT expected). If one fails, no buffer is probed, nothing is written through the compiler, and the boot stops with "the compiler checks failed".
+4. Each probe logs each step before it runs, so the last line of a log that stops names the call. A probe no longer writes where the compiler's bytes differ from this process's: that's other memory.
+
+`tests/native_host/jitrpc_host.c` runs `jitrpc.c` against a fake compiler thread and a real socket pair. A compiler whose bytes never arrive, or a descriptor that isn't the pair, ends in under a second, and a compiler that never answers ends after 30 s (by its clock). The old read would have blocked forever in the first case.
+
+**What to send back.** The diagnostic's log first (`run.py probe --diag`), then a boot's. In either, the last `jit: PS4 check` or `arena: PS4: probe` line names the call. If SWRR closed with an error, the error code too, and a kernel log if you can capture one.
+
 ## What is verified
 
 - From the log and SWRR's executable:
@@ -162,7 +192,9 @@ Before posting the logs anywhere public, remove user IDs and names from the kern
     - the PS5 placement is unchanged;
     - the v0.1.1 rule faults exactly where the PS4 did;
     - the new rule doesn't;
-    - with a compiler that writes nothing, other memory, or only VU1, the boot uses a JIT block or VU1 (for a small title), or stops cleanly.
+    - with a compiler that writes nothing, other memory, or only VU1, the boot uses a JIT block or VU1 (for a small title), or stops cleanly;
+    - the second report's layout (core text 176 KiB, small area `914b14000-914b1c000`): the same regions, nothing probed in the core's text or data, and when the compiler checks fail, nothing probed or written.
+  - The real `jitrpc.c` against a fake compiler thread: the checks and probes end whether the compiler's bytes go astray, the descriptor is wrong, stale bytes wait, or the compiler never answers. A PS5 never reads the clock.
   - `ghostldr.lua` under a fake Luac0re: the PS4 flag, the firmware and the gadget at the offsets `ghost.h` has, and the PS5 values unchanged.
   - `run.py probe --diag`'s flags.
 - On a 13.60 PS5, with these changes (2026-10-22):
