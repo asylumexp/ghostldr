@@ -12,6 +12,26 @@ This walks through running Ghost of Tsushima from a ghostldr release on a stock 
   - A wired or fast Wi-Fi connection helps.
 - **The computer's firewall must let Python receive** on UDP port 18194 (the game's log), TCP port 18195 (the loader fetches its extension from the computer) and TCP port 18196 (the game selector, when more than one title is installed). On macOS, click Allow when asked.
 
+## The easy way: the app
+
+The release includes a desktop app that does everything below without a terminal. It needs only Python 3.11 or newer.
+
+1. Download and unpack the release as in step 1.
+2. Start the app from the `app` folder:
+   - **macOS:** double-click `ghostldr.command`. The first time, right-click it, choose **Open**, then **Open**.
+   - **Windows:** double-click `ghostldr.bat`.
+   - **Linux:** run `ghostldr.sh`.
+
+The app takes you through the same steps as this guide:
+
+- **Console:** find the PS5, start Luac0re and check the setup.
+- **Game:** choose your dump and prepare it.
+- **Install** and **Play**, with the game's log live.
+
+It also keeps a library of installed games and offers the save manager.
+
+You still need everything under What you need, including the firewall rules. [app/README.md](../app/README.md) has more about the app. The rest of this guide is the command-line way, which is what the app runs for you.
+
 ## 1. Download and unpack
 
 From the release page, download `ghostldr-v0.3.0.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:

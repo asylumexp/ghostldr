@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>ghostldr</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body class="loading">
+<div id="offline" class="banner danger" hidden>The app isn't running any more. Start it again from its launcher (ghostldr.command, ghostldr.bat or ghostldr.sh).</div>
+<div id="notoken" class="notoken" hidden>
+  <div class="card">
+    <h2>Open ghostldr from its launcher</h2>
+    <p>This page needs the address the launcher opened, which includes a one-time key. Double-click <b>ghostldr.command</b> (Mac), <b>ghostldr.bat</b> (Windows) or <b>ghostldr.sh</b> (Linux) in the app folder again: it brings this window back.</p>
+  </div>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3c-6.1 0-10 4.6-10 10.6V28l3.3-2.4L12.7 28l3.3-2.4 3.3 2.4 3.4-2.4L26 28V13.6C26 7.6 22.1 3 16 3z" fill="currentColor"/><circle class="eye" cx="12.3" cy="14" r="2.2"/><circle class="eye" cx="19.7" cy="14" r="2.2"/></svg>
+    <span>ghostldr</span>
+  </div>
+  <nav class="tabs" aria-label="Sections">
+    <button class="tab" data-view="home" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5V20h-5v-5H9v5H4z"/></svg><span>Home</span></button>
+    <button class="tab" data-view="library"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg><span>Library</span></button>
+    <button class="tab" data-view="help"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg><span>Logs &amp; Help</span></button>
+  </nav>
+  <button class="chip" id="console-chip" type="button" title="Console"><span class="dot"></span><span class="chip-text">No console</span></button>
+</header>
+
+<main>
+<!-- ================= HOME ================= -->
+<section class="view" id="view-home">
+  <ol class="stepper" id="stepper">
+    <li><button class="step" data-step="console" type="button"><span class="num">1</span><span class="step-text"><span class="lbl">Console</span><span class="st"></span></span></button></li>
+    <li><button class="step" data-step="game" type="button"><span class="num">2</span><span class="step-text"><span class="lbl">Game</span><span class="st"></span></span></button></li>
+    <li><button class="step" data-step="install" type="button"><span class="num">3</span><span class="step-text"><span class="lbl">Install</span><span class="st"></span></span></button></li>
+    <li><button class="step" data-step="play" type="button"><span class="num">4</span><span class="step-text"><span class="lbl">Play</span><span class="st"></span></span></button></li>
+  </ol>
+
+  <div id="prebuilt-warn" class="callout danger" hidden></div>
+
+  <!-- ---------- 1 Console ---------- -->
+  <section class="panel" id="panel-console" data-step="console">
+    <div class="panel-head">
+      <div>
+        <h1>Connect to your PS5</h1>
+        <p class="sub">ghostldr runs games inside <i>Star Wars Racer Revenge</i> (SWRR) through Luac0re. Turn the PS5 on, then start Luac0re.</p>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <div class="card-head"><h3>Consoles on your network</h3><button class="btn ghost sm" id="btn-discover" type="button">Search again</button></div>
+        <div id="console-list" class="list" aria-live="polite"></div>
+        <details class="inline-form" id="ip-details">
+          <summary>Enter the PS5's IP address yourself</summary>
+          <form id="form-ip" class="row">
+            <input id="inp-ip" type="text" placeholder="192.168.1.23" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="PS5 IP address">
+            <button class="btn secondary sm" type="submit">Use this address</button>
+          </form>
+          <p class="hint">On the PS5: Settings → Network → Connection Status → View Connection Status → IPv4 Address.</p>
+        </details>
+      </div>
+      <div class="card">
+        <h3>Start Luac0re on the PS5</h3>
+        <ol class="checklist">
+          <li>Start <b>Star Wars Racer Revenge</b>.</li>
+          <li>At <b>PRESS START</b>, click the <b>right half of the touchpad</b>.</li>
+          <li>Go to <b>OPTIONS → HALL OF FAME</b>.</li>
+          <li class="auto" data-loader>Wait until the loader listens on port 9026. <span class="loader-state"></span></li>
+        </ol>
+        <div class="callout warn small">Never save from SWRR's own menus, and never confirm a “corrupted, will be deleted” prompt.</div>
+        <p class="hint">If the PS5 shows a Luac0re error such as <code>OOB_ARRAY_POINTER</code> … “restart the application to retry”, close SWRR (PS button → SWRR's card → Options → Close Game) and try again. It usually works the next time.</p>
+      </div>
+    </div>
+    <div class="card" id="doctor-card">
+      <div class="card-head">
+        <div><h3>Check the setup</h3><p class="sub">Python, the loader files, this computer's ports and the PS5's loader. Optional, but it finds most problems.</p></div>
+        <button class="btn secondary" id="btn-doctor" type="button">Run checks</button>
+      </div>
+      <ul id="doctor-rows" class="rows"></ul>
+      <p class="hint" id="doctor-foot" hidden>These checks can't see your firewall: it must allow UDP 18194 and TCP 18195/18196 (<a href="#" data-goto="help:firewall">how</a>).</p>
+      <details class="raw" data-raw="doctor"><summary>Details</summary><pre class="rawout"></pre></details>
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="btn-console-next" type="button">Continue</button>
+      <span class="hint" id="console-next-hint"></span>
+    </div>
+  </section>
+
+  <!-- ---------- 2 Game ---------- -->
+  <section class="panel" id="panel-game" data-step="game" hidden>
+    <div class="panel-head">
+      <div>
+        <h1>Choose your game</h1>
+        <p class="sub">Pick the folder of your own game dump — the one with <code>eboot.bin</code> and <code>sce_module</code>. Preparing it only writes a small layout on this computer; nothing is sent yet.</p>
+      </div>
+    </div>
+    <div class="card folder-card">
+      <div id="folder-empty" class="folder-empty">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></svg>
+        <div><b>No folder chosen yet</b><p class="hint">Usually called <code>app0</code>, or named after the title ID (like CUSA11456).</p></div>
+      </div>
+      <div id="folder-chosen" hidden>
+        <div class="folder-path"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></svg><code id="folder-path"></code></div>
+        <div id="folder-title" class="title-line"></div>
+        <ul class="facts" id="folder-facts"></ul>
+        <div id="folder-warn"></div>
+      </div>
+      <div class="row wrap">
+        <button class="btn secondary" id="btn-pick" type="button">Choose folder…</button>
+        <button class="btn ghost" id="btn-browse" type="button">Browse here</button>
+        <form id="form-path" class="row grow">
+          <input id="inp-path" type="text" placeholder="…or paste a folder path" autocomplete="off" spellcheck="false" aria-label="Folder path">
+          <button class="btn ghost sm" type="submit">Use</button>
+        </form>
+      </div>
+    </div>
+    <details class="more card" id="game-more">
+      <summary>More options</summary>
+      <div class="more-body">
+        <label class="field"><span>Title ID</span><input id="inp-title" type="text" placeholder="found automatically" autocomplete="off" spellcheck="false" maxlength="15"></label>
+        <p class="hint">Only needed when the game can't be recognised (some homebrew).</p>
+        <label class="check"><input type="checkbox" id="chk-art"> Download the game's name and pictures from the PlayStation Store for the game selector</label>
+      </div>
+    </details>
+    <div class="card job-card" id="pack-card" hidden>
+      <div class="card-head"><h3 id="pack-head">Preparing the game</h3><span class="pill" id="pack-pill"></span></div>
+      <div class="progress" id="pack-progress"><div class="bar"></div></div>
+      <div class="progress-meta"><span id="pack-phase"></span><span id="pack-eta"></span></div>
+      <div id="pack-result"></div>
+      <div class="problem" id="pack-problem"></div>
+      <details class="raw" data-raw="pack"><summary>Details</summary><pre class="rawout"></pre></details>
+    </div>
+    <div class="card job-card" id="report-card" hidden>
+      <div class="card-head"><h3>Compatibility report</h3><span class="pill" id="report-pill"></span></div>
+      <div id="report-body"></div>
+      <div class="problem" id="report-problem"></div>
+      <details class="raw" data-raw="report"><summary>Full report</summary><pre class="rawout" id="report-md"></pre></details>
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="btn-pack" type="button">Prepare game</button>
+      <button class="btn primary" id="btn-game-next" type="button" hidden>Continue to Install</button>
+      <button class="btn ghost" id="btn-report" type="button">Compatibility report</button>
+    </div>
+  </section>
+
+  <!-- ---------- 3 Install ---------- -->
+  <section class="panel" id="panel-install" data-step="install" hidden>
+    <div class="panel-head">
+      <div>
+        <h1>Install onto the PS5</h1>
+        <p class="sub">Sends the prepared game into SWRR's saved data over your network. You do this once per game; it takes a while (30–100 minutes for a big game). If it stops, run it again: it continues where it left off.</p>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <label class="field"><span>Game</span><select id="sel-install"></select></label>
+        <ul class="facts" id="install-facts"></ul>
+        <div id="install-state"></div>
+      </div>
+      <div class="card">
+        <h3>Before you start</h3>
+        <ol class="checklist">
+          <li>Keep the PS5 awake: <b>Settings → System → Power Saving → Set Time Until PS5 Enters Rest Mode → Don't Put in Rest Mode</b>.</li>
+          <li class="auto" data-loader>SWRR is at <b>HALL OF FAME</b> and its loader listens. <span class="loader-state"></span></li>
+        </ol>
+      </div>
+    </div>
+    <div class="card job-card" id="install-card" hidden>
+      <div class="card-head"><h3 id="install-head">Installing</h3><span class="pill" id="install-pill"></span></div>
+      <div class="progress" id="install-progress"><div class="bar"></div></div>
+      <div class="progress-meta"><span id="install-left"></span><span id="install-right"></span></div>
+      <div id="install-msg"></div>
+      <div class="problem" id="install-problem"></div>
+      <details class="raw" data-raw="install"><summary>Details</summary><pre class="rawout"></pre></details>
+      <div class="row"><button class="btn secondary sm" id="btn-install-cancel" type="button" hidden>Pause install</button></div>
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="btn-install" type="button">Install to PS5</button>
+      <button class="btn primary" id="btn-install-next" type="button" hidden>Continue to Play</button>
+      <button class="btn ghost" id="btn-dryrun" type="button">Check first</button>
+      <details class="more-inline">
+        <summary>More</summary>
+        <label class="check"><input type="checkbox" id="chk-nofit"> Install even if the game's code doesn't fit (it won't start)</label>
+      </details>
+    </div>
+  </section>
+
+  <!-- ---------- 4 Play ---------- -->
+  <section class="panel" id="panel-play" data-step="play" hidden>
+    <div class="panel-head">
+      <div>
+        <h1>Play</h1>
+        <p class="sub">Every session starts from a fresh SWRR. Restart it, open HALL OF FAME, then press Play. The game appears on your TV.</p>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <h3>Restart SWRR first</h3>
+        <ol class="checklist">
+          <li>Close SWRR: <b>PS button → SWRR's card → Options (…) → Close Game</b>.</li>
+          <li>Start it again; at <b>PRESS START</b> click the right half of the touchpad.</li>
+          <li>Open <b>OPTIONS → HALL OF FAME</b>.</li>
+          <li class="auto" data-loader>The loader listens on port 9026. <span class="loader-state"></span></li>
+        </ol>
+      </div>
+      <div class="card">
+        <h3>What to play</h3>
+        <div id="play-choices" class="choices" role="radiogroup" aria-label="Game to play"></div>
+      </div>
+    </div>
+    <div class="card job-card" id="boot-card" hidden>
+      <div class="card-head"><h3 id="boot-head">Playing</h3><span class="pill" id="boot-pill"></span></div>
+      <ol class="timeline" id="boot-timeline"></ol>
+      <div id="boot-notes"></div>
+      <div class="problem" id="boot-problem"></div>
+      <div class="logbox">
+        <div class="log-head"><span>Live log from the PS5</span><label class="check sm"><input type="checkbox" id="chk-follow" checked> Follow</label></div>
+        <pre class="log" id="boot-log" tabindex="0" aria-label="Live log"></pre>
+      </div>
+      <div class="row wrap">
+        <button class="btn secondary" id="btn-boot-stop" type="button" hidden>Stop watching the log</button>
+        <button class="btn ghost" id="btn-boot-stubs" type="button" hidden>Analyse this session</button>
+        <span class="hint" id="boot-stop-hint">Stopping the log doesn't stop the game.</span>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn primary big" id="btn-play" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>Play</button>
+      <span class="hint" id="play-hint"></span>
+    </div>
+  </section>
+</section>
+
+<!-- ================= LIBRARY ================= -->
+<section class="view" id="view-library" hidden>
+  <div class="view-head">
+    <div><h1>Library</h1><p class="sub">Games installed in SWRR on your PS5. Reading the list needs SWRR at HALL OF FAME.</p></div>
+    <button class="btn primary" id="btn-lib-refresh" type="button">Refresh from PS5</button>
+  </div>
+  <p class="hint" id="lib-status"></p>
+  <div class="problem" id="lib-problem"></div>
+  <div class="tiles" id="lib-tiles"></div>
+  <details class="raw" data-raw="library"><summary>Details</summary><pre class="rawout"></pre></details>
+
+  <h2 class="section">Prepared on this computer</h2>
+  <div class="tiles" id="packed-tiles"></div>
+
+  <h2 class="section">Saves &amp; backups</h2>
+  <div class="card" id="manager-card">
+    <p>The save manager runs on the PS5 and opens in any browser on your network: download and restore saves, copy or delete them, and remove installed games.</p>
+    <div id="manager-info"></div>
+    <div class="problem" id="manager-problem"></div>
+    <div class="row wrap">
+      <button class="btn secondary" id="btn-manager-start" type="button">Open save manager</button>
+      <button class="btn secondary" id="btn-manager-open" type="button" hidden>Open in browser</button>
+      <button class="btn ghost" id="btn-manager-stop" type="button" hidden>Stop save manager</button>
+    </div>
+    <p class="hint">While it runs, the PS5's loader is busy: stop it before installing or playing.</p>
+    <details class="raw" data-raw="manager"><summary>Details</summary><pre class="rawout"></pre></details>
+  </div>
+  <div class="card job-card" id="libjob-card" hidden>
+    <div class="card-head"><h3 id="libjob-head"></h3><span class="pill" id="libjob-pill"></span></div>
+    <div id="libjob-msg"></div>
+    <div class="problem" id="libjob-problem"></div>
+    <details class="raw" data-raw="libjob"><summary>Details</summary><pre class="rawout"></pre></details>
+  </div>
+</section>
+
+<!-- ================= LOGS & HELP ================= -->
+<section class="view" id="view-help" hidden>
+  <div class="view-head"><div><h1>Logs &amp; Help</h1></div></div>
+  <div class="subtabs" role="tablist">
+    <button class="subtab" data-help="log" type="button">Game log</button>
+    <button class="subtab" data-help="activity" type="button">Activity</button>
+    <button class="subtab" data-help="firewall" type="button">Firewall</button>
+    <button class="subtab" data-help="trouble" type="button">Troubleshooting</button>
+    <button class="subtab" data-help="about" type="button">About</button>
+  </div>
+
+  <div class="helppane" data-pane="log">
+    <div class="row wrap">
+      <button class="btn secondary sm" id="btn-runlog" type="button">Refresh</button>
+      <button class="btn ghost sm" id="btn-stubs" type="button">Stub report</button>
+      <button class="btn ghost sm" id="btn-open-build" type="button">Open folder</button>
+      <span class="hint" id="runlog-meta"></span>
+    </div>
+    <div class="card job-card" id="stubs-card" hidden>
+      <div class="card-head"><h3>Functions the game called that ghostldr doesn't implement yet</h3><span class="pill" id="stubs-pill"></span></div>
+      <div id="stubs-body"></div>
+      <div class="problem" id="stubs-problem"></div>
+      <details class="raw" data-raw="stubs"><summary>Details</summary><pre class="rawout"></pre></details>
+    </div>
+    <pre class="log tall" id="runlog" tabindex="0" aria-label="Game log"></pre>
+  </div>
+
+  <div class="helppane" data-pane="activity" hidden>
+    <p class="hint">Everything the app ran this session. Each run's output is also saved in the logs folder. <a href="#" id="lnk-open-logs">Open the logs folder</a></p>
+    <div class="activity">
+      <ul id="activity-list" class="activity-list"></ul>
+      <div class="activity-out"><div class="hint" id="activity-label">Choose a run to see its output.</div><pre class="log tall" id="activity-out" tabindex="0"></pre></div>
+    </div>
+  </div>
+
+  <div class="helppane prose" data-pane="firewall" hidden>
+    <p>While a game runs, the PS5 connects <b>back to this computer</b>. Your firewall must let Python receive on these ports:</p>
+    <table class="ports">
+      <thead><tr><th>Port</th><th>What for</th><th>If it's blocked</th></tr></thead>
+      <tbody>
+        <tr><td><code>UDP 18194</code></td><td>The game's log</td><td>Black screen with no log lines here</td></tr>
+        <tr><td><code>TCP 18195</code></td><td>The loader fetches its extension</td><td>“The PS5 couldn't fetch the extension”</td></tr>
+        <tr><td><code>TCP 18196</code></td><td>The game selector (several games installed)</td><td>The selector doesn't appear</td></tr>
+        <tr><td><code>UDP 18196</code></td><td>The save manager reports its address</td><td>Read the address on the PS5 instead</td></tr>
+      </tbody>
+    </table>
+    <h3>macOS</h3>
+    <p>When asked “Do you want the application python3 to accept incoming network connections?”, click <b>Allow</b>. If you clicked Deny: System Settings → Network → Firewall → Options, find Python and set it to allow incoming connections.</p>
+    <h3>Windows</h3>
+    <p>When Windows Defender Firewall asks about Python, tick <b>Private networks</b> and click <b>Allow access</b>. Later: Windows Security → Firewall &amp; network protection → Allow an app through firewall → Python → Private.</p>
+    <h3>Linux</h3>
+    <p>Most desktops have no firewall on. With ufw: <code>sudo ufw allow 18194/udp</code>, <code>sudo ufw allow 18195:18196/tcp</code> and <code>sudo ufw allow 18196/udp</code>. With firewalld, add the same ports to your zone.</p>
+  </div>
+
+  <div class="helppane prose" data-pane="trouble" hidden>
+    <dl class="trouble" id="trouble-list"></dl>
+  </div>
+
+  <div class="helppane prose" data-pane="about" hidden>
+    <dl class="kv" id="about-kv"></dl>
+    <p class="hint">ghostldr is MIT-licensed. It contains no game files: bring your own dumps. Settings (last folder and console) are stored in your user folder, never in the app folder.</p>
+    <div class="row wrap">
+      <button class="btn ghost sm" id="btn-open-app" type="button">Open the app folder</button>
+      <button class="btn ghost sm danger-text" id="btn-quit" type="button">Quit the app</button>
+    </div>
+  </div>
+</section>
+</main>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<dialog id="dlg-browse" class="dialog">
+  <form method="dialog" class="dialog-body">
+    <div class="dialog-head"><h2>Choose the game folder</h2><button class="btn ghost sm" value="cancel" type="submit" aria-label="Close">✕</button></div>
+    <div class="roots" id="browse-roots"></div>
+    <div class="row"><button class="btn ghost sm" id="browse-up" type="button">↑ Up</button><code class="browse-path" id="browse-path"></code></div>
+    <ul class="browse-list" id="browse-list"></ul>
+    <div class="dialog-foot"><span class="hint" id="browse-hint">Folders with a game are marked “game”.</span><button class="btn primary" id="browse-use" type="button">Use this folder</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-confirm" class="dialog">
+  <form method="dialog" class="dialog-body">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-text"></p>
+    <label class="field" id="confirm-field" hidden><span id="confirm-field-label"></span><input id="confirm-input" type="text" autocomplete="off" spellcheck="false"></label>
+    <div class="dialog-foot"><button class="btn ghost" value="cancel" type="submit">Cancel</button><button class="btn primary" id="confirm-ok" value="ok" type="submit">OK</button></div>
+  </form>
+</dialog>
+</body>
+</html>
