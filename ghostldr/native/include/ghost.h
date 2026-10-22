@@ -339,6 +339,7 @@ s64 gfs_pread(int fd, void *buf, u64 n, s64 off);
 s64 gfs_lseek(int fd, s64 off, int whence);
 int gfs_fstat(int fd, void *st);
 int gfs_getdents(int fd, void *buf, int size);
+int gfs_find_file(const char *name, char *dir, size_t size); /* a title file outside sce_module */
 int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16]);
 int gfs_umount(const char mount_point[16], u32 max_ms);
 const char *gfs_save_name(void);                        /* <prefix>SAVE */

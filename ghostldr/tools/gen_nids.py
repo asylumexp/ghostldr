@@ -72,18 +72,53 @@ def encode_table(db: dict[str, str]) -> tuple[int, bytes, bytes, bytes]:
     return len(entries), bytes(keys), bytes(offs), bytes(pool)
 
 
-def boot_modules(app0: Path) -> list[Path]:
-    """The sce_module files ghost_boot loads, in load order (modules.c): libSceFios2.prx
-    and libc.prx, then every file exporting a library the executable or a chosen
-    module imports, by name."""
+def find_elsewhere(app0: Path, name: str) -> Path | None:
+    """A module file the title keeps outside sce_module (Unity: Media/Modules),
+    as modules.c finds it: anywhere but sce_module/ and sce_sys/, first in path
+    order."""
+    for f in sorted(app0.rglob(name)):
+        rel = f.relative_to(app0).parts
+        if f.is_file() and len(rel) > 1 and rel[0] not in ("sce_module", "sce_sys"):
+            return f
+    return None
+
+
+def module_candidates(app0: Path) -> dict[Path, "oe.OrbisImage"]:
+    """The title's module files and their images, sorted by file name as the
+    core sorts them: sce_module/*.prx, plus every file a loaded module needs
+    (DT_NEEDED, not libSce*/libkernel*) that the title keeps elsewhere."""
     mod_dir = app0 / "sce_module"
-    cands = sorted(mod_dir.glob("*.prx")) if mod_dir.is_dir() else []
-    imgs = {}
-    for f in cands:
+    imgs: dict[Path, oe.OrbisImage] = {}
+    for f in sorted(mod_dir.glob("*.prx")) if mod_dir.is_dir() else []:
         try:
             imgs[f] = oe.parse(f)
         except Exception:   # the core skips files it cannot parse, too
             continue
+    main = oe.parse(app0 / "eboot.bin")
+    more = True
+    while more:
+        more = False
+        have = {f.name for f in imgs}
+        for img in [main] + list(imgs.values()):
+            for name in img.needed:
+                if name in have or name.startswith(("libSce", "libkernel")) or not name.endswith(".prx"):
+                    continue
+                f = find_elsewhere(app0, name)
+                if f:
+                    try:
+                        imgs[f] = oe.parse(f)
+                        have.add(name)
+                        more = True
+                    except Exception:
+                        pass
+    return dict(sorted(imgs.items(), key=lambda kv: kv[0].name))
+
+
+def boot_modules(app0: Path) -> list[Path]:
+    """The title module files ghost_boot loads, in load order (modules.c):
+    libSceFios2.prx and libc.prx, then every file exporting a library the
+    executable or a chosen module imports, by name."""
+    imgs = module_candidates(app0)
     main = oe.parse(app0 / "eboot.bin")
 
     def imports_from(a, b) -> bool:

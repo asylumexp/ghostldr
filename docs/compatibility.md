@@ -47,6 +47,7 @@ python3 ghostldr/host/run.py boot --app-root ghostfs --title CUSA12345 --snap
 - `--snap` starts the watchdog (every title thread's location every 20 s): that is what shows where a hang sits.
 - **Preflight:** when a name table exists (`build/nid/known_names.txt`, from `tools/fetch_deps.sh`), `run.py boot` first runs `import_report.py` over the booted title's local dump and writes `build/ghostldr/preflight.md`. The dump is `--title`'s (where `gfs_pack.py` read it), or without `--title` the only title with a dump on this computer; with several, or `--select`, it skips. If any import is unresolved it asks `Boot anyway? [y/N]`; `--force-preflight` boots without asking, and with no terminal to ask on the boot stops. Ghost and Bloodborne have none.
 - `python3 ghostldr/host/run.py doctor` checks the computer and the console before a boot ([host-tooling.md](host-tooling.md)).
+- **Modules outside `sce_module/`:** a module the executable or a loaded module needs (`DT_NEEDED`) that isn't a system library (`libSce*`, `libkernel*`) and isn't in `sce_module/` is looked for anywhere else in the title. Unity keeps `mono-ps4.prx` and `MonoAssembliesPS4.prx` in `Media/Modules/`; the log says `boot: eboot.bin needs mono-ps4.prx: found in /app0/Media/Modules`. `import_report.py` and the fit check count them the same way.
 
 ### Memory without a plan
 
@@ -270,6 +271,7 @@ A stock 13.60 PS5 with US SWRR, each title installed next to Ghost and booted wi
 | `AUDIO-WAV` (OpenOrbis sample) | It decodes its 27 MiB wav from `/app0` into malloc'd memory and loops it through `sceAudioOutOutput`: the console's HDMI audio carries it (mean -9.7 dB, against -52.9 dB while a silent sample runs). |
 | `EXCEPTIONS` (OpenOrbis sample) | C++ exceptions thrown and caught (`Caught! The exception says: Catch me if you can. :p`, `Testcase PASS`). It crashed in SWRR's `pthread_setspecific` at the first throw until thread-specific data became the extension's. |
 | `HELLO_WORLD` (OpenOrbis sample) | `Hello world! Waiting 2 seconds!`, then two seconds later `Done. Infinitely looping...`. |
+| `LAPY20001` PS4-Xplorer 1.34 (Unity, not OpenOrbis) | Its Unity runtime loads from `Media/Modules`, Mono starts and loads its managed assemblies from `/app0`, its plugins load at run time, and it draws its first menu (SELECT YOUR FIRMWARE). The pad doesn't reach it yet: the selection doesn't move. Its code (34 MiB with the Mono modules) uses multi-buffer placement. |
 
 ### Limits
 

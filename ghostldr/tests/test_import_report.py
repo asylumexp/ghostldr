@@ -163,6 +163,23 @@ class ImportReportTest(unittest.TestCase):
         self.assertEqual(self.rep["summary"]["functions_by_class"],
                          {"CORE-HLE": 1, "EXT-HLE": 2, "TITLE": 1, "HOST": 4, "UNRESOLVED": 3})
 
+    def test_modules_outside_sce_module(self) -> None:
+        # Unity keeps its runtime in Media/Modules: the eboot needs it by file name
+        import gen_nids
+        with tempfile.TemporaryDirectory() as d:
+            app0 = Path(d) / "app0"
+            (app0 / "sce_module").mkdir(parents=True)
+            (app0 / "Media" / "Modules").mkdir(parents=True)
+            func = oe.STT_FUNC
+            make_elf(app0 / "eboot.bin", oe.ET_SCE_DYNEXEC, "game", ["mono-ps4.prx", "libSceGone.prx"],
+                     {1: "mono-ps4"}, {1: "mono-ps4"}, {}, [(NID("mono_jit_init"), 1, 1, func)], [])
+            mono = app0 / "Media" / "Modules" / "mono-ps4.prx"
+            make_elf(mono, oe.ET_SCE_DYNAMIC, "mono-ps4", [], {}, {}, {1: "mono-ps4"}, [],
+                     [(NID("mono_jit_init"), 1)])
+            self.assertEqual(list(gen_nids.module_candidates(app0)), [mono])
+            self.assertEqual(gen_nids.boot_modules(app0), [mono])
+            self.assertIn(mono, ir.title_files(app0))
+
     def test_nid_entries(self) -> None:
         src = '#define DM "libSceDiscMap"\nx = {\n    {DM, NULL, f, "fJgP+wqifno"},\n    {"libSceX", NULL, g, "ioKMruft1ek"},\n};\n'
         self.assertEqual(sorted(ir.hle_entries(src, tables_only=False)),

@@ -16,6 +16,7 @@ import stub_report as sr  # noqa: E402
 LINES = [
     "12:00:01 UNRESOLVED call: libSceFoo AbCdEfGh (sceFooBar)\n",
     "UNRESOLVED call: libSceFoo AbCdEfGh (sceFooBar)\n",
+    "12:00:01 [ghostldr 812] UNRESOLVED call: libSceFoo AbCdEfGh (sceFooBar)\n",  # run.log's own form
     "12:00:02 UNRESOLVED call: libSceFoo XyZ12345 (sceFooBaz) -> 0\n",
     "DENIED call: libSceBar NidNidNi (sceBarDenied) -> 80020001\n",
     "UNRESOLVED call #7\n",
@@ -32,7 +33,7 @@ class StubReport(unittest.TestCase):
 
     def test_counts(self) -> None:
         self.assertEqual(self.st.total_lines, len(LINES))
-        self.assertEqual(self.st.stub_lines, 7)
+        self.assertEqual(self.st.stub_lines, 8)
         self.assertEqual(self.st.bare, 3)
         d = self.st.as_dict(30)
         self.assertEqual(d["distinct_stubs"], 3)
@@ -42,7 +43,7 @@ class StubReport(unittest.TestCase):
     def test_ranking(self) -> None:
         top = self.st.ranked()
         self.assertEqual(top[0]["name"], "sceFooBar")
-        self.assertEqual(top[0]["count"], 2)
+        self.assertEqual(top[0]["count"], 3)
         self.assertEqual(top[0]["kind"], "UNRESOLVED")
         denied = [r for r in top if r["kind"] == "DENIED"]
         self.assertEqual(len(denied), 1)
@@ -50,7 +51,7 @@ class StubReport(unittest.TestCase):
 
     def test_render_mentions_totals(self) -> None:
         text = sr.render(self.st, 30)
-        self.assertIn("stub hits: 7", text)
+        self.assertIn("stub hits: 8", text)
         self.assertIn("sceFooBar", text)
 
 

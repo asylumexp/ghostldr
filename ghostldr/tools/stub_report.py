@@ -33,7 +33,8 @@ from pathlib import Path
 RICH = re.compile(
     r"^(DENIED|UNRESOLVED) call: (\S+) (\S+) \((.*?)\)(?: -> ([0-9a-fA-Fx]+))?$")
 BARE = re.compile(r"^UNRESOLVED call #(\d+)$")
-STAMP = re.compile(r"^\d{2}:\d{2}:\d{2} (.*)$")
+# run.py writes "HH:MM:SS [ghostldr N] text"; older logs have no [ghostldr N]
+STAMP = re.compile(r"^\d{2}:\d{2}:\d{2} (?:\[ghostldr \d+\] )?(.*)$")
 
 
 class Stats:

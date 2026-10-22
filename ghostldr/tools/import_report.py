@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import exec_fit  # noqa: E402
+import gen_nids  # noqa: E402
 import orbis_elf as oe  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -495,6 +496,8 @@ def title_files(app0: Path) -> list[Path]:
     mod_dir = app0 / "sce_module"
     if mod_dir.is_dir():
         files += sorted(f for f in mod_dir.iterdir() if f.suffix in (".prx", ".sprx"))
+    if files and files[0].name == "eboot.bin":   # modules it needs that live elsewhere (Unity: Media/Modules)
+        files += [f for f in gen_nids.module_candidates(app0) if f not in files]
     if not files:
         raise SystemExit(f"{app0}: no eboot.bin or sce_module/*.prx")
     return files

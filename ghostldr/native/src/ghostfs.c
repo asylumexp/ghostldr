@@ -343,6 +343,24 @@ static s64 find(const char *rel)
     return -1;
 }
 
+/* A file named `name` anywhere in the title but sce_module/ and sce_sys/
+ * (Unity keeps its runtime in Media/Modules): its directory as "/app0/dir".
+ * The first in index (path) order. */
+int gfs_find_file(const char *name, char *dir, size_t size)
+{
+    size_t len = strlen(name);
+    for (u32 i = 0; g_active && i < g_hdr->entries; i++) {
+        const char *e = ename(i);
+        size_t el = strlen(e);
+        if ((g_ent[i].flags & 1) || el <= len || e[el - len - 1] != '/' || strcmp(e + el - len, name) != 0 ||
+            strncmp(e, "sce_module/", 11) == 0 || strncmp(e, "sce_sys/", 8) == 0)
+            continue;
+        fmt(dir, size, "/app0/%.*s", (int)(el - len - 1), e);
+        return 0;
+    }
+    return -1;
+}
+
 /* "/app0", "/app0/", "/app0/a//b/" -> "", "", "a/b" */
 static bool app0_rel(const char *path, char *out, size_t size)
 {

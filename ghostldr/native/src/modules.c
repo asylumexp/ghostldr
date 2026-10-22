@@ -9,6 +9,11 @@
  * else in sce_module loads on demand (loader.c module_load_runtime), and the
  * names of its imports are kept for that.
  *
+ * A module some loaded file needs (DT_NEEDED) that isn't in sce_module and
+ * isn't a system library (libSce*, libkernel*) is looked for anywhere else in
+ * the title: Unity keeps mono-ps4.prx and MonoAssembliesPS4.prx in
+ * Media/Modules.  Found ones are candidates like the sce_module files.
+ *
  * Start order: libSceFios2, then libc, then the other boot modules in
  * dependency order, on the title's main thread before its entry.  IsGame
  * modules (NpToolkit2, ...) are marked MOD_DEFERRED by the extension's
@@ -84,6 +89,41 @@ COLD static u32 add_candidate(struct module **cand, u32 n, const char *dir, cons
     return n + 1;
 }
 
+/* where the title keeps a module it needs outside sce_module: anywhere in a
+ * ghostfs title, else Unity's two directories */
+COLD static int find_elsewhere(const char *root, const char *name, char *dir, size_t size)
+{
+    static const char *const k_dirs[] = {"Media/Modules", "Media/Plugins"};
+    if (gfs_active())
+        return gfs_find_file(name, dir, size);
+    u8 st[0x78];
+    char path[512];
+    for (u32 i = 0; i < ARRAY_SIZE(k_dirs); i++) {
+        fmt(dir, size, "%s/%s", root, k_dirs[i]);
+        fmt(path, sizeof(path), "%s/%s", dir, name);
+        if (vfs_stat(path, st) == 0)
+            return 0;
+    }
+    return -1;
+}
+
+/* the files m needs that the title ships outside sce_module, as candidates */
+COLD static u32 add_needed(struct module **cand, u32 n, const struct module *m, const char *root, int *fatal)
+{
+    for (u32 k = 0; k < m->n_needed_files; k++) {
+        const char *f = m->needed_files[k];
+        bool have = strncmp(f, "libSce", 6) == 0 || strncmp(f, "libkernel", 9) == 0;
+        for (u32 i = 0; i < n && !have; i++)
+            have = strcmp(cand[i]->name, f) == 0;
+        char dir[512];
+        if (!have && find_elsewhere(root, f, dir, sizeof(dir)) == 0) {
+            logf("boot: %s needs %s: found in %s", m->name, f, dir);
+            n = add_candidate(cand, n, dir, f, fatal);
+        }
+    }
+    return n;
+}
+
 COLD int modules_load_boot(const char *root, struct module **main_out)
 {
     char dir[512];
@@ -125,8 +165,16 @@ COLD int modules_load_boot(const char *root, struct module **main_out)
     struct module *main = module_open(path, true);
     if (!main)
         return -2;
+    for (u32 prev = ~0u; prev != n && !fatal;) {
+        prev = n;
+        n = add_needed(cand, n, main, root, &fatal);
+        for (u32 i = 0; i < n && !fatal; i++)
+            n = add_needed(cand, n, cand[i], root, &fatal);
+    }
+    if (fatal)
+        return -1;
     u32 count = modules_select(cand, n, main, sel);
-    logf("boot: %u of %u sce_module files load now", count, n);
+    logf("boot: %u of %u title modules load now", count, n);
     for (u32 k = 0; k < ARRAY_SIZE(k_first); k++)
         for (u32 i = 0; i < n; i++)
             if (strcmp(cand[i]->name, k_first[k]) == 0)

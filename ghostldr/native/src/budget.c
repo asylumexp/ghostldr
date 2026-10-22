@@ -302,9 +302,12 @@ COLD NOINLINE int budget_flex_unmap(void *addr, size_t len)
 COLD static int b_posix_munmap(void *addr, size_t len) { return budget_flex_unmap(addr, len) == 0 ? 0 : -1; }
 
 /* Anonymous mmap is flexible memory too (musl's malloc in OpenOrbis homebrew
- * grows through it): flex-as-direct within F, zero-filled; PROT_NONE only
- * reserves address space.  Other mappings go to the extension's mmap (a
- * ghostfs file), else SWRR's. */
+ * grows through it): flex-as-direct within F, zero-filled.  PROT_NONE up to
+ * 64 MiB is backed too, with no access, because reserve-then-commit
+ * allocators (Unity's Mono) open it with mprotect and write; a reservation
+ * alone has nothing to open.  Bigger PROT_NONE maps only reserve address
+ * space.  Other mappings go to the extension's mmap (a ghostfs file), else
+ * SWRR's. */
 COLD static void *mmap_next(const char *name)
 {
     char nid[12];
@@ -321,7 +324,7 @@ COLD static int anon_map(void **addr, size_t len, int prot, int flags)
     int rc;
     if (!len)
         rc = (int)E_INVAL;
-    else if (prot == PROT_NONE)
+    else if (prot == PROT_NONE && size > (64UL << 20))
         rc = K.reserve_va(&a, size, flags & MAP_FIXED, 0x4000);
     else if ((rc = hle_map_flex(&a, size, PROT_READ | PROT_WRITE, flags & MAP_FIXED)) == 0 &&
              prot != (PROT_READ | PROT_WRITE))

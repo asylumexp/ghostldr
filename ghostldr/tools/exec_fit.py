@@ -43,7 +43,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import orbis_elf as oe  # noqa: E402
-from gen_nids import boot_modules  # noqa: E402
+from gen_nids import boot_modules, module_candidates  # noqa: E402
 
 MiB = 1 << 20
 CHUNK, JOIN, PAD = 0x10000, 0x100000, 0x40000      # bxplan.h BX_*
@@ -414,8 +414,7 @@ def fit(app0: Path, exec_ranges: dict[str, list] | None = None) -> dict:
     boot = boot_modules(app0)
     mods = [Module(f) for f in boot] + [Module(app0 / "eboot.bin")]
     later = []
-    mod_dir = app0 / "sce_module"
-    for f in sorted(mod_dir.glob("*.prx")) if mod_dir.is_dir() else []:
+    for f in module_candidates(app0):
         if f not in boot:
             try:
                 later.append(Module(f))
