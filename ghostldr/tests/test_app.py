@@ -136,7 +136,7 @@ class ServerTest(TempDirs):
         self.assertEqual(self.request("GET", "/api/state", token=self.server.token[:-1])[0], 401)
         status, data = self.request("GET", "/api/state")
         self.assertEqual(status, 200)
-        self.assertEqual(data["version"], "0.4.0")
+        self.assertEqual(data["version"], "0.5.0")
 
     def test_every_api_route_checks_the_token(self) -> None:
         from ghostapp.server import ROUTES
@@ -377,7 +377,7 @@ class ServiceJobTest(TempDirs):
         return job
 
     def test_discovery_remembers_the_console_with_the_loader(self) -> None:
-        a = host_console.Console("192.0.2.10", "AAAA11112222", "Living room", "PS5", "13600007", True, loader=True)
+        a = host_console.Console("192.0.2.10", "AAAA11112222", "Living room", "PS5", "13600007", True, loader=9026)
         b = host_console.Console("192.0.2.11", "BBBB33334444", "Bedroom", "PS5", "14200000", False)
         write(self.root / "ghostldr/host/console.py", f"""
             print("1) " + {a.describe()!r})
@@ -580,7 +580,7 @@ class ConsoleParserTest(unittest.TestCase):
 
     def test_console_list_as_console_py_prints_it(self) -> None:
         on = host_console.Console("192.0.2.10", "AAAA11112222", "Living room PS5", "PS5", "13600007", True,
-                                  loader=True)
+                                  loader=9026)
         rest = host_console.Console("192.0.2.11", "BBBB33334444", "Spare", "PS5", "14200000", False)
         ps4 = host_console.Console("192.0.2.12", "CCCC", "Old  one", "PS4", "12020001", True, "CUSA03474",
                                    "Star Wars Racer Revenge")

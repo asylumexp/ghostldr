@@ -6,6 +6,9 @@
  * stores rax to oob_scratch + 0x2000, restores the loop, and then break the
  * loop by writing the chain start into the loop's rsp slot.
  *
+ * In Jak X, UltraC0re (door1.lua, jitcompat.lua) parks the compiler the same
+ * way with other gadgets: uc_call below.
+ *
  * Only one caller may use the compiler at a time (Lua must stay idle).
  */
 #include "ghost.h"
@@ -72,12 +75,79 @@ __attribute__((minsize, cold)) static bool ps4_given_up(u64 fn, u64 rax, u64 *t0
     return true;
 }
 
+static u64 priv(u64 off) { return g_ctx->oob_scratch + PRIV + off; }
+
+/*
+ * UltraC0re (Jak X): the compiler loops on uc_spin = {pop rsp gadget, uc_spin}
+ * (the gadget pops [uc_spin + 8] into rsp and touches [rax]).  Storing a
+ * chain's address into uc_spin + 8 runs it; the chain stores rax to uc_res,
+ * puts uc_spin back into uc_spin + 8 and returns to the loop.  The chain is
+ * door1.lua's jit_run around jitcompat.lua's jit_rop, slot for slot, so the
+ * callee starts with the stack aligned as in UltraC0re's own calls.
+ *
+ * The callee's stack grows down from the chain.  UltraC0re's J_CALL is only
+ * 0x100 bytes above the loop itself, so ours sits in the private scratch with
+ * 64 KiB below it that nothing else uses (16-byte aligned, like J_CALL).
+ */
+#define UC_CHAIN 0x20000
+static u64 uc_call(u64 fn, u64 rax, u64 a1, u64 a2, u64 a3, u64 a4)
+{
+    struct boot_ctx *c = g_ctx;
+    u64 at = priv(UC_CHAIN);
+    u64 chain[] = {
+        c->uc_pop_rax, priv(0xE00), /* pop rcx's gadget adds cl to [rax + 0x63]: point it at scratch */
+        c->uc_pop_rcx, a4,
+        c->uc_pop_rsi_rbp, a3, 0,
+        c->uc_mov_rdx_rsi,
+        c->uc_pop_rsi_rbp, a2, 0,
+        c->uc_pop_rdi_rbp, a1, 0,
+        c->uc_pop_rax, rax,
+        fn,
+        c->uc_pop_rdi_rbp, c->uc_res, 0,
+        c->uc_store_rdi,                  /* [uc_res] = rax */
+        c->uc_pop_rdi_rbp, c->uc_spin + 8, 0,
+        c->uc_pop_rax, c->uc_spin,
+        c->uc_store_rdi,                  /* [uc_spin + 8] = uc_spin: parked again */
+        c->uc_pop_rax, c->uc_cnt,
+        c->uc_pop_rsp_deref, c->uc_spin,
+    };
+    if (r64(c->uc_spin + 8) != c->uc_spin) {
+        logf("jit_call: fn %lx: the compiler is not parked ([%lx] = %lx)", fn, c->uc_spin + 8, r64(c->uc_spin + 8));
+        return (u64)-1;
+    }
+    for (u32 i = 0; i < ARRAY_SIZE(chain); i++)
+        w64(at + i * 8, chain[i]);
+    w64(c->uc_res, 0);
+#if defined(__x86_64__)
+    __asm__ volatile("mfence" ::: "memory");
+#else
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+#endif
+    w64(c->uc_spin + 8, at); /* release: last */
+    for (u64 spins = 0; r64(c->uc_spin + 8) != c->uc_spin; spins++) {
+        if (spins > 2000000) {
+            logf("jit_call: timeout fn=%lx", fn);
+            return (u64)-1;
+        }
+        if (spins > 64)
+            K.usleep(50);
+    }
+    return r64(c->uc_res);
+}
+
 u64 jit_call(u64 fn, u64 rax, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6)
 {
     struct boot_ctx *c = g_ctx;
     if (g_jit_stuck) { /* PS4 only: a call before this one never came back */
         logf("jit_call: fn %lx rax %lx skipped: the compiler stopped answering earlier", fn, rax);
         return (u64)-1;
+    }
+    if (is_jakx()) {
+        if (a5 || a6) { /* no r8/r9 gadgets in Jak X's compiler */
+            logf("jit_call: fn %lx: a 5th or 6th argument (%lx, %lx) cannot be passed in Jak X", fn, a5, a6);
+            return (u64)-1;
+        }
+        return uc_call(fn, rax, a1, a2, a3, a4);
     }
     chain_idx = 0;
     for (int i = 0; i < 6; i++)
@@ -170,8 +240,6 @@ u64 jit_call(u64 fn, u64 rax, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6)
     return r64(c->oob_scratch + SCRATCH_RET);
 }
 
-static u64 priv(u64 off) { return g_ctx->oob_scratch + PRIV + off; }
-
 u64 jit_read64(u64 addr)
 {
     jit_call(g_ctx->jit_memcpy, 0, priv(0xF00), addr, 8, 0, 0, 0);
@@ -228,6 +296,14 @@ int jit_recv_fd(int compiler_fd)
         logf("jit_recv_fd: no syscall gadget in the compiler (ghostldr.lua predates PS4 support)");
         return -1;
     }
+    /* Jak X: the pair is the emulator's own bridge socket (UltraC0re cancelled
+     * its listener), where the compiler's notices can wait ahead of ours */
+    u8 junk[64];
+    u64 stale = 0;
+    for (ssize_t r; (r = sock_read(junk, sizeof(junk), 0)) > 0;)
+        stale += (u64)r;
+    if (stale)
+        logf("jit_recv_fd: dropped %lu stale bytes from the socket pair", stale);
     memset((void *)priv(0), 0, 0x100);
     *(u32 *)(ctl + 0) = 20;
     *(u32 *)(ctl + 4) = SOL_SOCKET;

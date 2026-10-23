@@ -182,6 +182,7 @@ A title whose fixed demand is larger than the plan-free size (Ghost's mode-0 pla
 - `tables` are u64 arrays in the executable's text, indexed by memory mode. `set` tables get `mib` (or the run.py knob: `gpu_heap`, `pool1`, `cpu_heap`); the one `absorb` table takes the rest: `free - title_fixed - reserve - set changes + overcommit - video`, between `min_mib` and its own size. Its `expect` contents are checked before anything is patched.
 - The title is told `title_fixed + set changes + absorb`. `title_fixed_mib` is the sum of its other reservations.
 - `lazy_sites` are return addresses (eboot offsets) of `sceKernelAllocateDirectMemory` calls whose memory is committed 2 MiB at a time when first mapped; `overcommit_mib` is what that saves (measured: the watchdog's `direct alloc from eboot+X: N MiB, mapped M MiB`).
+- `neo` is the plan for a Pro-mode host (Jak X, see [jakx.md](jakx.md#pro-mode)): `mode` is the title's Pro memory mode (the index the tables are patched at), with that mode's own `title_fixed_mib`, `overcommit_mib` and `knobs` (a set table's size in that mode, by its knob, e.g. `{"gpu_heap": 1680}`).
 - Ghost's plan reproduces its logged boot: `4532 MiB free in 6 holes; streaming pool 1120 -> 588 MiB; reporting 4520 MiB direct memory`.
 
 ## 6. HLE rules

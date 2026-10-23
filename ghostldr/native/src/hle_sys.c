@@ -120,22 +120,23 @@ static s32 hle_sceVideoOutOpen(s32 user, s32 bus, s32 index, const void *param)
         logf("sceVideoOutOpen -> %d", h);
         return h;
     }
-    /* SWRR still owns the main output.  Its handle lives at eboot+0x2d695d0
-     * (SWRR 01.00/01.02, US and EU alike, written right after its sceVideoOutOpen). */
+    /* The host still owns the main output.  Its handle is where the host's
+     * eboot writes it right after its sceVideoOutOpen (host.c). */
     static s32 (*unreg0)(s32, s32);
     if (!unreg0)
         unreg0 = host_real_in("libSceVideoOut", "sceVideoOutUnregisterBuffers");
-    s32 swrr_handle = *(volatile s32 *)(g_ctx->eboot_base + 0x2d695d0);
-    if (swrr_handle > 0) {
-        s32 c = close(swrr_handle);
+    s32 host_handle = *(volatile s32 *)(g_ctx->eboot_base + g_hostgame->video_handle);
+    if (host_handle > 0) {
+        s32 c = close(host_handle);
         s32 again = real(user, bus, index, param);
-        logf("sceVideoOutOpen: SWRR handle %d close -> %x, reopen -> %x", swrr_handle, (u32)c, (u32)again);
+        logf("sceVideoOutOpen: %s handle %d close -> %x, reopen -> %x", g_hostgame->name, host_handle, (u32)c,
+             (u32)again);
         if (again >= 0)
             return again;
         for (s32 set = 0; set < 16 && unreg0; set++)
-            unreg0(swrr_handle, set);
-        logf("sceVideoOutOpen: sharing SWRR handle %d", swrr_handle);
-        return swrr_handle;
+            unreg0(host_handle, set);
+        logf("sceVideoOutOpen: sharing %s handle %d", g_hostgame->name, host_handle);
+        return host_handle;
     }
     static s32 (*res_status)(s32, void *);
     static s32 (*unreg)(s32, s32);

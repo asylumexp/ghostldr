@@ -66,7 +66,7 @@ MAGIC = b"GLPF"
 VERSION = 1
 HEADER = struct.Struct("<4sHHII16s20sI5iIiII4x")  # struct prof_hdr, 96 bytes
 REC = struct.Struct("<HHI")                        # struct prof_rec
-REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME, REC_EXEC = 1, 2, 3, 4, 5, 6
+REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME, REC_EXEC, REC_NEO = 1, 2, 3, 4, 5, 6, 7
 NAME_MAX = 127                 # bytes of UTF-8 in REC_NAME (the selector's name field is 128)
 TLS_PER_REC = 15000            # offsets per REC_TLS record (its size is a u16)
 MAX_BLOB = 0x10000
@@ -398,12 +398,24 @@ def _validate_exec(e: list, p: dict) -> None:
 
 
 def _validate_plan(e: list, plan) -> None:
-    if not _keys(e, "memory.plan", plan, {"title_fixed_mib", "overcommit_mib", "lazy_sites", "tables"},
+    if not _keys(e, "memory.plan", plan, {"title_fixed_mib", "overcommit_mib", "lazy_sites", "tables", "neo"},
                  {"title_fixed_mib", "tables"}):
         return
     for k in ("title_fixed_mib", "overcommit_mib"):
         if k in plan and _int(plan[k], 0, 65535) is None:
             e.append(f"memory.plan.{k} must be 0..65535 MiB")
+    neo = plan.get("neo")
+    if neo is not None and _keys(e, "memory.plan.neo", neo,
+                                 {"mode", "title_fixed_mib", "overcommit_mib", "knobs", "note"},
+                                 {"mode", "title_fixed_mib"}):
+        if _int(neo["mode"], 0, 15) is None:
+            e.append("memory.plan.neo.mode must be the title's Pro memory mode, 0..15 (an index of its tables)")
+        for k in ("title_fixed_mib", "overcommit_mib"):
+            if k in neo and _int(neo[k], 0, 65535) is None:
+                e.append(f"memory.plan.neo.{k} must be 0..65535 MiB")
+        knobs = neo.get("knobs", {})
+        if not isinstance(knobs, dict) or any(k not in KNOBS or _int(v, 1, 65535) is None for k, v in knobs.items()):
+            e.append(f"memory.plan.neo.knobs maps a set table's knob ({', '.join(KNOBS)}) to its size in MiB")
     tables = plan["tables"]
     if not isinstance(tables, list) or not 1 <= len(tables) <= 8:
         e.append("memory.plan.tables must list 1-8 tables")
@@ -532,6 +544,13 @@ def compile_blob(prof: dict, src: Path | None = None, flags: int = 0, extra_feat
                                                 KNOBS.get(t.get("knob"), NO_KNOB), len(exp), _int(t.get("mib", 0)),
                                                 _int(t.get("min_mib", 0)))
                          + struct.pack(f"<{len(exp)}Q", *exp) + _cstr(t.get("what", "table")[:40]))
+        if plan.get("neo"):     # a Pro-mode host (Jak X) runs the title in this memory mode
+            neo = plan["neo"]
+            sizes = [0] * 8
+            for k, v in neo.get("knobs", {}).items():
+                sizes[KNOBS[k]] = _int(v)
+            recs += _rec(REC_NEO, struct.pack("<3I8I", _int(neo["mode"]), _int(neo["title_fixed_mib"]),
+                                              _int(neo.get("overcommit_mib", 0)), *sizes))
     for r in prof.get("hle", []):
         nid = r.get("nid") or oe.compute_nid(r["function"])
         fills = r.get("fill", [])

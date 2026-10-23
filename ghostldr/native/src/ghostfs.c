@@ -21,7 +21,9 @@
  * sceSaveDataMount comes from SWRR's import table (eboot+0x3893F0; resolved
  * through dlsym it refuses every mount), params: userId u32 @0, dirName*
  * @0x10, blocks u64 @0x20, mode u32 @0x28 (RO 1, RW 2, CREATE 4); result:
- * mountPoint char[16] @0.  File calls go to libkernel's own exports.
+ * mountPoint char[16] @0.  Jak X imports sceSaveDataMount2 instead (host.c):
+ * userId @0, dirName* @0x8, blocks @0x10, mode @0x18, the same result.  File
+ * calls go to libkernel's own exports.
  */
 #include "ghost.h"
 
@@ -33,7 +35,6 @@ void *host_real_in(const char *modname, const char *name);
 #define GFS_MAX_CONT 96
 #define GFS_SLOTS 12          /* of /savedata1..15: leave room for <prefix>SAVE and a spare */
 #define GFS_FILES 512
-#define SWRR_SAVEDATA_MOUNT 0x3893F0  /* sceSaveDataMount import slot (SWRR US and EU: same executable) */
 /* signed, so they stay negative in the s64 results */
 #define E_NOENT ((s32)0x80020002)
 #define E_BADF ((s32)0x80020009)
@@ -108,10 +109,11 @@ int gfs_mount_user(s32 user, const char *dirname, int mode, u64 blocks, char mou
     memset(result, 0, sizeof(result));
     memset(dir, 0, sizeof(dir));
     strlcpy(dir, dirname, sizeof(dir));
+    bool m2 = g_hostgame->save_mount2;
     *(u32 *)(params + 0x00) = user < 0 ? g_user : (u32)user;
-    *(u64 *)(params + 0x10) = (u64)dir;
-    *(u64 *)(params + 0x20) = blocks;
-    *(u32 *)(params + 0x28) = (u32)mode;
+    *(u64 *)(params + (m2 ? 0x08 : 0x10)) = (u64)dir;
+    *(u64 *)(params + (m2 ? 0x10 : 0x20)) = blocks;
+    *(u32 *)(params + (m2 ? 0x18 : 0x28)) = (u32)mode;
     int rc = sd_mount(params, result);
     if (rc == 0) {
         memcpy(mount_point, result, 16);
@@ -144,7 +146,7 @@ static bool sd_ready(void)
 {
     if (sd_mount)
         return true;
-    u64 p = *(u64 *)(g_ctx->eboot_base + SWRR_SAVEDATA_MOUNT);
+    u64 p = *(u64 *)(g_ctx->eboot_base + g_hostgame->save_mount);
     sd_umount = host_real_in("libSceSaveData", "sceSaveDataUmount");
     int (*get_user)(u32 *) = host_real_in("libSceUserService", "sceUserServiceGetInitialUser");
     k_open = host_real("sceKernelOpen");
@@ -567,12 +569,16 @@ const char *gfs_save_name(void)
     return name;
 }
 
-/* the title ID gfs_pack.py wrote in the index (version 2), "" when unknown */
+/* the title ID gfs_pack.py wrote in the index (version 2); a dump outside
+ * ghostfs (run.py --app-root): the profile's, bound by the executable's
+ * fingerprint; "" when unknown */
 const char *title_id(void)
 {
     static char id[17];
     if (!id[0] && g_hdr && g_hdr->version >= 2)
         memcpy(id, g_hdr->title, sizeof(g_hdr->title));
+    if (!id[0] && !g_hdr)
+        strlcpy(id, profile_title(), sizeof(id));
     return id;
 }
 
@@ -644,7 +650,8 @@ int gfs_open(const char *path, int flags, int *fd_out)
     int fd = k_open(placeholder, 0, 0);
     if (dir_ok == -1) {
         dir_ok = fd >= 0;
-        logf("ghostfs: placeholder fds are %s (%x)", dir_ok ? "SWRR's /app0 directory" : "SWRR's eboot.bin", fd);
+        logf("ghostfs: placeholder fds are %s (%x)", dir_ok ? "the host's /app0 directory" : "the host's eboot.bin",
+             fd);
         if (!dir_ok) {
             strlcpy(placeholder, "/app0/eboot.bin", sizeof(placeholder));
             fd = k_open(placeholder, 0, 0);

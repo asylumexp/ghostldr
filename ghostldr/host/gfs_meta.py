@@ -704,7 +704,7 @@ def meta_target(cat: gc.Catalogue, title: str, prefix: str) -> str:
     """<prefix>META, after checking it can't be anything else: never a data
     container, an index, the catalogue, a title's progress or SWRR's save."""
     name = gc.meta_name(prefix)
-    taken = {gc.CATALOG, *gc.LEGACY_INDEXES, *gc.SWRR_SAVES}
+    taken = {gc.CATALOG, *gc.LEGACY_INDEXES, *gc.HOST_SAVES}
     for e in cat.entries:
         taken |= {e.index, gc.index_name(e.prefix), gc.save_name(e.prefix)}
     bad = (not gc.PREFIX_RE.fullmatch(prefix) or name in taken or name.startswith("GFS") or name.endswith("SAVE")

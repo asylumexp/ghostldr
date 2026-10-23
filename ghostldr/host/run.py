@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Send the ghostldr bootstrap to Luac0re's remote Lua loader and show logs.
+"""Send the ghostldr bootstrap to the console's remote Lua loader and show logs:
+Luac0re's in SWRR (TCP 9026) or UltraC0re's in Jak X (TCP 8888), whichever
+answers (--loader-port to choose).
 
     python3 ghostldr/host/run.py probe            # core probe (flags=1)
     python3 ghostldr/host/run.py probe --diag     # PS4 diagnostic: boots nothing (docs/ps4.md)
@@ -41,12 +43,13 @@ LAYOUT = ROOT / "build/ghostldr/core.json"
 EXT = ROOT / "build/ghostldr/ext.bin"
 SELECTOR = ROOT / "build/ghostldr/selector.bin"
 BOOT_LUA = ROOT / "ghostldr/lua/ghostldr.lua"
-from console import console_ip
+NOTIFY_HOOK = ROOT / "ghostldr/lua/notify_hook.lua"
+from console import LOADERS, console_ip, loader_port
 import profiles
 LOG_PORT = 18194
 EXT_PORT = LOG_PORT + 1   # TCP
 SEL_PORT = LOG_PORT + 2   # TCP
-LUA_MAX = 500 * 1024      # Luac0re's remote Lua loader reads at most this much
+LUA_MAX = 500 * 1024      # Luac0re's and UltraC0re's remote Lua loaders read at most this much
 NAMES = ROOT / "build/nid/known_names.txt"
 
 # Plain-language causes for the core's extension failure lines
@@ -130,7 +133,7 @@ def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int],
     ])
     payload = (header + BOOT_LUA.read_text()).encode()
     if len(payload) >= LUA_MAX:
-        raise SystemExit(f"the Lua payload is {len(payload)} bytes; Luac0re reads at most {LUA_MAX}")
+        raise SystemExit(f"the Lua payload is {len(payload)} bytes; the loader reads at most {LUA_MAX}")
     return payload
 
 
@@ -213,7 +216,14 @@ def recorder_running() -> int:
         return 0
 
 
-def send_lua(host: str, payload: bytes, port: int = 9026) -> None:
+def send_lua(host: str, payload: bytes, port: int) -> None:
+    if LOADERS.get(port) == "UltraC0re":
+        # its loader reports a payload's errors only on the TV: mirror them to the log first
+        hook = (f'GHOSTLDR_LOG_IP = "{local_ip_for(host)}"\nGHOSTLDR_LOG_PORT = {LOG_PORT}\n'
+                + NOTIFY_HOOK.read_text()).encode()
+        with socket.create_connection((host, port), timeout=10) as s:
+            s.sendall(hook)
+            s.shutdown(socket.SHUT_WR)
     with socket.create_connection((host, port), timeout=10) as s:
         s.sendall(payload)
         s.shutdown(socket.SHUT_WR)
@@ -352,14 +362,18 @@ def doctor(args) -> int:
     finally:
         s.close()
 
-    try:
-        with socket.create_connection((args.host, 9026), timeout=3):
-            pass
-        add("PASS", "console loader", f"{args.host}:9026 answers")
-    except OSError as e:
-        add("FAIL", "console loader",
-            f"nothing at {args.host}:9026 ({e}); SWRR up with "
-            "Luac0re's loader?")
+    ports = [args.loader_port] if args.loader_port else list(LOADERS)
+    for i, port in enumerate(ports):
+        try:
+            with socket.create_connection((args.host, port), timeout=3):
+                pass
+            add("PASS", "console loader", f"{args.host}:{port} answers ({LOADERS.get(port, 'a loader')})")
+            break
+        except OSError as e:
+            if i == len(ports) - 1:
+                add("FAIL", "console loader",
+                    f"nothing at {args.host}:{'/'.join(map(str, ports))} ({e}); SWRR up with "
+                    "Luac0re's loader, or Jak X with UltraC0re's?")
 
     app0, which = title_dump(args.title, args.select)
     if app0 is None:
@@ -448,6 +462,9 @@ def main() -> int:
                         help="where the title's app0 is: ghostfs (the installed titles, the default) or a "
                         "directory on a dev console, e.g. /data/ghost/app0")
     parser.add_argument("--file", type=Path, help="raw Lua file for mode=lua")
+    parser.add_argument("--loader-port", type=int, default=0,
+                        help="the console's Lua loader: 9026 Luac0re (SWRR), 8888 UltraC0re (Jak X); "
+                             "default: whichever answers")
     parser.add_argument("--log", type=Path, default=ROOT / "build/ghostldr/run.log")
     args = parser.parse_args()
     if args.diag and args.mode != "probe":
@@ -502,13 +519,14 @@ def main() -> int:
         except profiles.ProfileError as e:
             raise SystemExit(str(e))
         payload = f'GHOSTLDR_PROFILE_HEX = "{bundle.hex()}"\n'.encode() + payload
-        print(f"sending {len(payload)} bytes of Lua to {args.host}:9026", flush=True)
-        send_lua(args.host, payload)
+        port = args.loader_port or loader_port(args.host)
+        print(f"sending {len(payload)} bytes of Lua to {args.host}:{port}", flush=True)
+        send_lua(args.host, payload, port)
         if ext and not ext_server.sent.wait(60):
             print(f"extension: the console did not fetch it (is TCP {EXT_PORT} open in this computer's firewall?)",
                   flush=True)
     elif args.mode == "lua":
-        send_lua(args.host, args.file.read_bytes())
+        send_lua(args.host, args.file.read_bytes(), args.loader_port or loader_port(args.host))
     if listener:
         wait = args.wait if args.wait is not None else (None if args.mode == "boot" else 90.0 if args.diag else 20.0)
         if wait is None:

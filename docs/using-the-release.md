@@ -5,6 +5,7 @@ This walks through running Ghost of Tsushima from a ghostldr release on a stock 
 ## What you need
 
 - **A PS5 with *Star Wars Racer Revenge*, USA (CUSA03474) or Europe (CUSA03492).** Luac0re 2.4b must already work on it: its Remote Lua Loader starts when you open HALL OF FAME. Both regions work the same way; use the same one for the install and for playing.
+  - *Jak X: Combat Racing* (Europe, CUSA07992, update 1.04) with UltraC0re works too, experimentally: [jakx.md](jakx.md) has what it needs and how it differs. It takes its own install.
 - **Your own Ghost of Tsushima v2.18 dump (CUSA11456)** as a folder of files (`eboot.bin`, `sce_module/`, `cache/`, `movies/` ...), about 63 GB. The release contains no game files.
 - **About 60 GB free on the PS5** for the game data.
 - **A computer on the same network as the PS5** with Python 3.11 or newer.
@@ -34,7 +35,7 @@ You still need everything under What you need, including the firewall rules. [ap
 
 ## 1. Download and unpack
 
-From the release page, download `ghostldr-v0.4.0.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
+From the release page, download `ghostldr-v0.5.0.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
 
 ```bash
 shasum -a 256 --ignore-missing -c SHA256SUMS.txt
@@ -43,11 +44,11 @@ shasum -a 256 --ignore-missing -c SHA256SUMS.txt
 Unpack it and work from inside the folder; every command below runs there:
 
 ```bash
-unzip ghostldr-v0.4.0.zip
+unzip ghostldr-v0.5.0.zip
 ```
 
 ```bash
-cd ghostldr-v0.4.0
+cd ghostldr-v0.5.0
 ```
 
 ## 2. Put the game files in place

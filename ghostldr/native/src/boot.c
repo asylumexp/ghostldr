@@ -32,20 +32,24 @@ int ghost_boot(void)
     logf("boot: app root %s", root);
     crash_install();
     /* the extension carries the NID table: without it nothing resolves, so
-     * stop before anything touches the title or SWRR's state */
+     * stop before anything touches the title or the host's state */
     if (ext_fetch() != 0)
         return -7;
     int choose = 0; /* game selector: 1 when ghostfs left the choice to it */
     if (strcmp(root, "ghostfs") == 0) {
-        /* the title's files live in SWRR save containers (no kernel exploit) */
+        /* the title's files live in the host's save containers (no kernel exploit) */
         if ((choose = gfs_init()) < 0)
             return -6;
         root = "/app0";
     }
+    /* Jak X: the emulator threads UltraC0re leaves running (Luac0re stops SWRR's) */
+    void host_stop_emulator_threads(void);
+    host_stop_emulator_threads();
     {
-        /* Luac0re's "Remote Lua Loader" message dialog is opened in SWRR and
-         * never terminated: while the dialog library is up the system keeps
-         * the app's input intercepted and reports UI as overlaid */
+        /* the loader's message dialog ("Remote Lua Loader", UltraC0re's
+         * "Listening") is opened in the host and never terminated: while the
+         * dialog library is up the system keeps the app's input intercepted
+         * and reports UI as overlaid */
         void *host_real_in(const char *modname, const char *name);
         int (*upd)(void) = (int (*)(void))host_real_in("libSceMsgDialog", "sceMsgDialogUpdateStatus");
         int (*cls)(void) = (int (*)(void))host_real_in("libSceMsgDialog", "sceMsgDialogClose");
@@ -53,7 +57,7 @@ int ghost_boot(void)
         int st = upd ? upd() : -1;
         int c = (st == 2 /* RUNNING */ && cls) ? cls() : 0;
         int t = term ? term() : -1;
-        logf("boot: SWRR message dialog status %d, close %x, terminate %x", st, c, t);
+        logf("boot: %s message dialog status %d, close %x, terminate %x", g_hostgame->name, st, c, t);
     }
     if (g_ctx->flags & 2) {
         u64 host_release_emulator_memory(u64 min_size);

@@ -1,4 +1,5 @@
--- ghostldr bootstrap for Luac0re 2.4b (SWRR US CUSA03474 or EU CUSA03492, after jit_init()).
+-- ghostldr bootstrap for Luac0re 2.4b (SWRR US CUSA03474 or EU CUSA03492, after jit_init())
+-- or UltraC0re (Jak X EU CUSA07992 1.04, after its jit_init() and jit_compat_init()).
 -- The host tool prepends:
 --   GHOSTLDR_CORE_HEX   hex of build/ghostldr/core.bin
 --   GHOSTLDR_TEXT_SIZE  bytes of code placed in JIT RX memory (16 KiB aligned)
@@ -6,6 +7,7 @@
 --   GHOSTLDR_LOG_IP / GHOSTLDR_LOG_PORT   UDP log sink
 --   GHOSTLDR_FLAGS      1 = probe only (ctx flags in native/include/ghost.h);
 --                       this script adds 8192 on a PS4 (Luac0re's PLATFORM)
+--                       and 32768 under UltraC0re
 --   GHOSTLDR_APP_ROOT   path of the title's app0 directory
 --   GHOSTLDR_EXT_PORT / GHOSTLDR_EXT_SIZE / GHOSTLDR_EXT_CRC
 --                       the runtime extension (build/ghostldr/ext.bin, with the
@@ -27,10 +29,41 @@ local function u32le_ip(ip)
     return (tonumber(d) << 24) | (tonumber(c) << 16) | (tonumber(b) << 8) | tonumber(a)
 end
 
-if not NEW_JIT_SOCK or not JIT_ROP then
+-- UltraC0re parks the compiler on its own loop (door1.lua) and keeps
+-- Luac0re's jit_* names for the rest (jitcompat.lua)
+local ULTRA = J_COMP ~= nil and J_SPIN ~= nil
+if ULTRA then
+    if not J_STUB or not NEW_JIT_SOCK or not jit_memcpy_addr then
+        fail("UltraC0re's compiler calls are not initialized (jit_compat_init)")
+    end
+elseif not NEW_JIT_SOCK or not JIT_ROP then
     fail("Luac0re JIT exploit is not initialized")
 end
 init_dlsym()
+local BRIDGE_ADDR = BRIDGE_BASE or BRIDGE
+-- The core calls dlsym through the eboot's "call rbx; ret" gadget, and the
+-- kernel takes the caller from the callee's frame: it must build one, as
+-- Luac0re's SCE_KERNEL_DLSYM (sceKernelDlsym itself) does.  UltraC0re's is
+-- the bare dynlib_dlsym system call, which leaves the core's frame (JIT
+-- memory) in place and is refused, so the core gets the export instead.
+local core_dlsym = SCE_KERNEL_DLSYM
+if ULTRA then
+    core_dlsym = dlsym(LIBKERNEL_HANDLE, "sceKernelDlsym")
+    if core_dlsym == 0 then fail("dlsym sceKernelDlsym") end
+end
+
+-- Bridge memory (shared with the compiler) for the core's staging buffer and
+-- its private scratch (jitrpc.c PRIV: oob_scratch + 0x70000 on, ~0x21000).
+-- Luac0re: its own OOB scratch, and 4 MiB at SHELLCODE_SCRATCH.  Jak X's
+-- bridge holds the emulator's data at +0..+0x2f9000 and +0x90f000 on, and
+-- UltraC0re's at +0x500000..+0x504400; +0x540000 (SHELLCODE_SCRATCH) to
+-- +0x90f000 stays zero (SWRR-game-bridge research/jakx/bridge_probe.lua):
+-- staging +0x540000, scratch up to about +0x761000.
+local staging, staging_size, oob_scratch = SHELLCODE_SCRATCH, 0x400000, OOB_SCRATCH_BASE
+if ULTRA then
+    staging, staging_size = SHELLCODE_SCRATCH, 0x200000
+    oob_scratch = SHELLCODE_SCRATCH + staging_size - 0x70000
+end
 
 local k = {}
 local function kfn(name)
@@ -121,24 +154,42 @@ local function fw_number()
     local major, minor = tostring(FW_VERSION or ""):match("(%d+)%.(%d+)")
     return major and tonumber(major, 16) * 0x100 + tonumber(minor, 16) or 0
 end
-local flags = GHOSTLDR_FLAGS | (PLATFORM == "PS4" and 8192 or 0)
+local flags = GHOSTLDR_FLAGS | (PLATFORM == "PS4" and 8192 or 0) | (ULTRA and 32768 or 0)
+-- the compiler chain's parts: 19 slots (a union in struct boot_ctx)
+local engine
+if ULTRA then
+    local c = J_COMP
+    engine = {
+        c + C_PRAX, c + C_PRDI_PRBP, c + C_PRSI_PRBP, c + C_PRCX, c + C_MOVRDXRSI, c + C_WRDI,
+        c + C_POPRSPDEREF, J_SPIN, J_CALL, J_RES, J_CNT, 0, 0, 0, 0, 0, 0, 0, 0,
+    }
+else
+    engine = {
+        JIT_ROP.RET, JIT_ROP.MOV_RAX_RDI_RET, JIT_ROP.POP_RDI_RET, JIT_ROP.POP_RSI_RET,
+        JIT_ROP.MOV_RDX_RDI_RET, JIT_ROP.POP_RCX_RET, JIT_ROP.POP_RBX_RET,
+        JIT_ROP.MOV_DEREF_RBX_RAX_RET, JIT_ROP.POP_RSP_RET, JIT_ROP.POP_R12_R13_R14_R15_RBP_RET,
+        JIT_ROP.MOV_R8_RBX_RET, JIT_ROP.MOV_R9_RBX_RET,
+        LEAK_RBX, LEAK_RBP, LEAK_R12, LEAK_R13, LEAK_R14, LEAK_R15,
+        FAKE_RSP,
+    }
+end
 local fields = {
-    0x3130305244484c47, 0, EBOOT_BASE, SCE_KERNEL_DLSYM, EBOOT_BASE + 0x31aa9,
+    0x3130305244484c47, 0, EBOOT_BASE, core_dlsym,
+    EBOOT_BASE + (ULTRA and 0x19869 or 0x31aa9),    -- the eboot's "call rbx; ret"
     LIBKERNEL_HANDLE, 0, log_fd, log_addr,
     JIT_BASE,
-    JIT_ROP.RET, JIT_ROP.MOV_RAX_RDI_RET, JIT_ROP.POP_RDI_RET, JIT_ROP.POP_RSI_RET,
-    JIT_ROP.MOV_RDX_RDI_RET, JIT_ROP.POP_RCX_RET, JIT_ROP.POP_RBX_RET,
-    JIT_ROP.MOV_DEREF_RBX_RAX_RET, JIT_ROP.POP_RSP_RET, JIT_ROP.POP_R12_R13_R14_R15_RBP_RET,
-    JIT_ROP.MOV_R8_RBX_RET, JIT_ROP.MOV_R9_RBX_RET,
-    LEAK_RBX, LEAK_RBP, LEAK_R12, LEAK_R13, LEAK_R14, LEAK_R15,
-    FAKE_RSP, OOB_SCRATCH_BASE, JIT_ROP_CHAIN_START, JIT_ROP_CHAIN_END,
-    jit_memcpy_addr, jit_calloc_addr, compiler_syscall(), jit_libc_error_addr,
+}
+for _, v in ipairs(engine) do fields[#fields + 1] = v end
+for _, v in ipairs({
+    oob_scratch, JIT_ROP_CHAIN_START or 0, JIT_ROP_CHAIN_END or 0,
+    jit_memcpy_addr, jit_calloc_addr, compiler_syscall(), jit_libc_error_addr or 0,
     jit_sceKernelJitCreateSharedMemory_addr, jit_sceKernelJitCreateAliasOfSharedMemory_addr,
     jit_sceKernelJitMapSharedMemory_addr,
     NEW_JIT_SOCK, NEW_MAIN_SOCK,
-    SHELLCODE_SCRATCH, 0x400000,
+    staging, staging_size,
     0, flags,
-}
+}) do fields[#fields + 1] = v end
+if #fields ~= 45 then fail("the boot context has " .. #fields .. " fields, not 45") end
 local ctx = malloc(0x200)
 for i = 0, 0x1F8, 8 do write64(ctx + i, 0) end
 for i, v in ipairs(fields) do write64(ctx + (i - 1) * 8, v) end
@@ -147,7 +198,7 @@ local app_root = malloc(#GHOSTLDR_APP_ROOT + 1)
 write_string(app_root, GHOSTLDR_APP_ROOT)
 write64(ctx + (#fields - 2) * 8, app_root)
 write64(ctx + #fields * 8 + 0x00, jit_sceKernelVirtualQuery_addr or 0)
-write64(ctx + #fields * 8 + 0x08, BRIDGE_BASE or 0)
+write64(ctx + #fields * 8 + 0x08, BRIDGE_ADDR or 0)
 write64(ctx + #fields * 8 + 0x10, IPU_PROG_BASE or 0)
 write64(ctx + #fields * 8 + 0x18, small_arena)
 write64(ctx + #fields * 8 + 0x20, GHOSTLDR_GPU_HEAP_MIB or 0)

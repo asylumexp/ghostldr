@@ -32,8 +32,9 @@ int sys_unused_fd(void);
 int sys_vfmt(char *buf, u64 size, const char *fmt, __builtin_va_list ap);
 
 #ifdef __APPLE__
-/* resolve.c's assembly calls the unprefixed C name */
+/* resolve.c's assembly calls the unprefixed C names */
 __asm__(".globl c_unresolved\nc_unresolved:\n    jmp _c_unresolved\n");
+__asm__(".globl c_late_target\nc_late_target:\n    jmp _c_late_target\n");
 #endif
 
 struct kfuncs K;

@@ -25,6 +25,7 @@ CATALOG_BLOCKS = 512                 # 16 MiB: small containers lose a lot to fi
 INDEX_FILE = "index.bin"
 LEGACY_INDEXES = ("GFSINDEX", "GHOSTIDX")    # v0.1.x single-title indexes, newest first
 SWRR_SAVES = ("SLUS-20268", "SLES-50366")    # SWRR's own save (with Luac0re): never touched
+HOST_SAVES = SWRR_SAVES + ("SCUS-97429",)    # and Jak X's (with UltraC0re)
 MAX_CONTAINERS = 96                  # ghostfs.c GFS_MAX_CONT
 MAX_TITLES = 64
 
@@ -71,7 +72,7 @@ def meta_name(prefix: str) -> str:
 
 def is_progress(name: str) -> bool:
     """A title's progress container (what only DELSAVE may delete)."""
-    return name.endswith("SAVE") and name not in SWRR_SAVES
+    return name.endswith("SAVE") and name not in HOST_SAVES
 
 
 @dataclass

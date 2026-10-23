@@ -27,9 +27,10 @@ M.MAX_FILES = 1024                 -- entries in a save (walk and archives)
 M.MAX_DEPTH = 8
 M.MAX_UPLOAD = (1 << 30) + (64 << 20)
 M.MANIFEST = "ghostldr-save.json"
-M.PROTECTED = {["SLUS-20268"] = true, ["SLES-50366"] = true}    -- SWRR's own save
-M.SWRR = {CUSA03474 = "SLUS-20268", CUSA03492 = "SLES-50366"}
-M.REGION = {CUSA03474 = "US", CUSA03492 = "EU"}
+-- the host's own save: SWRR's (with Luac0re), or Jak X's (with UltraC0re)
+M.PROTECTED = {["SLUS-20268"] = true, ["SLES-50366"] = true, ["SCUS-97429"] = true}
+M.SWRR = {CUSA03474 = "SLUS-20268", CUSA03492 = "SLES-50366", CUSA07992 = "SCUS-97429"}
+M.REGION = {CUSA03474 = "US", CUSA03492 = "EU", CUSA07992 = "EU"}
 M.KNOWN = {CUSA11456 = {name = "Ghost of Tsushima"}}   -- for installs whose dump has no param.sfo
 M.TOKEN_ALPHABET = "ACDEFGHJKLMNPQRTUVWXY34679"
 M.ERRORS = {
@@ -970,9 +971,12 @@ local sd, us = module("libSceSaveData.sprx"), module("libSceUserService.sprx")
 local sd_umount = func_wrap(dlsym(sd, "sceSaveDataUmount"))
 local sd_delete = func_wrap(dlsym(sd, "sceSaveDataDelete"))
 -- Mount (v1) and DirNameSearch from SWRR's import table: a dlsym'd Mount
--- refuses every mount (ghostfs.c).  SWRR 01.02, US and EU.
-local mount_addr, search_addr = read64(EBOOT_BASE + 0x3893F0), read64(EBOOT_BASE + 0x3893C0)
-if mount_addr < 0x10000 or search_addr < 0x10000 then error("manager: SWRR's save data imports not found") end
+-- refuses every mount (ghostfs.c).  SWRR 01.02, US and EU.  Jak X 1.04
+-- (UltraC0re) imports Mount2 instead: dirName@0x8, blocks@0x10, mode@0x18.
+local MOUNT2 = J_COMP ~= nil
+local mount_addr = read64(EBOOT_BASE + (MOUNT2 and 0xcd1e40 or 0x3893F0))
+local search_addr = read64(EBOOT_BASE + (MOUNT2 and 0xcd1e60 or 0x3893C0))
+if mount_addr < 0x10000 or search_addr < 0x10000 then error("manager: the host's save data imports not found") end
 local sd_mount, sd_search = func_wrap(mount_addr), func_wrap(search_addr)
 local uid = malloc(8)
 func_wrap(dlsym(us, "sceUserServiceGetInitialUser"))(uid)
@@ -1011,9 +1015,15 @@ local function mount(name, mode, blocks)
     memset(params, 0, 128)
     memset(result, 0, 64)
     write32(params, USER)
-    write64(params + 0x10, dirbuf)
-    write64(params + 0x20, blocks or 0)
-    write32(params + 0x28, mode)
+    if MOUNT2 then
+        write64(params + 0x08, dirbuf)
+        write64(params + 0x10, blocks or 0)
+        write32(params + 0x18, mode)
+    else
+        write64(params + 0x10, dirbuf)
+        write64(params + 0x20, blocks or 0)
+        write32(params + 0x28, mode)
+    end
     local rc = sd_mount(params, result)
     if rc ~= 0 then return nil, rc, read64(result + 0x10) end
     local mp = cstr(result, 16)

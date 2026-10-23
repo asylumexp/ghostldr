@@ -37,20 +37,33 @@ typedef _Bool bool;
 struct boot_ctx {
     u64 magic;
     u64 size;              /* sizeof(struct boot_ctx) */
-    u64 eboot_base;        /* SWRR eboot base */
+    u64 eboot_base;        /* host game's eboot base (SWRR, or Jak X: CTX_FLAG_JAKX) */
     u64 dlsym;             /* sceKernelDlsym in main process */
     u64 call_gadget;       /* eboot "call rbx; ret" */
     u64 libkernel_handle;
     u64 libc_handle;
-    u64 log_fd;            /* UDP socket from Luac0re create_socket() */
+    u64 log_fd;            /* UDP socket from the loader's create_socket() */
     u64 log_addr;          /* sockaddr_in (16 bytes) of the log server */
-    /* compiler-process RPC (port of Luac0re jit_rop) */
+    /* compiler-process RPC (jitrpc.c): the compiler's base, then the chain
+     * parts of the loader that runs us */
     u64 jit_base;
-    u64 rop_ret, rop_mov_rax_rdi, rop_pop_rdi, rop_pop_rsi, rop_mov_rdx_rdi;
-    u64 rop_pop_rcx, rop_pop_rbx, rop_mov_deref_rbx_rax, rop_pop_rsp;
-    u64 rop_pop_r12_r15_rbp, rop_mov_r8_rbx, rop_mov_r9_rbx;
-    u64 leak_rbx, leak_rbp, leak_r12, leak_r13, leak_r14, leak_r15;
-    u64 fake_rsp, oob_scratch, chain_start, chain_end;
+    union {
+        struct { /* Luac0re (SWRR): its jit_rop gadgets and the registers its chain restores */
+            u64 rop_ret, rop_mov_rax_rdi, rop_pop_rdi, rop_pop_rsi, rop_mov_rdx_rdi;
+            u64 rop_pop_rcx, rop_pop_rbx, rop_mov_deref_rbx_rax, rop_pop_rsp;
+            u64 rop_pop_r12_r15_rbp, rop_mov_r8_rbx, rop_mov_r9_rbx;
+            u64 leak_rbx, leak_rbp, leak_r12, leak_r13, leak_r14, leak_r15;
+            u64 fake_rsp;
+        };
+        struct { /* UltraC0re (Jak X): door1.lua's parked compiler loop.  Gadgets
+                  * for rdi/rsi/rdx/rcx only: four arguments at most */
+            u64 uc_pop_rax, uc_pop_rdi_rbp, uc_pop_rsi_rbp, uc_pop_rcx, uc_mov_rdx_rsi;
+            u64 uc_store_rdi;      /* mov [rdi], rax */
+            u64 uc_pop_rsp_deref;  /* the loop's "pop rsp" (touches [rax]) */
+            u64 uc_spin, uc_call, uc_res, uc_cnt; /* J_SPIN, J_CALL, J_RES, J_CNT */
+        };
+    };
+    u64 oob_scratch, chain_start, chain_end; /* UltraC0re: oob_scratch only */
     u64 jit_memcpy, jit_calloc, jit_syscall, jit_errno_fn;
     u64 jit_shm_create, jit_shm_alias, jit_shm_map;
     u64 new_jit_sock, new_main_sock;
@@ -408,6 +421,7 @@ struct prof_rec {
 #define REC_TLS 4
 #define REC_NAME 5      /* the title's display name, UTF-8 + NUL (the game selector reads it; the core ignores it) */
 #define REC_EXEC 6      /* a module's code ranges (bigexec.c) */
+#define REC_NEO 7       /* the plan for a Pro-mode host (Jak X): the title's own Pro memory mode */
 struct prof_tls {       /* tools/tls_sites.py: one module's thread-pointer loads, checked before patching */
     struct prof_rec r;
     char module[32];    /* its file name, e.g. "eboot.bin" */
@@ -421,6 +435,12 @@ struct prof_exec {      /* a module's code ranges, instead of the evidence bxpla
 struct prof_plan {
     struct prof_rec r;
     u32 title_fixed_mib, overcommit_mib, nsites, sites[]; /* lazily backed allocation sites (return addresses) */
+};
+struct prof_neo {       /* with a plan: when the host runs in Pro mode (sceKernelIsNeoMode 1) the
+                         * title is told so, and the plan applies to this memory mode instead of 0 */
+    struct prof_rec r;
+    u32 mode, title_fixed_mib, overcommit_mib; /* the plan's overcommit when 0 */
+    u32 knob_mib[8];                           /* set tables' sizes in that mode, by knob; 0: the table's own */
 };
 struct prof_table {     /* a u64 table in the executable's text, indexed by memory mode */
     struct prof_rec r;
@@ -485,7 +505,7 @@ u64 stub_alloc_code(const u8 *code, u32 len);
 int host_module_handle(const char *modname, u32 *out);
 int host_module_handle_for(struct module *m, const char *modname, u32 *out);
 void crash_install(void);
-u64 unresolved_stub(const char *lib, const char *nid, s64 ret, bool denied);
+u64 unresolved_stub(const char *lib, const char *nid, const char *modname, s64 ret, bool denied);
 
 /* ---- HLE + TLS (hle.c, tls.c) ---- */
 u64 hle_lookup(const char *lib, const char *name);
@@ -538,14 +558,33 @@ bool bx_in_view(const struct module *m, u64 addr);                 /* executable
  * 32 force title ready, 64 ext in a JIT block, 128 dialog cancel, 256 IME fixed name,
  * 512 keep Remote Play, 1024 start game modules at boot, 2048 show the game selector,
  * 4096 selector: built-in font only (sel_api.h), 8192 the console is a PS4,
- * 16384 PS4 diagnostic (diag.c) */
+ * 16384 PS4 diagnostic (diag.c), 32768 the host is Jak X under UltraC0re */
 #define CTX_FLAG_KEEP_REMOTE_PLAY 512 /* the title's sceRemoteplayProhibit is a no-op (run.py --keep-remote-play) */
 #define CTX_FLAG_BOOT_START_ALL 1024 /* start IsGame modules at boot too (run.py --boot-start-modules) */
 #define CTX_FLAG_SELECT 2048           /* game selector: show it even when the title is known (run.py --select) */
 #define CTX_FLAG_SEL_FONT_BUILTIN 4096 /* game selector: never try libSceFont (run.py --select-font builtin) */
 #define CTX_FLAG_PS4 8192              /* Luac0re's PLATFORM is "PS4" (ghostldr.lua; docs/ps4.md) */
 #define CTX_FLAG_DIAG 16384            /* run the PS4 diagnostic instead of booting (run.py probe --diag) */
+#define CTX_FLAG_JAKX 32768            /* UltraC0re in Jak X, not Luac0re in SWRR (ghostldr.lua) */
 static inline bool is_ps4(void) { return (g_ctx->flags & CTX_FLAG_PS4) != 0; }
+static inline bool is_jakx(void) { return (g_ctx->flags & CTX_FLAG_JAKX) != 0; }
+
+/* The PS2 classic ghostldr runs inside (host.c): where its executable keeps
+ * what the core takes over.  Offsets are from the eboot base. */
+struct host_game {
+    const char *name;
+    u32 video_handle;   /* its main sceVideoOutOpen handle (s32) */
+    u32 save_mount;     /* import slot of its sceSaveDataMount, or sceSaveDataMount2 */
+    bool save_mount2;   /* the slot is sceSaveDataMount2 (no title ID, other offsets) */
+    u32 pthread_self;   /* import slot of scePthreadSelf (diag.c) */
+    /* emulator threads the loader left running that use the buffers
+     * hostmem.c releases: cancelled first (Luac0re stops SWRR's itself) */
+    struct host_thread {
+        u32 handle;     /* where its pthread_t is kept */
+        const char *name;
+    } stop[2], threads[13]; /* threads: all of them, for diag.c */
+};
+extern const struct host_game *g_hostgame;
 int ghost_diag(void);                  /* diag.c */
 
 /* ---- PS4 (ps4.c: decisions without console calls; arena.c, hostmem.c and

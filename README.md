@@ -15,6 +15,7 @@ You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your o
 - **OpenOrbis homebrew** runs ([details](docs/compatibility.md#homebrew)).
 - **Other games** boot as far as their imports and memory allow.
 - **PS4 consoles** are experimental: no title has booted on one yet ([docs/ps4.md](docs/ps4.md)).
+- **Jak X instead of SWRR** (EU CUSA07992 1.04, with [UltraC0re](https://github.com/matem6/UltraC0re)) is experimental: Ghost plays there, in its PS4 Pro mode, from its own install in Jak X's save data ([docs/jakx.md](docs/jakx.md)).
 
 ## Getting started
 
@@ -56,6 +57,7 @@ The computer's firewall must let Python receive on UDP 18194 and TCP 18195–181
 - [Host tooling](docs/host-tooling.md): `run.py doctor`, the boot preflight, the stub report.
 - [ghostfs](docs/ghostfs-catalogue.md): container names and the title catalogue.
 - [PS4](docs/ps4.md): status and the diagnostic to run.
+- [Jak X](docs/jakx.md): ghostldr in Jak X with UltraC0re, and what differs from SWRR.
 - [Architecture](docs/architecture.md): repository layout, the core, host tools, dev setup.
 - [Runtime extension](ghostldr/native/ext/README.md): the NID table and HLE families.
 

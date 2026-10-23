@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Install titles into SWRR save containers over the network (ghostfs).
+"""Install titles into the host game's save containers over the network (ghostfs).
 
-Needs only Luac0re's Remote Lua Loader on 9026 (no kernel exploit).  Sends
+Needs only the remote Lua loader (no kernel exploit): Luac0re's on 9026 in
+SWRR, or UltraC0re's on 8888 in Jak X, which keeps its own containers.  Sends
 ghostldr/lua/gfs_receiver.lua, which listens on GFS_PORT, then streams each
 container laid out by gfs_pack.py straight from the source files.
 
@@ -47,12 +48,12 @@ from pathlib import Path
 
 import gfs_catalog as gc
 import gfs_meta as gm
-from console import console_ip
+from console import console_ip, loader_port
 from gfs_pack import FLAG_INCOMPLETE, OUT_ROOT, default_title, exec_fit, index_header
 
 ROOT = Path(__file__).resolve().parents[2]
 RECEIVER = ROOT / "ghostldr/lua/gfs_receiver.lua"
-# Luac0re creates sockets in the JIT compiler process and passes them over, so a
+# The loaders create sockets in the JIT compiler process and pass them over, so a
 # receiver's listening socket outlives it (the compiler keeps its copy): each
 # run listens on a fresh port, and connections to an old one would hang.
 GFS_PORT = 9032 + int(time.time()) % 200
@@ -293,10 +294,11 @@ class Receiver:
             local_ip = probe.getsockname()[0]
         lua = (f'GFS_PORT = {GFS_PORT}\nPROBE_LOG_IP = "{local_ip}"\nPROBE_LOG_PORT = {LOG_PORT}\n'
                + RECEIVER.read_text())
-        with socket.create_connection((self.host, 9026), timeout=10) as s:
+        port = loader_port(self.host)
+        with socket.create_connection((self.host, port), timeout=10) as s:
             s.sendall(lua.encode())
             s.shutdown(socket.SHUT_WR)
-        log(f"receiver sent to {self.host}:9026")
+        log(f"receiver sent to {self.host}:{port}")
 
     def connect(self) -> None:
         for _ in range(40):

@@ -1,6 +1,6 @@
 -- ghostfs installer, console side: receives save containers over TCP and
 -- writes them into SWRR's own save data (no kernel exploit needed).
--- Started through Luac0re's remote loader by ghostldr/host/gfs_install.py,
+-- Started through the remote Lua loader (Luac0re's in SWRR, UltraC0re's in Jak X) by ghostldr/host/gfs_install.py,
 -- which prepends GFS_PORT, PROBE_LOG_IP and PROBE_LOG_PORT.
 --
 -- Request (96 bytes, little endian): "GFSI", op u32, blocks u64, size u64,
@@ -16,14 +16,17 @@
 -- the bytes that fit), 9 DELSAVE (delete a title's progress container).
 -- Reply (32 bytes): "GFSR", status s32, value u64, millis u64, 8 pad.
 -- Containers named *SAVE hold a title's progress: PUT, DELETE and WRITE
--- refuse them, as they refuse SWRR's own save; only DELSAVE (sent on the
--- user's explicit request) deletes them, never SWRR's own.
+-- refuse them, as they refuse the host's own save (SWRR's, or Jak X's with
+-- UltraC0re in it); only DELSAVE (sent on the user's explicit request) deletes
+-- them, never the host's own.
 -- Names and formats: docs/ghostfs-catalogue.md.
 --
 -- Save containers: sceSaveDataMount from SWRR's import table (eboot+0x3893F0),
 -- params userId@0, dirName*@0x10, blocks@0x20, mode@0x28 (RO 1, RW 2,
--- CREATE 4), at most 32768 blocks (1 GiB).  File calls must be libkernel's
--- own exports, or the commit (unmount) stays BUSY for good.
+-- CREATE 4), at most 32768 blocks (1 GiB).  Under UltraC0re, Jak X's
+-- sceSaveDataMount2 (eboot+0xcd1e40): dirName*@0x8, blocks@0x10, mode@0x18.
+-- File calls must be libkernel's own exports, or the commit (unmount) stays
+-- BUSY for good.
 
 init_dlsym()
 local sendto = func_wrap(dlsym(LIBKERNEL_HANDLE, "sendto"))
@@ -68,7 +71,8 @@ write_string(name, "libSceUserService.sprx")
 local us = load_start(name, 0, 0, 0, 0, 0)
 local umount = func_wrap(dlsym(sd, "sceSaveDataUmount"))
 local delete = func_wrap(dlsym(sd, "sceSaveDataDelete"))
-local mount = func_wrap(read64(EBOOT_BASE + 0x3893F0))
+local JAKX = J_COMP ~= nil
+local mount = func_wrap(read64(EBOOT_BASE + (JAKX and 0xcd1e40 or 0x3893F0)))
 local uid_buf = malloc(8)
 func_wrap(dlsym(us, "sceUserServiceGetInitialUser"))(uid_buf)
 local user = read32(uid_buf)
@@ -82,9 +86,15 @@ local function do_mount(mode, blocks)
     for i = 0, 120, 8 do write64(params + i, 0) end
     for i = 0, 56, 8 do write64(result + i, 0) end
     write32(params + 0x00, user)
-    write64(params + 0x10, dir)
-    write64(params + 0x20, blocks)
-    write32(params + 0x28, mode)
+    if JAKX then
+        write64(params + 0x08, dir)
+        write64(params + 0x10, blocks)
+        write32(params + 0x18, mode)
+    else
+        write64(params + 0x10, dir)
+        write64(params + 0x20, blocks)
+        write32(params + 0x28, mode)
+    end
     local rc = mount(params, result)
     return rc, cstring(result, 16)
 end
@@ -184,7 +194,8 @@ local function put(cfd, blocks, size, dname, fname)
         written = written + want
         if written % (256 << 20) == 0 then
             local sec = (gettime() - t0) / 1e6
-            say(string.format("PUT %s: %d MiB, %.1f MB/s", dname, written >> 20, written / 1e6 / sec))
+            say(string.format("PUT %s: %d MiB, %.1f MB/s (Lua heap %d KiB)", dname, written >> 20,
+                              written / 1e6 / sec, math.floor(collectgarbage("count"))))
         end
     end
     local crc = kclose(fd)
@@ -379,10 +390,11 @@ while running and bad < 3 do
         local op, blocks, size = read32(hdr + 4), read64(hdr + 8), read64(hdr + 16)
         local dname = cstring(hdr + 24, 32)
         local fname = cstring(hdr + 56, 32)
-        local protected = dname == "SLUS-20268" or dname == "SLES-50366" or dname:sub(-4) == "SAVE"
+        local host_save = dname == "SLUS-20268" or dname == "SLES-50366" or dname == "SCUS-97429"
+        local protected = host_save or dname:sub(-4) == "SAVE"
         if protected and (op == 1 or op == 4 or op == 6) then
             if op == 6 then recv_exact(cfd, buf, math.min(size, CHUNK)) end
-            send_reply(cfd, -3, 0, 0)       -- never SWRR's own save or a title's progress
+            send_reply(cfd, -3, 0, 0)       -- never the host's own save or a title's progress
             if op == 1 then break end       -- its payload was not read: drop the connection
         elseif op == 5 then
             read_file(cfd, dname, fname, blocks, size)
@@ -407,7 +419,7 @@ while running and bad < 3 do
             send_reply(cfd, status, have, 0)
         elseif op == 9 then
             -- a title's progress, on the user's explicit request; never SWRR's own save
-            if dname:sub(-4) == "SAVE" and dname ~= "SLUS-20268" and dname ~= "SLES-50366" then
+            if dname:sub(-4) == "SAVE" and not host_save then
                 set_dir(dname)
                 local rc = do_delete()
                 say(string.format("DELSAVE %s -> %s", dname, hex(rc)))

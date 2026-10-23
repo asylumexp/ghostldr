@@ -57,7 +57,7 @@ class Pick(unittest.TestCase):
     def test_prefers_loader(self):
         a = console.parse_reply("10.0.0.1", PS5_ON)
         b = console.parse_reply("10.0.0.5", PS5_ON.replace(b"AAAAAAAAAAAA", b"DDDDDDDDDDDD"))
-        b.loader = True
+        b.loader = 8888                       # UltraC0re in Jak X
         self.assertEqual([c.ip for c in console.pick(self.found(a, b))], ["10.0.0.5"])
 
     def test_ambiguous(self):
@@ -106,7 +106,7 @@ class ChooseAndList(unittest.TestCase):
 
     def test_several_are_listed_with_the_pick_marked(self):
         ps5, other, sleeping = self.consoles()
-        other.loader = True
+        other.loader = 9026
         ip, err = self.run_ip({c.ip: c for c in (ps5, other, sleeping)})
         self.assertEqual(ip, "10.0.0.5")
         self.assertIn("Found 3 consoles:", err)

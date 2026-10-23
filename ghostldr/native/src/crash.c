@@ -38,6 +38,44 @@ static bool readable(u64 p)
     return qmp && qmp((void *)(p & ~7UL), &st, &en, &prot) == 0 && (prot & PROT_READ);
 }
 
+/* CUSA11456 2.18, the warp task's SpawnMissionWorld (state 27, eboot
+ * 0xe5d64e): it waits until each resource the world lists is loaded.  The
+ * list: [eboot+0x3ce40b8] +0x38 (16-byte entries: handle, u16 generation),
+ * count +0x40; each handle is looked up in the load table (buckets at
+ * eboot+0x28e2118, bucket count +0x28e2110; nodes key, resource, u32 hash,
+ * next), and a resource is loaded once its +0xe0 is set.  Logs the ones
+ * still waiting. */
+__attribute__((minsize, cold)) static void log_mission_world_wait(u64 b)
+{
+    u64 w = *(u64 *)(b + 0x3ce40b8);
+    if (!readable(w)) {
+        logf("watchdog:   mission world list: none (%lx)", w);
+        return;
+    }
+    s64 n = *(s32 *)(w + 0x40);
+    u64 list = *(u64 *)(w + 0x38), *buckets = *(u64 **)(b + 0x28e2118);
+    u32 nb = *(u32 *)(b + 0x28e2110), waiting = 0;
+    logf("watchdog:   mission world list %lx: %ld resources, flag %u", w, n, *(u8 *)(w + 0x5c));
+    for (s64 i = 0; i < n && i < 4096 && readable(list) && buckets && nb; i++) {
+        u64 h = *(u64 *)(list + i * 16);
+        u16 gen = *(u16 *)(list + i * 16 + 8);
+        u32 hash = (u32)(h >> 32) ^ (u32)h;
+        u64 node = buckets[hash % nb], res = 0;
+        for (u32 hops = 0; node && hops < 64 && readable(node); node = *(u64 *)(node + 0x18), hops++)
+            if (*(u32 *)(node + 0x10) == hash && *(u64 *)node == h) {
+                res = *(u64 *)(node + 8);
+                break;
+            }
+        bool ready = res && readable(res) && (u16)(*(u16 *)(res + 0xb0) ^ gen) <= 0xff && *(u64 *)(res + 0xe0);
+        if (ready || waiting++ >= 4)
+            continue;
+        logf("watchdog:   waiting for #%ld handle %lx gen %x: resource %lx", i, h, gen, res);
+        if (res && readable(res))
+            log_hex("watchdog:   res", (const void *)res, 0x100);
+    }
+    logf("watchdog:   %u of %ld not loaded", waiting, n);
+}
+
 static volatile int g_crashed;
 
 static void on_signal(int sig, void *info, void *ucv)
@@ -319,6 +357,8 @@ static void *watchdog(void *arg)
                 if (t)
                     logf("watchdog:   task state %u enabled %u; load counter %d", *(u32 *)(t + 0x208),
                          *(u8 *)(t + 0x239), *(s32 *)(b + 0x28e2158));
+                if (t && *(u32 *)(t + 0x208) == 27)
+                    log_mission_world_wait(b);
             }
         }
         if (g_ctx->flags & 8)

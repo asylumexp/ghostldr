@@ -300,7 +300,7 @@ class RunDiagTests(unittest.TestCase):
         argv = ["run.py", "probe", "--diag", "--no-build", "--host", "192.0.2.1", "--wait", "0"]
         with mock.patch.object(sys, "argv", argv), mock.patch.object(run, "recorder_running", return_value=1), \
                 mock.patch.object(run, "local_ip_for", return_value="192.0.2.2"), \
-                mock.patch.object(run, "send_lua", side_effect=lambda host, payload: sent.append(payload)):
+                mock.patch.object(run, "send_lua", side_effect=lambda host, payload, port: sent.append(payload)):
             run.main()
         self.assertEqual(len(sent), 1)
         head = {k.decode(): int(v, 0) for k, v in re.findall(rb"^GHOSTLDR_(FLAGS|EXT_SIZE|SEL_SIZE) = (\w+)$", sent[0], re.M)}
