@@ -6,6 +6,8 @@ __pycache__/
 # never commit game data, executables, dumps or saves
 *.elf
 *.bin
+# except the installer's pump: our own code, built from ghostldr/native/pump
+!ghostldr/data/gfs_pump.bin
 *.self
 *.sprx
 *.prx

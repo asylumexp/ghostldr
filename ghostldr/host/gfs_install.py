@@ -53,6 +53,8 @@ from gfs_pack import FLAG_INCOMPLETE, OUT_ROOT, default_title, exec_fit, index_h
 
 ROOT = Path(__file__).resolve().parents[2]
 RECEIVER = ROOT / "ghostldr/lua/gfs_receiver.lua"
+# native code the receiver runs a PUT through (ghostldr/native/pump, `make pump`)
+PUMP = ROOT / "ghostldr/data/gfs_pump.bin"
 # The loaders create sockets in the JIT compiler process and pass them over, so a
 # receiver's listening socket outlives it (the compiler keeps its copy): each
 # run listens on a fresh port, and connections to an old one would hang.
@@ -283,17 +285,20 @@ IP_BOUND_IF = 25                 # macOS: send through this interface whatever t
 
 
 class Receiver:
-    def __init__(self, host: str, interface: str | None = None) -> None:
+    def __init__(self, host: str, interface: str | None = None, pump: bool = True) -> None:
         self.host = host
         self.interface = interface       # send through this interface instead of the default route
+        self.pump = pump and PUMP.is_file()
         self.sock: socket.socket | None = None
 
     def start(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             probe.connect((self.host, 9))
             local_ip = probe.getsockname()[0]
-        lua = (f'GFS_PORT = {GFS_PORT}\nPROBE_LOG_IP = "{local_ip}"\nPROBE_LOG_PORT = {LOG_PORT}\n'
-               + RECEIVER.read_text())
+        head = f'GFS_PORT = {GFS_PORT}\nPROBE_LOG_IP = "{local_ip}"\nPROBE_LOG_PORT = {LOG_PORT}\n'
+        if self.pump:
+            head += f'GFS_PUMP_HEX = "{PUMP.read_bytes().hex()}"\n'
+        lua = head + RECEIVER.read_text()
         port = loader_port(self.host)
         with socket.create_connection((self.host, port), timeout=10) as s:
             s.sendall(lua.encode())
@@ -580,7 +585,7 @@ def fit_check(src: Path, title: str, skip: bool) -> None:
 
 def connect(args) -> Receiver:
     global GFS_PORT
-    rx = Receiver(args.host or console_ip(), args.interface)
+    rx = Receiver(args.host or console_ip(), args.interface, not args.no_pump)
     if args.port:
         GFS_PORT = args.port
     else:
@@ -606,6 +611,8 @@ def main() -> int:
                     help="install even when the title's code cannot fit SWRR's executable memory")
     ap.add_argument("--host")
     ap.add_argument("--interface", help="this computer's network interface to send through (e.g. en0)")
+    ap.add_argument("--no-pump", action="store_true", help="receive and write each chunk in turn from Lua "
+                    "(slower; the native pump does both at once)")
     ap.add_argument("--port", type=int, help="reattach to a receiver already listening on this port "
                     "(it holds Luac0re's loader, so a new one cannot start)")
     gm.add_args(ap)

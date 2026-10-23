@@ -64,6 +64,7 @@ python3 ghostldr/host/gfs_install.py
 - **Interrupted installs:** run the same command again (after step 1 if SWRR restarted). The console itself records progress: each container gets a tag once sent, and the index and the catalogue entry stay marked incomplete until the end, so an unfinished install never boots.
 - **Receiver still running:** if the installer stopped but SWRR didn't, the receiver still holds Luac0re's loader. Reattach with `--port <its port>` (the installer prints it).
 - **Choosing the network link:** `--interface en0` sends through a given interface of this computer, when a slower one is the default route.
+- **Speed:** about 25 MB/s, the rate the PS5 writes save data at (Ghost takes about 40 minutes). A link slower than that (busy Wi-Fi) sets the pace instead. `--no-pump` falls back to the older, slower path (about 14 MB/s).
 - **Storage:** the containers belong to the SWRR region you installed from, for the signed-in user. They appear in the PS5's saved-data list as SWRR saves (about 56 GB). Deleting them there removes the install.
 
 ### More titles

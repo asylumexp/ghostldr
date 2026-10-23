@@ -6,7 +6,7 @@ A map of the repository, for reading or changing the code. To run ghostldr, star
 
 | Path | What it is |
 |---|---|
-| `ghostldr/native/` | **The loader core** (C). It runs inside SWRR from the PS2 emulator's JIT buffer. Two runtime modules sit next to it. The extension (`ext/`, see [its README](../ghostldr/native/ext/README.md)) carries the NID table and more HLE code, and is fetched from the computer at boot. The game selector (`selector/`, see [selector.md](selector.md)) picks the title to boot and is gone before the title loads. |
+| `ghostldr/native/` | **The loader core** (C). It runs inside SWRR from the PS2 emulator's JIT buffer. Two runtime modules sit next to it. The extension (`ext/`, see [its README](../ghostldr/native/ext/README.md)) carries the NID table and more HLE code, and is fetched from the computer at boot. The game selector (`selector/`, see [selector.md](selector.md)) picks the title to boot and is gone before the title loads. The installer's pump (`pump/`) is a separate small blob the ghostfs receiver runs ([ghostfs-catalogue.md](ghostfs-catalogue.md#the-receivers-operations)). |
 | `ghostldr/host/` | **Computer-side tools** (Python), below. |
 | `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the web manager, the save resigner, and the sandbox and save probes. |
 | `ghostldr/tools/` | **Build and analysis helpers:** ELF and NID parsing, the extension packer and its offline checker (`mkext.py`, `check_ext.py`), the import coverage report (`import_report.py`), the code fit check (`exec_fit.py`), the stub report (`stub_report.py`), a disassembler, cross-references, the Luac0re bundler, and the UltraC0re bootstrap patch for Jak X (`ultrac0re_patch.py`). |
@@ -51,6 +51,7 @@ python3 -m unittest discover -s ghostldr/tests
 
 They run offline:
 
+- the installer's pump, built for the computer, and its checked-in blob against the source;
 - the installer and the web manager against fake consoles (the manager's tests need a desktop Lua 5.3 or 5.4);
 - profiles and the pack order;
 - the core's profile, memory-budget, ghostfs and module-loading code, built for the computer;
