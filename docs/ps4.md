@@ -312,6 +312,8 @@ budget: PS4: CUSA11456 needs about 1592 MiB more direct memory than this PS4 let
 - **Smaller titles may fit.** A title without a memory plan is told what the PS4 hands out: about 2.4 GiB, less ghostldr's reserve and the title's flexible memory.
 - **A PS4 on 12.02 is within Lapse's range** (the kernel exploit covers PS4 firmware up to 12.02). A jailbroken PS4 runs PS4 games directly, without SWRR or ghostldr.
 
+**Where the limit lives.** The v0.6.4 diagnostic found that SWRR can't read or set its own budget: `budget_getid` returns ENOSYS. libkernel's `sceKernelSetGameDirectMemoryLimit(limit)` writes the game's direct memory limit with `sysctlbyname`. `ghostldr/lua/diag/ps4_memlimit.lua` reads that sysctl and tries once to raise it. It's a single file for Luac0re's loader, with no ghostldr release needed: `python payload_sender.py <PS4 address> ps4_memlimit.lua`. The report shows in a notification and at `http://<PS4 address>:9031/`.
+
 ## What is verified
 
 - From the log and SWRR's executable:
