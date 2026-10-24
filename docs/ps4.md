@@ -333,6 +333,18 @@ v0.6.4's diagnostic, and a PS4 SceShellCore read statically:
 - **one write of 4608 MiB to it.** If the kernel takes it, the diagnostic measures what SWRR can then allocate and writes the old value back. A game writing a system setting will most likely be refused;
 - `sceKernelGetResourceLimit` for types 0 to 3, decoded as entries: the kernel's default limits per process type, if a game may read them.
 
+**What it found** (v0.6.5 on 12.02):
+
+```
+diag: limit: sceKernelSetGameDirectMemoryLimit writes sysctl 'kern.dmem.game_budget_limit'
+diag: limit: kern.dmem.game_budget_limit = 0 (0 MiB), 8 bytes: rc -1 errno 1
+diag: limits: sceKernelGetResourceLimit(type 0) -> 8002004e (errno 78), 0 entries
+```
+
+- The limit's sysctl is `kern.dmem.game_budget_limit`. libkernel keeps `vm.kern_heap_size`, `vm.ps4dev.trcmem_total` and `vm.ps4dev.trcmem_avail` next to it.
+- SWRR can't even read it (EPERM), so it can't write it either, and the write wasn't tried. `sceKernelGetResourceLimit` is refused for every type (ENOSYS), as `budget_getid` is.
+- So none of the memory budget can be read or changed from SWRR: its budget, the per-type defaults, the game limit. On a 12.02 PS4, SWRR's 2.5 GiB is final from inside it. Only kernel access (a jailbreak) could change it, and a jailbroken PS4 runs PS4 games directly.
+
 ## What is verified
 
 - From the log and SWRR's executable:
@@ -376,6 +388,7 @@ v0.6.4's diagnostic, and a PS4 SceShellCore read statically:
 ## What is not verified
 
 - Whether other PS4 firmware gives SWRR the same 2.5 GiB. Only 12.02 was measured.
+- Who writes `kern.dmem.game_budget_limit` for SWRR, and from what: most likely SceSysCore at launch.
 - How much new JIT memory a PS4 allows. The extension's 384 KiB block worked; a 13.60 PS5 allows 768 KiB in all. The PS4 compiler process's flexible memory was 248.1 of 249.6 MiB. A 25 MiB fallback block is very unlikely to work.
 - That no other SWRR thread uses the released buffers on a PS4. None did in the 3 s Ghost ran.
 - That Luac0re's thread cancels work on a PS4.
