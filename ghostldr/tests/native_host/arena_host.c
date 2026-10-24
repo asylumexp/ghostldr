@@ -220,10 +220,11 @@ int main(int argc, char **argv)
 {
     g_ctx = &ctx;
     if (!strcmp(argv[1], "layout")) { /* what ghostldr.lua must write where */
-        printf("ctx size %lx flags %lx jit_syscall %lx reserved %lx sel_crc %lx fw %lx\n", sizeof(struct boot_ctx),
-               __builtin_offsetof(struct boot_ctx, flags), __builtin_offsetof(struct boot_ctx, jit_syscall),
-               __builtin_offsetof(struct boot_ctx, reserved), __builtin_offsetof(struct boot_ctx, sel_crc),
-               __builtin_offsetof(struct boot_ctx, fw));
+        printf("ctx size %lx flags %lx jit_syscall %lx reserved %lx sel_crc %lx fw %lx jit_sysw %lx\n",
+               sizeof(struct boot_ctx), __builtin_offsetof(struct boot_ctx, flags),
+               __builtin_offsetof(struct boot_ctx, jit_syscall), __builtin_offsetof(struct boot_ctx, reserved),
+               __builtin_offsetof(struct boot_ctx, sel_crc), __builtin_offsetof(struct boot_ctx, fw),
+               __builtin_offsetof(struct boot_ctx, jit_sysw));
         return 0;
     }
     if (!strcmp(argv[1], "heap")) {

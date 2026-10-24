@@ -17,7 +17,13 @@
  *   hang     the compiler never returns from write(): jit_call gives up (the
  *            process clock runs 1000x fast here) and calls no more;
  *   slow     every call takes ~3 ms (past jit_call's 64 fast spins);
- *   ps5-slow the same without the PS4 flag: the clock is never read.
+ *   one-stub every number mapped to getpid's stub, as v0.6.0 called them:
+ *            the compiler dies at clock_gettime, as on the PS4;
+ *   nostubs  no stubs passed (an older ghostldr.lua): nothing is called;
+ *   noclock  no clock_gettime stub: the check stops there, nothing dies;
+ *   ps5-slow the same as slow without the PS4 flag: the clock is never read.
+ * On a PS4 the fake compiler, like the console, runs a system call only from
+ * its own number's stub; any other dies ("killed") and never answers again.
  * Prints "check N", "peek N", "clock reads N" and the core's log lines.
  */
 #include "ghost.h"
@@ -150,8 +156,10 @@ static int k_usleep(u32 us)
 }
 
 /* ---- the fake compiler ---- */
-#define FN_SYSCALL 0x5150000UL
+#define FN_SYSCALL 0x5150000UL /* getpid's stub + 7 on a PS4 */
+#define FN_STUB(nr) (0x5160000UL + (u64)(nr) * 0x10) /* PS4: each number's own stub */
 #define FN_MEMCPY 0x3e3c000UL
+static u64 g_sysw[16];
 static const char *g_mode;
 static int g_jit_end = -1, g_other = -1; /* the compiler's end of the pair; a socket nobody reads */
 static volatile u64 *slot(int i) { return (volatile u64 *)(ctx.fake_rsp + 0x1A0 + (u64)i * 8); }
@@ -198,9 +206,17 @@ static void *compiler(void *unused)
             usleep(3000);
         u64 fn = *slot(42), rax = *slot(31), a1 = *slot(37), a2 = *slot(39), a3 = *slot(34);
         s64 ret = -1;
-        if (fn == FN_SYSCALL)
+        if (fn == FN_SYSCALL && !(ctx.flags & CTX_FLAG_PS4))
             ret = compiler_syscall(rax, a1, a2, a3);
-        else if (fn == FN_MEMCPY)
+        else if (fn == FN_SYSCALL || (fn >= FN_STUB(0) && fn < FN_STUB(1024))) {
+            u64 own = fn == FN_SYSCALL ? 20 : (fn - FN_STUB(0)) / 0x10;
+            if (own != rax) {
+                printf("compiler: system call %lu through the stub of %lu: killed\n", rax, own);
+                for (;;)
+                    usleep(1000000);
+            }
+            ret = compiler_syscall(rax, a1, a2, a3);
+        } else if (fn == FN_MEMCPY)
             memcpy((void *)a1, (const void *)a2, a3), ret = (s64)a1;
         *(volatile u64 *)(ctx.oob_scratch + 0x2000) = (u64)ret;
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -228,6 +244,12 @@ int main(int argc, char **argv)
     ctx.oob_scratch = (u64)bridge + 0x40000;
     ctx.staging = (u64)bridge + 0x100000, ctx.staging_size = 0x10000;
     ctx.jit_syscall = FN_SYSCALL, ctx.jit_memcpy = FN_MEMCPY;
+    static const u64 nrs[] = {20, 4, 6, 28, 73, 97, 232};
+    u32 n = 0;
+    for (u32 i = 0; (ctx.flags & CTX_FLAG_PS4) && strcmp(g_mode, "nostubs") && i < 7; i++)
+        if (strcmp(g_mode, "noclock") || nrs[i] != 232)
+            g_sysw[2 * n] = nrs[i], g_sysw[2 * n + 1] = !strcmp(g_mode, "one-stub") ? FN_SYSCALL : FN_STUB(nrs[i]), n++;
+    ctx.jit_sysw = n ? (u64)g_sysw : 0;
 
     int sv[2], ov[2], pv[2];
     if (socketpair(1 /* AF_UNIX */, 1 /* SOCK_STREAM */, 0, sv) || socketpair(1, 1, 0, ov) || pipe(pv)) {

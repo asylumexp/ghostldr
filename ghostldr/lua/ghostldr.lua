@@ -144,14 +144,56 @@ local sel_fd = blob_socket(GHOSTLDR_SEL_PORT, GHOSTLDR_SEL_SIZE, "selector")
 
 -- 7. boot context (field order must match struct boot_ctx in ghost.h)
 -- A syscall instruction in the compiler (jitrpc.c moves descriptors and
--- frees JIT blocks with it).  PS5: Luac0re's own (getpid + 7).  PS4: Luac0re
--- keeps one libkernel wrapper per syscall, "mov rax, N; mov r10, rcx;
--- syscall"; 7 bytes in, any of them takes the number from rax.
+-- frees JIT blocks with it).  PS5: Luac0re's own (getpid + 7), which takes
+-- any number from rax.  PS4: getpid's wrapper + 7 stands for "a system
+-- call"; the core calls each number's own wrapper from compiler_stubs().
 local function compiler_syscall()
     if jit_syscall.syscall_address then return jit_syscall.syscall_address end
     local w = jit_syscall.syscall_wrapper and jit_syscall.syscall_wrapper[SYSCALL_TABLE.getpid]
     if w and (jit_read64(w + 7) & 0xFFFFFFFFFF) == 0x050FCA8949 then return w + 7 end
     return 0
+end
+-- PS4: a system call runs only from its own number's libkernel wrapper,
+-- "mov rax, N; mov r10, rcx; syscall" (Luac0re: "PS4 requires valid syscall
+-- wrapper"); getpid's with another number in rax stopped the compiler.  The
+-- compiler's wrapper for each number the core and the extension call there
+-- (getpid, write, close, sendmsg, munmap, socket, clock_gettime), as
+-- (number, address) pairs ended by a zero number.  Luac0re's table covers
+-- its first 128 KiB of libkernel; the rest of the text is searched here, in
+-- this process's copy, at the same offset.  Each wrapper's bytes are
+-- checked in the compiler.  0 on a PS5.
+local COMPILER_SYSCALLS = {0x14, 0x4, 0x6, 0x1c, 0x49, 0x61, 0xe8}
+local function stub_ok(w, num)
+    return jit_read64(w) == (0xC0C748 | (num << 24) | (0x49 << 56))
+        and (jit_read64(w + 7) & 0xFFFFFFFFFF) == 0x050FCA8949
+end
+local libkernel_text
+local function search_stub(num)
+    if not (LIBKERNEL_BASE and JIT_LIBKERNEL_BASE and sceKernelGetModuleInfoFromAddr) then return nil end
+    if not libkernel_text then
+        local info, size = malloc(0x300), 0
+        if sceKernelGetModuleInfoFromAddr(LIBKERNEL_BASE, 1, info) == 0 and read64(info + 0x160) == LIBKERNEL_BASE then
+            size = read64(info + 0x168) & 0xFFFFFFFF   -- segments[0]: {address, size, prot}
+        end
+        libkernel_text = size > 0 and size <= 0x400000 and read_buffer(LIBKERNEL_BASE, size) or ""
+    end
+    local at = libkernel_text:find(string.pack("<I3I4I3", 0xC0C748, num, 0xCA8949) .. "\x0f\x05", 1, true)
+    return at and JIT_LIBKERNEL_BASE + at - 1
+end
+local function compiler_stubs()
+    if PLATFORM ~= "PS4" then return 0 end
+    local tbl, n = malloc(#COMPILER_SYSCALLS * 16 + 16), 0
+    for _, num in ipairs(COMPILER_SYSCALLS) do
+        local w = jit_syscall.syscall_wrapper and jit_syscall.syscall_wrapper[num]
+        if not (w and stub_ok(w, num)) then w = search_stub(num) end
+        if w and stub_ok(w, num) then
+            write64(tbl + n * 16, num)
+            write64(tbl + n * 16 + 8, w)
+            n = n + 1
+        end
+    end
+    write64(tbl + n * 16, 0)
+    return tbl
 end
 local function fw_number()
     local major, minor = tostring(FW_VERSION or ""):match("(%d+)%.(%d+)")
@@ -179,7 +221,7 @@ end
 local fields = {
     0x3130305244484c47, 0, EBOOT_BASE, core_dlsym,
     EBOOT_BASE + (ULTRA and 0x19869 or 0x31aa9),    -- the eboot's "call rbx; ret"
-    LIBKERNEL_HANDLE, 0, log_fd, log_addr,
+    LIBKERNEL_HANDLE, compiler_stubs(), log_fd, log_addr,
     JIT_BASE,
 }
 for _, v in ipairs(engine) do fields[#fields + 1] = v end

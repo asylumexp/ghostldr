@@ -135,12 +135,42 @@ static u64 uc_call(u64 fn, u64 rax, u64 a1, u64 a2, u64 a3, u64 a4)
     return r64(c->uc_res);
 }
 
+/*
+ * A system call in the compiler.  A PS5 takes it from any libkernel stub
+ * past its "mov rax, N" (the number is in rax), so jit_syscall serves every
+ * number.  A PS4 runs it only from that number's own stub, as Luac0re and
+ * psfree call them there: getpid's stub with clock_gettime's number in rax
+ * stopped the compiler for good (docs/ps4.md, the third report).
+ * ghostldr.lua passes the compiler's stub for each number the core and the
+ * extension use (jit_sysw), and jit_call sends a call of jit_syscall to the
+ * stub of the number in rax.  0: no stub for num.
+ */
+u64 jit_sys_stub(u64 num)
+{
+    if (!g_ctx->jit_syscall)
+        return 0;
+    if (!is_ps4())
+        return g_ctx->jit_syscall;
+    const u64 *p = (const u64 *)g_ctx->jit_sysw;
+    for (u32 i = 0; p && i < 64 && p[2 * i]; i++)
+        if (p[2 * i] == num)
+            return p[2 * i + 1];
+    return 0;
+}
+
 u64 jit_call(u64 fn, u64 rax, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6)
 {
     struct boot_ctx *c = g_ctx;
     if (g_jit_stuck) { /* PS4 only: a call before this one never came back */
         logf("jit_call: fn %lx rax %lx skipped: the compiler stopped answering earlier", fn, rax);
         return (u64)-1;
+    }
+    if (fn && fn == c->jit_syscall && is_ps4()) {
+        fn = jit_sys_stub(rax);
+        if (!fn) {
+            logf("jit_call: no libkernel stub for system call %lu in the compiler: not called", rax);
+            return (u64)-1;
+        }
     }
     if (is_jakx()) {
         if (a5 || a6) { /* no r8/r9 gadgets in Jak X's compiler */
@@ -454,7 +484,7 @@ GHOST_COLD int jit_stamp(u64 addr)
 
 #define SYS_getpid 20
 
-/* PS4, before any JIT buffer is probed: the syscall gadget, clock_gettime,
+/* PS4, before any JIT buffer is probed: the syscall stubs, clock_gettime,
  * the socket pair and the error path, each on memory known to be good (the
  * shared scratch) or known to be absent (the first page).  Each step is
  * logged before it runs, so the last line of a log that stops names it.
@@ -464,8 +494,10 @@ GHOST_COLD int jit_ps4_check(void)
     struct boot_ctx *c = g_ctx;
     u64 a = priv(0x300), b = priv(0x340);
     u8 got[16];
-    logf("jit: PS4 check: syscall gadget %lx, socket pair: compiler fd %ld, here fd %ld", c->jit_syscall,
-         c->new_jit_sock, c->new_main_sock);
+    logf("jit: PS4 check: syscall gadget %lx; stubs: getpid %lx, clock_gettime %lx, write %lx, sendmsg %lx; "
+         "socket pair: compiler fd %ld, here fd %ld",
+         c->jit_syscall, jit_sys_stub(SYS_getpid), jit_sys_stub(SYS_clock_gettime), jit_sys_stub(SYS_write),
+         jit_sys_stub(SYS_sendmsg), c->new_jit_sock, c->new_main_sock);
     if (!c->jit_syscall)
         return -1;
     logf("jit: PS4 check 1/4: getpid() in the compiler");

@@ -1,8 +1,8 @@
 # ghostldr on a PS4
 
-Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe).
+Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe). The third (v0.6.0) got one check further, then the compiler process died: ghostldr had sent every system call through getpid's libkernel stub, which a PS4 refuses. See [The third report](#the-third-report-the-compiler-died-at-its-first-clock_gettime).
 
-**Status: experimental and unverified on a PS4.** Everything below was worked out from two logs, Luac0re's source and SWRR's executable. No PS4 has got past the probes yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
+**Status: experimental and unverified on a PS4.** Everything below was worked out from the logs, Luac0re's source and SWRR's executable. No PS4 has got past the compiler checks yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
 
 ## What differs on a PS4
 
@@ -180,6 +180,46 @@ and nothing after it, as far as the log went. Whether SWRR crashed (a CE error),
 
 **What to send back.** The diagnostic's log first (`run.py probe --diag`), then a boot's. In either, the last `jit: PS4 check` or `arena: PS4: probe` line names the call. If SWRR closed with an error, the error code too, and a kernel log if you can capture one.
 
+## The third report: the compiler died at its first clock_gettime
+
+The diagnostic of v0.6.0 on a 12.02 PS4 (`run.py probe --diag`), and a boot after it, both ended at the same line:
+
+```
+jit: PS4 check: syscall gadget 83a40c7e7, socket pair: compiler fd 5, here fd 26
+jit: PS4 check 1/4: getpid() in the compiler
+jit: PS4 check 1/4: compiler pid 82 (this process 81)
+jit: PS4 check 2/4: clock_gettime() into the shared scratch 9141a6340
+jit_call: fn 83a40c7e7 rax e8: no answer from the compiler after 18 s
+jit_call: fn 83a40c7e7 rax e8: no answer from the compiler after 18 s
+```
+
+Everything before the checks worked as on a PS5: the platform and firmware, all 13 of SWRR's threads, Luac0re's `scePthreadCancel`, the heap, the memory census, both processes' maps and the arena. The diagnostic's own log ends there; the boot's log stops at check 2/4.
+
+**What the log shows.**
+- **The gadget works for getpid.** Check 1/4 ran getpid in the compiler through the gadget, and the compiler's pid came back. So the chain, the gadget address and the way back all work.
+- **The same gadget with clock_gettime's number never came back.**
+- **This process was stopped too.** `jit_call` logs after 2 s and after 10 s of waiting. Both lines came together, 18 s after the call, and nothing came after them, not even the give-up line at 30 s. This process can only miss its 2 s line if it doesn't run at all. A PS4 stops all of an application's processes while it writes a crash report for one of them, then closes the application. So the compiler process crashed, or was killed, inside that call.
+
+**Why.** The gadget is getpid's libkernel stub, 7 bytes in: `mov rax, 20; mov r10, rcx; syscall`, entered after its `mov rax`. A PS5 runs a system call from any libkernel stub, with any number in rax, and v0.6.0 assumed a PS4 did too. A PS4 doesn't: a system call runs only from its own number's stub.
+- Luac0re's own code says so. It takes "any syscall wrapper in libkernel" on a PS5, but on a PS4 it searches libkernel for every number's own `mov rax, N; mov r10, rcx; syscall` and calls each number through its own stub ("PS4 requires valid syscall wrapper from libkernel .text").
+- psfree's PS4 chains do the same.
+- getpid through its own stub worked; clock_gettime, the first other number, through getpid's stub killed the compiler.
+
+Both v0.6.0 logs end at the first system call that wasn't getpid. Any other compiler system call would have died the same way: moving a descriptor (sendmsg), the probes (write), freeing a JIT block (munmap, close) and the FTP server's socket.
+
+**What changed.**
+1. **ghostldr.lua passes the compiler's stub for each number the core and the extension call there:** getpid, write, close, sendmsg, munmap, socket and clock_gettime. They go in a new context field, `jit_sysw`, the slot that held an unused, always-zero `libc_handle`, as (number, address) pairs ended by a zero number.
+   - The stubs come from Luac0re's table, which covers the first 128 KiB of libkernel. A number missing there (clock_gettime may be) is searched in the rest of this process's libkernel text, which a PS4 can read, and rebased into the compiler's copy, as Luac0re rebases its own table.
+   - Each stub's bytes are checked in the compiler before it goes in the table.
+2. **On a PS4, `jit_call` sends a call of the syscall gadget to the stub of the number in rax.** The call sites are unchanged, the extension's included. A number without a stub isn't called: the log says `no libkernel stub for system call N in the compiler: not called`, and that call fails. Nothing goes through another number's stub.
+3. **The check's first line names the stubs** it is about to use (getpid, clock_gettime, write, sendmsg). The diagnostic lists the whole table.
+
+A PS5 is unchanged: `jit_sysw` is 0 there, and the gadget takes every number as before.
+
+`tests/native_host/jitrpc_host.c`'s fake compiler now enforces the PS4 rule: a system call through another number's stub "kills" it, and it never answers again. With every number on getpid's stub, as v0.6.0 called them, it dies at check 2/4, like the PS4 did. With each number's own stub, every check passes. Without a stub, nothing is called and nothing dies. `boot_fake.lua` checks the table ghostldr.lua builds: Luac0re's stubs, clock_gettime found past them, a wrapper with unexpected bytes left out, and no table on a PS5.
+
+**What to send back.** The diagnostic's log again (`run.py probe --diag`). Its first lines now list the stubs, and its `jit: PS4 check` lines go on to the buffer probes. If it stops again, also say whether SWRR closed with an error code.
+
 ## What is verified
 
 - From the log and SWRR's executable:
@@ -194,8 +234,8 @@ and nothing after it, as far as the log went. Whether SWRR crashed (a CE error),
     - the new rule doesn't;
     - with a compiler that writes nothing, other memory, or only VU1, the boot uses a JIT block or VU1 (for a small title), or stops cleanly;
     - the second report's layout (core text 176 KiB, small area `914b14000-914b1c000`): the same regions, nothing probed in the core's text or data, and when the compiler checks fail, nothing probed or written.
-  - The real `jitrpc.c` against a fake compiler thread: the checks and probes end whether the compiler's bytes go astray, the descriptor is wrong, stale bytes wait, or the compiler never answers. A PS5 never reads the clock.
-  - `ghostldr.lua` under a fake Luac0re: the PS4 flag, the firmware and the gadget at the offsets `ghost.h` has, and the PS5 values unchanged.
+  - The real `jitrpc.c` against a fake compiler thread: the checks and probes end whether the compiler's bytes go astray, the descriptor is wrong, stale bytes wait, or the compiler never answers. A PS5 never reads the clock. Like a PS4, the fake runs a system call only from its own number's stub: every number gets its own, and a number without one isn't called.
+  - `ghostldr.lua` under a fake Luac0re: the PS4 flag, the firmware, the gadget and the table of stubs at the offsets `ghost.h` has, and the PS5 values unchanged.
   - `run.py probe --diag`'s flags.
 - On a 13.60 PS5, with these changes (2026-10-22):
   - `run.py probe --diag` ran to the end without crashing SWRR.
@@ -214,6 +254,7 @@ and nothing after it, as far as the log went. Whether SWRR crashed (a CE error),
 
 ## What is not verified
 
+- That a PS4's compiler runs each of these system calls through its own stub. Only getpid has run there. That is what Luac0re does, and what the third report points to.
 - That the compiler writes the EE buffer past its first 16 KiB on a PS4.
 - That a new JIT block can be made on a PS4 at all, even the extension's 320 KiB. A 13.60 PS5 allows 768 KiB in all; a PS4's limit is unknown. The PS4 compiler process's flexible memory was 248.1 of 249.6 MiB. A 25 MiB fallback block is very unlikely to work.
 - That the SystemServicesThread stops when asked on a PS4, and that no other SWRR thread uses the released buffers there.

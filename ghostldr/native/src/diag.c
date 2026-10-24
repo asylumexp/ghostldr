@@ -60,6 +60,13 @@ COLD static void diag_platform(void)
     logf("diag: compiler: memcpy %lx, VirtualQuery %lx, syscall gadget %lx%s, JIT shm %lx/%lx/%lx", c->jit_memcpy,
          c->reserved[0], c->jit_syscall, c->jit_syscall ? "" : " (none: new JIT blocks impossible)", c->jit_shm_create,
          c->jit_shm_alias, c->jit_shm_map);
+    /* a PS4 runs each system call only from its own stub (jitrpc.c) */
+    const u64 *w = (const u64 *)c->jit_sysw;
+    u32 n = 0;
+    for (; w && n < 64 && w[2 * n]; n++)
+        logf("diag: compiler libkernel stub for system call %lu: %lx", w[2 * n], w[2 * n + 1]);
+    if ((c->flags & CTX_FLAG_PS4) && !n)
+        logf("diag: no libkernel stubs for the compiler: its system calls are refused on a PS4");
 }
 
 COLD static void log_map(const char *who, const struct vmq *q)

@@ -48,7 +48,9 @@ struct boot_ctx {
     u64 dlsym;             /* sceKernelDlsym in main process */
     u64 call_gadget;       /* eboot "call rbx; ret" */
     u64 libkernel_handle;
-    u64 libc_handle;
+    /* PS4: the compiler's libkernel syscall stubs, (number, address) u64
+     * pairs ended by a zero number (ghostldr.lua; jit_call); 0 on a PS5 */
+    u64 jit_sysw;
     u64 log_fd;            /* UDP socket from the loader's create_socket() */
     u64 log_addr;          /* sockaddr_in (16 bytes) of the log server */
     /* compiler-process RPC (jitrpc.c): the compiler's base, then the chain
@@ -179,6 +181,7 @@ extern struct boot_ctx *g_ctx;
 
 /* ---- compiler-process RPC (jitrpc.c) ---- */
 u64 jit_call(u64 fn, u64 rax, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6);
+u64 jit_sys_stub(u64 num); /* the compiler's stub for system call num: jit_syscall on a PS5, 0 when none */
 u64 jit_read64(u64 addr);
 int jit_copy_to(u64 dst_in_compiler, const void *src, size_t len);
 int jit_recv_fd(int compiler_fd);
@@ -207,7 +210,7 @@ struct vmq {
 u32 jit_vmap(u64 lo, u64 hi, struct vmq *out, u32 max);
 int jit_peek(u64 addr, void *out, u32 n); /* compiler reads at addr, here: 0, or -1 (EFAULT, no crash) */
 int jit_stamp(u64 addr);                  /* compiler writes 16 bytes (the time) at addr: 0, or -1 (EFAULT) */
-int jit_ps4_check(void); /* PS4: the gadget, clock_gettime, the socket pair, EFAULT on known memory: 0 when all work */
+int jit_ps4_check(void); /* PS4: the stubs, clock_gettime, the socket pair, EFAULT on known memory: 0 when all work */
 
 /* mmap constants (FreeBSD / Orbis) */
 #define PROT_NONE 0

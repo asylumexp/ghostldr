@@ -199,6 +199,29 @@ class JitRpcTests(unittest.TestCase):
         self.assertIn("peek 0 same", out)
         self.assertIn("stamp 0", out)
         self.assertIn("refused, as expected", out)
+        self.assertNotIn("killed", out)
+
+    def test_one_stub_for_all_numbers_kills_the_compiler(self) -> None:
+        """v0.6.0 called every number through getpid's stub: the PS4's
+        compiler stopped at check 2/4 (the third report).  The fake does the same."""
+        out = self.run_host("one-stub")
+        self.assertIn("compiler pid 4242", out)
+        self.assertIn("system call 232 through the stub of 20: killed", out)
+        self.assertIn("giving up on it", out)
+        self.assertIn("check -1", out)
+
+    def test_each_number_gets_its_own_stub(self) -> None:
+        out = self.run_host("ok")
+        self.assertRegex(out, r"stubs: getpid 5160140, clock_gettime 5160e80, write 5160040, sendmsg 51601c0")
+
+    def test_missing_stubs_call_nothing(self) -> None:
+        for mode, nr in (("nostubs", 20), ("noclock", 232)):
+            with self.subTest(mode=mode):
+                out = self.run_host(mode)
+                self.assertIn(f"no libkernel stub for system call {nr} in the compiler: not called", out)
+                self.assertIn("check -1", out)
+                self.assertNotIn("killed", out)
+                self.assertNotIn("giving up", out)
 
     def test_stale_bytes_are_dropped(self) -> None:
         out = self.run_host("stale")
@@ -257,11 +280,19 @@ class BootContextTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.tmp.cleanup()
 
-    def ctx(self, platform: str, fw: str, *extra: str) -> dict[int, int]:
+    def run_fake(self, platform: str, fw: str, *extra: str) -> str:
         p = subprocess.run([find_lua(), str(HERE / "boot_fake.lua"), str(self.payload), platform, fw, *extra],
                            capture_output=True, text=True, timeout=120)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        return {int(o, 16): int(v, 16) & (2**64 - 1) for o, v in re.findall(r"^ctx (\w+) (-?\w+)$", p.stdout, re.M)}
+        return p.stdout
+
+    def ctx(self, platform: str, fw: str, *extra: str) -> dict[int, int]:
+        out = self.run_fake(platform, fw, *extra)
+        return {int(o, 16): int(v, 16) & (2**64 - 1) for o, v in re.findall(r"^ctx (\w+) (-?\w+)$", out, re.M)}
+
+    def stubs(self, platform: str, fw: str, *extra: str) -> dict[int, int]:
+        out = self.run_fake(platform, fw, *extra)
+        return {int(n, 16): int(a, 16) for n, a in re.findall(r"^stub (\w+) (\w+)$", out, re.M)}
 
     def test_ps4(self) -> None:
         c = self.ctx("PS4", "12.02")
@@ -271,6 +302,22 @@ class BootContextTests(unittest.TestCase):
         self.assertEqual(c[L["fw"]], 0x1202)
         self.assertEqual(c[L["jit_syscall"]], 0x800060107)   # getpid's wrapper + 7
         self.assertEqual(c[L["reserved"] + 16], 0x914104000 + 0x9D4000)
+        self.assertNotEqual(c[L["jit_sysw"]], 0)
+
+    def test_ps4_stubs(self) -> None:
+        """Each number the core calls in the compiler, with its own wrapper:
+        Luac0re's table, and clock_gettime found past it in libkernel."""
+        self.assertEqual(self.layout["jit_sysw"], 0x30)     # where boot_fake.lua reads the table
+        self.assertEqual(self.stubs("PS4", "12.02"), {
+            0x14: 0x800060100, 0x1c: 0x800060140, 0x4: 0x800060180, 0x6: 0x8000601c0,
+            0x49: 0x800060200, 0x61: 0x800060240, 0xe8: 0x800060000 + 0x24000,
+        })
+
+    def test_ps4_without_search(self) -> None:
+        """No module info: only Luac0re's table, so no clock_gettime."""
+        s = self.stubs("PS4", "12.02", "no-search")
+        self.assertNotIn(0xe8, s)
+        self.assertEqual(s[0x14], 0x800060100)
 
     def test_ps5_unchanged(self) -> None:
         c = self.ctx("PS5", "13.60")
@@ -278,11 +325,16 @@ class BootContextTests(unittest.TestCase):
         self.assertEqual(c[L["flags"]], 2)
         self.assertEqual(c[L["jit_syscall"]], 0x800050007)
         self.assertEqual(c[L["fw"]], 0x1360)
+        self.assertEqual(c[L["jit_sysw"]], 0)
 
     def test_ps4_without_gadget(self) -> None:
         """Unexpected bytes after the wrapper's "mov rax, N": no gadget (the
-        core then refuses descriptor moves instead of jumping to 0)."""
+        core then refuses descriptor moves instead of jumping to 0), and no
+        getpid stub; the other numbers keep theirs."""
         self.assertEqual(self.ctx("PS4", "11.00", "no-gadget")[self.layout["jit_syscall"]], 0)
+        s = self.stubs("PS4", "11.00", "no-gadget")
+        self.assertNotIn(0x14, s)
+        self.assertEqual(s[0x1c], 0x800060140)
 
 
 class RunDiagTests(unittest.TestCase):
