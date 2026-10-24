@@ -2,14 +2,28 @@
 
 ghostldr loads PS4 titles, games and homebrew alike, inside SWRR. **Ghost of Tsushima (CUSA11456 v2.18) is the most tested title. Bloodborne (CUSA00900 v1.09) also reaches gameplay, and OpenOrbis homebrew runs ([Homebrew](#homebrew)).** Nothing in the loader is tied to Ghost: everything Ghost needs that other titles don't lives in its profile, `ghostldr/data/titles/CUSA11456.json`, and only applies to that build of its executable. Another title will boot as far as its imports and memory needs allow. This page is the loop for finding out how far that is and for closing the gaps.
 
-1. [Pack](#1-pack) the dump, with or without an open-order file.
-2. [Install](#2-install) it next to whatever is installed already.
+1. Put the dump on a [USB drive](#on-a-usb-drive-recommended) (recommended), or [pack](#1-pack) it, with or without an open-order file,
+2. and [install](#2-install) it next to whatever is installed already.
 3. [Boot](#3-boot) it and [read the log](#4-read-the-log).
 4. [Write a profile](#5-write-a-profile): memory, save size, app parameters, [HLE rules](#6-hle-rules) for single imports.
 5. Write C for what rules can't express, in the [runtime extension](#7-c-level-hle).
 6. [Capture an open order](#8-capture-an-open-order) once it plays, so the right containers stay mounted.
 
 Homebrew built with the OpenOrbis toolchain has its own section: [Homebrew](#homebrew).
+
+## On a USB drive (recommended)
+
+A USB drive is the quicker loop for trying a title: nothing is packed or installed, and copying again after a change only sends what changed.
+
+```bash
+python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0 --usb /Volumes/MYDRIVE
+```
+
+```bash
+python3 ghostldr/host/run.py boot --app-root usb:/ghostldr --title CUSA12345 --snap
+```
+
+It also runs the executable-memory check below. Copying the `app0` folder to `<drive>/ghostldr/CUSA12345/app0` by hand works too ([usb.md](usb.md)). Profiles, HLE rules and the log work the same way; only the open order (step 8) is for installed titles. Steps 1 and 2 are the saved-data way.
 
 ## 1. Pack
 
@@ -40,6 +54,8 @@ python3 ghostldr/host/gfs_install.py --title CUSA12345
 ```bash
 python3 ghostldr/host/run.py boot --app-root ghostfs --title CUSA12345 --snap
 ```
+
+(`--app-root usb:/ghostldr` for a title on a USB drive.)
 
 - `--title` picks among the installed titles; without it the only installed one boots, or the core logs the list and stops.
 - run.py sends every profile it knows with the core; the core uses the title's, or the generic default.
@@ -182,6 +198,7 @@ A title whose fixed demand is larger than the plan-free size (Ghost's mode-0 pla
 - `tables` are u64 arrays in the executable's text, indexed by memory mode. `set` tables get `mib` (or the run.py knob: `gpu_heap`, `pool1`, `cpu_heap`); the one `absorb` table takes the rest: `free - title_fixed - reserve - set changes + overcommit - video`, between `min_mib` and its own size. Its `expect` contents are checked before anything is patched.
 - The title is told `title_fixed + set changes + absorb`. `title_fixed_mib` is the sum of its other reservations.
 - `lazy_sites` are return addresses (eboot offsets) of `sceKernelAllocateDirectMemory` calls whose memory is committed 2 MiB at a time when first mapped; `overcommit_mib` is what that saves (measured: the watchdog's `direct alloc from eboot+X: N MiB, mapped M MiB`).
+- `neo` is the plan for a Pro-mode host (Jak X, see [jakx.md](jakx.md#pro-mode)): `mode` is the title's Pro memory mode (the index the tables are patched at), with that mode's own `title_fixed_mib`, `overcommit_mib` and `knobs` (a set table's size in that mode, by its knob, e.g. `{"gpu_heap": 1680}`).
 - Ghost's plan reproduces its logged boot: `4532 MiB free in 6 holes; streaming pool 1120 -> 588 MiB; reporting 4520 MiB direct memory`.
 
 ## 6. HLE rules

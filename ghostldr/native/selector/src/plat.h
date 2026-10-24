@@ -53,6 +53,7 @@ struct plat {
     struct cat_title *cat;
     int ncat;
     int ghostfs;          /* titles in save containers; else one title at root */
+    int library;          /* root is a folder of title folders, <ID>/app0 (docs/usb.md) */
     int catalogue;        /* GFSCATALOG present; else the legacy index */
     char legacy[16];      /* GFSINDEX or GHOSTIDX */
     char root[256];

@@ -24,6 +24,14 @@
  *     reported = title_fixed + set deltas + absorb
  * Ghost (CUSA11456.json): 4532 MiB free -> streaming pool 1120 -> 588 MiB,
  * reporting 4520 MiB.
+ *
+ * A Pro-mode host (Jak X: sceKernelIsNeoMode 1, 5 GiB) runs a planned title
+ * in its own Pro memory mode when the plan names it (REC_NEO): the title is
+ * told Neo mode 1, the tables are patched at that mode's index and its fixed
+ * demand is the profile's, as are its set tables' sizes (knob_mib).
+ * Base-mode display buffers are refused there (VideoOut wants 64 KiB
+ * alignment in a Neo process).  Ghost: mode 2, 4636 MiB fixed, GPU heap
+ * 1908 -> 1680 MiB; 4982 MiB free -> streaming pool 580 MiB.
  */
 #include "ghost.h"
 
@@ -40,6 +48,17 @@ u64 g_reported_dmem;
 static u64 g_flex_cap;                    /* 0: no cap (planned titles without flex_mib) */
 static volatile u64 g_flex_used, g_title_dmem;
 static bool g_planfree;
+
+/* the plan's Pro mode, when the host runs in Pro mode; else NULL */
+COLD static const struct prof_neo *neo_plan(void)
+{
+    static int host_neo = -1;
+    if (host_neo < 0) {
+        int (*neo)(void) = host_real("sceKernelIsNeoMode");
+        host_neo = neo && neo() == 1;
+    }
+    return host_neo ? profile_record(REC_NEO, 0) : NULL;
+}
 
 COLD bool budget_lazy_site(u64 eboot_off)
 {
@@ -65,10 +84,16 @@ COLD static u32 free_holes(struct hole *h, u64 *total)
     int (*dmq)(off_t, int, void *, size_t) = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelDirectMemoryQuery");
     u64 real = K.direct_size(), cur = 0, off = 0;
     u32 n = 0;
-    for (int i = 0; dmq && i < 512 && n < MAX_HOLES; i++) {
+    /* find-next can fail from inside a range released earlier although
+     * allocations follow it (seen after freeing GPU-mapped memory): step on
+     * 1 MiB instead of ending the walk, which would count everything past
+     * that point as free */
+    for (int i = 0; dmq && i < 16384 && off < real && n < MAX_HOLES; i++) {
         memset(&q, 0, sizeof(q));
-        if (dmq((off_t)off, 1, &q, sizeof(q)) != 0)
-            break;
+        if (dmq((off_t)off, 1, &q, sizeof(q)) != 0) {
+            off = ALIGN_DOWN(off, MiB) + MiB;
+            continue;
+        }
         if ((u64)q.start > cur)
             h[n++] = (struct hole){cur, (u64)q.start};
         cur = off = (u64)q.end;
@@ -91,23 +116,32 @@ COLD static void plan_tables(struct module *m, u8 *text, const struct prof_plan 
     for (u32 i = 0; (t = profile_record(REC_TABLE, i)); i++)
         if (t->role == 1)
             absorb = t;
+    const struct prof_neo *neo = neo_plan();
+    u32 mode = neo ? neo->mode : 0, fixed = neo ? neo->title_fixed_mib : plan->title_fixed_mib;
+    u32 overcommit = neo && neo->overcommit_mib ? neo->overcommit_mib : plan->overcommit_mib;
     u64 *pool = absorb ? (u64 *)(text + absorb->offset) : NULL;
-    if (!absorb || !absorb->nexpect || absorb->offset + 8UL * absorb->nexpect > m->text_size ||
+    if (!absorb || mode >= absorb->nexpect || absorb->offset + 8UL * absorb->nexpect > m->text_size ||
         memcmp(pool, absorb->expect, 8UL * absorb->nexpect)) {
         logf("budget: %s table not found; leaving the plan alone", absorb ? table_name(absorb) : "absorbing");
         return;
     }
+    if (neo)
+        logf("budget: Pro-mode host: the title's memory mode %u, %u MiB fixed, %u overcommitted", mode, fixed,
+             overcommit);
     /* run.py --gpu-heap-mib/--pool1-mib/--cpu-heap-mib override a set table's
-     * size (boot_ctx reserved[knob]); the absorbing table takes the change */
+     * size (boot_ctx reserved[knob]), then the Pro-mode plan's knobs; the
+     * absorbing table takes the change */
     s64 delta_mib = 0;
     for (u32 i = 0; (t = profile_record(REC_TABLE, i)); i++) {
-        u64 want = t->knob < 8 && g_ctx->reserved[t->knob] ? g_ctx->reserved[t->knob] : t->mib;
+        u64 want = t->knob < 8 && g_ctx->reserved[t->knob] ? g_ctx->reserved[t->knob]
+                   : neo && t->knob < 8 && neo->knob_mib[t->knob] ? neo->knob_mib[t->knob]
+                                                                   : t->mib;
         if (t->role != 0 || !want || t->offset + 8UL > m->text_size)
             continue;
         u64 *v = (u64 *)(text + t->offset);
-        delta_mib += (s64)want - (s64)(v[0] / MiB);
-        logf("budget: %s %lu -> %lu MiB", table_name(t), v[0] / MiB, want);
-        v[0] = want * MiB;
+        delta_mib += (s64)want - (s64)(v[mode] / MiB);
+        logf("budget: %s %lu -> %lu MiB", table_name(t), v[mode] / MiB, want);
+        v[mode] = want * MiB;
     }
     u64 reserve = g_ctx->reserved[5] ? g_ctx->reserved[5] : h->runtime_reserve_mib; /* run.py --slack-mib */
     struct hole free[MAX_HOLES];
@@ -117,9 +151,8 @@ COLD static void plan_tables(struct module *m, u8 *text, const struct prof_plan 
         if (free[i].e - free[i].s >= 16 * MiB)
             logf("budget: free %lx-%lx (%lu MiB)", free[i].s, free[i].e, (free[i].e - free[i].s) / MiB);
     s64 video = h->video_reserve_mib >= 0 ? h->video_reserve_mib : VIDEO_MIB;
-    s64 orig = (s64)(absorb->expect[0] / MiB);
-    s64 pool_mib = (s64)(total / MiB) - (s64)plan->title_fixed_mib - (s64)reserve - delta_mib +
-                   (s64)plan->overcommit_mib - video;
+    s64 orig = (s64)(absorb->expect[mode] / MiB);
+    s64 pool_mib = (s64)(total / MiB) - (s64)fixed - (s64)reserve - delta_mib + (s64)overcommit - video;
     if (pool_mib > orig)
         pool_mib = orig;
     if (pool_mib < (s64)absorb->min_mib) {
@@ -127,8 +160,8 @@ COLD static void plan_tables(struct module *m, u8 *text, const struct prof_plan 
         pool_mib = absorb->min_mib;
     }
     pool_mib &= ~1L;
-    pool[0] = pool_mib * MiB;
-    g_reported_dmem = (u64)((s64)plan->title_fixed_mib + delta_mib + pool_mib) * MiB;
+    pool[mode] = pool_mib * MiB;
+    g_reported_dmem = (u64)((s64)fixed + delta_mib + pool_mib) * MiB;
     g_flex_cap = h->flex_mib * MiB;
     logf("budget: %lu MiB free in %u holes; %s %ld -> %ld MiB; reporting %lu MiB direct memory", total / MiB, nfree,
          table_name(absorb), orig, pool_mib, g_reported_dmem / MiB);
@@ -388,13 +421,16 @@ static const struct {
 COLD u64 budget_resolve(const char *nid)
 {
     static char nids[ARRAY_SIZE(k_mem)][12];
-    if (profile_record(REC_PLAN, 0))
-        return 0; /* planned titles keep the host's answers */
     for (u32 i = 0; i < ARRAY_SIZE(k_mem); i++) {
         if (!nids[i][0])
             compute_nid(k_mem[i].name, nids[i]);
-        if (strcmp(nids[i], nid) == 0)
-            return (u64)k_mem[i].fn;
+        if (strcmp(nids[i], nid) != 0)
+            continue;
+        /* planned titles keep the host's answers, but Neo mode: a plan is for
+         * memory mode 0 unless it names the title's Pro mode (neo_plan) */
+        if (profile_record(REC_PLAN, 0) && (k_mem[i].fn != (void *)b_zero || neo_plan()))
+            return 0;
+        return (u64)k_mem[i].fn;
     }
     return 0;
 }

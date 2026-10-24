@@ -94,8 +94,9 @@ COLD static u32 add_candidate(struct module **cand, u32 n, const char *dir, cons
 COLD static int find_elsewhere(const char *root, const char *name, char *dir, size_t size)
 {
     static const char *const k_dirs[] = {"Media/Modules", "Media/Plugins"};
-    if (gfs_active())
-        return gfs_find_file(name, dir, size);
+    int rc = gfs_find_file(name, dir, size); /* 1: no ghostfs index to look in */
+    if (rc <= 0)
+        return rc;
     u8 st[0x78];
     char path[512];
     for (u32 i = 0; i < ARRAY_SIZE(k_dirs); i++) {

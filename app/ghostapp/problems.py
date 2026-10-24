@@ -21,6 +21,25 @@ KNOWN: list[tuple[str, str, str, str, str]] = [
      "The PS5's loader isn't listening",
      "Open OPTIONS → HALL OF FAME in SWRR again (restart SWRR first if it was used since), wait until the loader "
      "says it is listening on port 9026, then try again.", "wait_loader"),
+    ("usb_ftp", r"^ftp://\S+: .*(?:Connection refused|timed out|No route to host|Network is unreachable|"
+                r"Host is down)",
+     "Couldn't reach the FTP server on the PS5",
+     "A drive in the PS5 is written through ghostldr's FTP server, which runs only while a game started by "
+     "ghostldr is running. Play any game first (it can stay at its menu), then copy again. To copy without a "
+     "game running, plug the drive into this computer instead.", "goto_play"),
+    ("usb_no_drive", r"no such folder on the console",
+     "No USB drive in the PS5",
+     "Plug the drive into the PS5 (formatted exFAT), wait a few seconds, then copy again.", ""),
+    ("usb_fat32", r"FAT32 holds no file of 4 GiB or more",
+     "This game has files too big for a FAT32 drive",
+     "FAT32 holds no file of 4 GiB or more. Format the drive exFAT (this erases it), then copy again.", ""),
+    ("usb_space", r"GiB to copy, [\d.]+ GiB free",
+     "Not enough space on the USB drive",
+     "Free some space on the drive, or remove a game from it in the Library, then copy again: what's already "
+     "there is kept.", ""),
+    ("usb_gone", r"no such folder \(the drive's mount point\)",
+     "The USB drive isn't connected to this computer",
+     "Plug it in again, then choose it on the USB drive step.", "goto_usb"),
     ("loader_send", r"socket\.timeout|TimeoutError|timed out|ConnectionRefusedError|Connection refused",
      "The PS5 didn't answer",
      "Close SWRR, start it again, open HALL OF FAME and try again. If it keeps happening, check that the PS5 and "

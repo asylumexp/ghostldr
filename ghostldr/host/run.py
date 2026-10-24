@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Send the ghostldr bootstrap to Luac0re's remote Lua loader and show logs.
+"""Send the ghostldr bootstrap to the console's remote Lua loader and show logs:
+Luac0re's in SWRR (TCP 9026) or UltraC0re's in Jak X (TCP 8888), whichever
+answers (--loader-port to choose).
 
     python3 ghostldr/host/run.py probe            # core probe (flags=1)
     python3 ghostldr/host/run.py probe --diag     # PS4 diagnostic: boots nothing (docs/ps4.md)
@@ -13,6 +15,17 @@ and stops before touching the title when it cannot.  The game selector
 (build/ghostldr/selector.bin, docs/selector.md) is served on TCP 18196: the
 core runs it before the title when more than one title is installed, or with
 --select.
+
+--app-root usb:/ghostldr boots from a USB drive's folder of titles
+(docs/usb.md): gfs_pack.py --usb puts titles there, and the console mounts
+the drive into SWRR's sandbox.  When this computer sees the drive too
+(--usb-drive, else the only mounted one with a ghostldr folder), its titles'
+profiles and dumps are used as installed ones' are.
+
+While the title runs, the console serves FTP on TCP 1212 (--ftp-port; 0:
+none; docs/ftp.md): any FTP client, any user and password.  Clients start on
+the USB drive when one is plugged in, so titles can go onto it over the
+network while a game is running.
 
 A boot first runs a preflight coverage check when a local app0 and the
 NID name table are staged: if imports would bind to stubs (which return
@@ -41,12 +54,15 @@ LAYOUT = ROOT / "build/ghostldr/core.json"
 EXT = ROOT / "build/ghostldr/ext.bin"
 SELECTOR = ROOT / "build/ghostldr/selector.bin"
 BOOT_LUA = ROOT / "ghostldr/lua/ghostldr.lua"
-from console import console_ip
+NOTIFY_HOOK = ROOT / "ghostldr/lua/notify_hook.lua"
+from console import LOADERS, console_ip, loader_port
 import profiles
+import usb_drive
 LOG_PORT = 18194
 EXT_PORT = LOG_PORT + 1   # TCP
 SEL_PORT = LOG_PORT + 2   # TCP
-LUA_MAX = 500 * 1024      # Luac0re's remote Lua loader reads at most this much
+FTP_PORT = 1212           # the console's FTP server (TCP; docs/ftp.md); not ftpsrv's 2121
+LUA_MAX = 500 * 1024      # Luac0re's and UltraC0re's remote Lua loaders read at most this much
 NAMES = ROOT / "build/nid/known_names.txt"
 
 # Plain-language causes for the core's extension failure lines
@@ -130,7 +146,7 @@ def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int],
     ])
     payload = (header + BOOT_LUA.read_text()).encode()
     if len(payload) >= LUA_MAX:
-        raise SystemExit(f"the Lua payload is {len(payload)} bytes; Luac0re reads at most {LUA_MAX}")
+        raise SystemExit(f"the Lua payload is {len(payload)} bytes; the loader reads at most {LUA_MAX}")
     return payload
 
 
@@ -213,21 +229,38 @@ def recorder_running() -> int:
         return 0
 
 
-def send_lua(host: str, payload: bytes, port: int = 9026) -> None:
+def send_lua(host: str, payload: bytes, port: int) -> None:
+    if LOADERS.get(port) == "UltraC0re":
+        # its loader reports a payload's errors only on the TV: mirror them to the log first
+        hook = (f'GHOSTLDR_LOG_IP = "{local_ip_for(host)}"\nGHOSTLDR_LOG_PORT = {LOG_PORT}\n'
+                + NOTIFY_HOOK.read_text()).encode()
+        with socket.create_connection((host, port), timeout=10) as s:
+            s.sendall(hook)
+            s.shutdown(socket.SHUT_WR)
     with socket.create_connection((host, port), timeout=10) as s:
         s.sendall(payload)
         s.shutdown(socket.SHUT_WR)
 
 
-def title_dump(title: str | None, select: bool) -> tuple[Path | None, str]:
+def title_dump(title: str | None, select: bool,
+               drive_titles: dict[str, Path] | None = None) -> tuple[Path | None, str]:
     """The local dump of the title this boot starts, and why that one (or why
     none): --title's, else the only title with a dump here (packed ones and
-    build/ghost/app0).  A packed title's dump is where gfs_pack.py read it
-    (its layout.json).  Without --title the console boots its only installed
-    title, which needn't be one of these, so several candidates check none."""
+    build/ghost/app0; with a USB app root, the drive's titles instead).  A
+    packed title's dump is where gfs_pack.py read it (its layout.json).
+    Without --title the console boots its only installed title, which needn't
+    be one of these, so several candidates check none."""
     if select:
         return None, "the selector picks the title on the console"
     t = profiles.normalize_title(title) if title else None
+    if drive_titles is not None:
+        if not t and len(drive_titles) == 1:
+            t = next(iter(drive_titles))
+        if t in drive_titles:
+            return drive_titles[t], t
+        return None, (f"{t} is not on the USB drive here" if t else
+                      f"{len(drive_titles)} titles on the USB drive here; pass --title to check one"
+                      if drive_titles else "the USB drive is not mounted here")
     if not t:
         here = {f.parent.name for f in profiles.TITLES_OUT.glob("*/layout.json")}
         default = profiles.detect_title(profiles.DEFAULT_SRC) if (profiles.DEFAULT_SRC / "eboot.bin").exists() else None
@@ -245,7 +278,24 @@ def title_dump(title: str | None, select: bool) -> tuple[Path | None, str]:
     return None, f"no local dump of {t} (not packed here, and build/ghost/app0 is another title)"
 
 
-def preflight(force: bool, title: str | None, select: bool) -> None:
+def usb_titles(app_root: str, drive: Path | None) -> dict[str, Path] | None:
+    """With a USB app root: the titles on the drive as this computer sees it
+    ({} when it does not), else None."""
+    if not app_root.startswith("usb:"):
+        return None
+    d = usb_drive.find_drive(drive)
+    if not d:
+        return {}
+    rel = app_root[4:].strip("/")
+    lib = d / rel if rel else d
+    if (lib / "eboot.bin").is_file():           # one title
+        t = profiles.detect_title(lib) or (lib.parent.name if profiles.normalize_title(lib.parent.name) else None)
+        return {t: lib} if t else {}
+    return {p.name: p / "app0" for p in sorted(lib.glob("*")) if profiles.TITLE_RE.fullmatch(p.name)
+            and (p / "app0/eboot.bin").is_file()}
+
+
+def preflight(force: bool, title: str | None, select: bool, drive_titles: dict[str, Path] | None = None) -> None:
     """Coverage-gate a boot against the booted title's local dump.
 
     Skips cleanly when there is nothing to check against (no local
@@ -253,7 +303,7 @@ def preflight(force: bool, title: str | None, select: bool) -> None:
     must never be the reason a boot fails on a tree that cannot run
     the checker.
     """
-    app0, which = title_dump(title, select)
+    app0, which = title_dump(title, select, drive_titles)
     if app0 is None:
         print(f"preflight: {which}; skipped", flush=True)
         return
@@ -352,16 +402,26 @@ def doctor(args) -> int:
     finally:
         s.close()
 
-    try:
-        with socket.create_connection((args.host, 9026), timeout=3):
-            pass
-        add("PASS", "console loader", f"{args.host}:9026 answers")
-    except OSError as e:
-        add("FAIL", "console loader",
-            f"nothing at {args.host}:9026 ({e}); SWRR up with "
-            "Luac0re's loader?")
+    ports = [args.loader_port] if args.loader_port else list(LOADERS)
+    for i, port in enumerate(ports):
+        try:
+            with socket.create_connection((args.host, port), timeout=3):
+                pass
+            add("PASS", "console loader", f"{args.host}:{port} answers ({LOADERS.get(port, 'a loader')})")
+            break
+        except OSError as e:
+            if i == len(ports) - 1:
+                add("FAIL", "console loader",
+                    f"nothing at {args.host}:{'/'.join(map(str, ports))} ({e}); SWRR up with "
+                    "Luac0re's loader, or Jak X with UltraC0re's?")
 
-    app0, which = title_dump(args.title, args.select)
+    drive_titles = usb_titles(args.app_root, args.usb_drive)
+    if drive_titles is not None:
+        d = usb_drive.find_drive(args.usb_drive)
+        add("PASS" if drive_titles else "WARN", "USB drive",
+            f"{d}: {', '.join(drive_titles) or 'no titles'}" if d else
+            "not mounted here (only needed for the preflight and profiles; the console reads the drive)")
+    app0, which = title_dump(args.title, args.select, drive_titles)
     if app0 is None:
         add("WARN", "title dump", which)
     elif not (app0 / "eboot.bin").exists():
@@ -445,13 +505,28 @@ def main() -> int:
                         help="seconds to keep printing the console's log (default: boot keeps listening until "
                              "Ctrl+C; probe and logs stop after 20 s)")
     parser.add_argument("--app-root", default="ghostfs",
-                        help="where the title's app0 is: ghostfs (the installed titles, the default) or a "
-                        "directory on a dev console, e.g. /data/ghost/app0")
+                        help="where the title's app0 is: ghostfs (the installed titles, the default), "
+                        f"{usb_drive.APP_ROOT} (the titles on a USB drive, docs/usb.md), or a directory on a dev "
+                        "console, e.g. /data/ghost/app0 (a folder of <TITLE>/app0 folders works too)")
+    parser.add_argument("--usb-drive", type=Path,
+                        help="where this computer has the USB drive mounted, for the preflight check and the "
+                        "titles' profiles (default: the only mounted drive with a ghostldr folder)")
+    parser.add_argument("--ftp-port", type=int, default=FTP_PORT,
+                        help=f"the console's FTP server while the title runs (default {FTP_PORT}; 0: none; "
+                             "docs/ftp.md)")
     parser.add_argument("--file", type=Path, help="raw Lua file for mode=lua")
+    parser.add_argument("--loader-port", type=int, default=0,
+                        help="the console's Lua loader: 9026 Luac0re (SWRR), 8888 UltraC0re (Jak X); "
+                             "default: whichever answers")
     parser.add_argument("--log", type=Path, default=ROOT / "build/ghostldr/run.log")
     args = parser.parse_args()
+    if not 0 <= args.ftp_port <= 65535:
+        raise SystemExit(f"--ftp-port {args.ftp_port}: a TCP port, or 0 for no FTP server")
     if args.diag and args.mode != "probe":
         raise SystemExit("--diag goes with probe: run.py probe --diag")
+    if args.app_root.startswith("usb:") and not args.app_root.startswith("usb:/"):
+        raise SystemExit(f"--app-root {args.app_root}: a USB path starts at the drive's root, e.g. "
+                         f"{usb_drive.APP_ROOT}")
     args.host = args.host or console_ip()
     if args.mode == "doctor":
         return doctor(args)
@@ -462,9 +537,10 @@ def main() -> int:
         listener.start()
     else:
         print(f"recorder (pid {recorder}) is logging to build/ghostldr/run.log", flush=True)
+    drive_titles = usb_titles(args.app_root, args.usb_drive)
     if args.mode in ("probe", "boot"):
         if args.mode == "boot":
-            preflight(args.force_preflight, args.title, args.select)
+            preflight(args.force_preflight, args.title, args.select, drive_titles)
         if args.no_build:
             needed = (CORE, LAYOUT, EXT) if args.mode == "boot" else (CORE, LAYOUT)
             missing = [p.relative_to(ROOT) for p in needed if not p.exists()]
@@ -479,7 +555,7 @@ def main() -> int:
             | (64 if args.ext_jit else 0) | (128 if args.dialog_cancel else 0) | (256 if args.ime_fixed_name else 0) \
             | (512 if args.keep_remote_play else 0) | (1024 if args.boot_start_modules else 0) \
             | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0) \
-            | (16384 if args.diag else 0)
+            | (16384 if args.diag else 0) | (args.ftp_port << 48 if args.mode == "boot" else 0)
         knobs = {"gpu_heap": args.gpu_heap_mib, "slack": args.slack_mib, "pool1": args.pool1_mib,
                  "cpu_heap": args.cpu_heap_mib}
         ext = EXT.read_bytes() if args.mode == "boot" else b""
@@ -498,17 +574,21 @@ def main() -> int:
             print(f"--select: the selector picks the title (--title {args.title} is not used)", flush=True)
         try:   # the title profiles (host/profiles.py; read by native/src/profile.c)
             bundle = profiles.boot_bundle(None if args.select else args.title,
-                                          ("trace_opens",) if args.trace_opens else ())
+                                          ("trace_opens",) if args.trace_opens else (), drive_titles)
         except profiles.ProfileError as e:
             raise SystemExit(str(e))
         payload = f'GHOSTLDR_PROFILE_HEX = "{bundle.hex()}"\n'.encode() + payload
-        print(f"sending {len(payload)} bytes of Lua to {args.host}:9026", flush=True)
-        send_lua(args.host, payload)
+        port = args.loader_port or loader_port(args.host)
+        print(f"sending {len(payload)} bytes of Lua to {args.host}:{port}", flush=True)
+        send_lua(args.host, payload, port)
+        if args.mode == "boot" and args.ftp_port:
+            print(f"FTP: ftp://{args.host}:{args.ftp_port}/ once the title starts (any user and password)",
+                  flush=True)
         if ext and not ext_server.sent.wait(60):
             print(f"extension: the console did not fetch it (is TCP {EXT_PORT} open in this computer's firewall?)",
                   flush=True)
     elif args.mode == "lua":
-        send_lua(args.host, args.file.read_bytes())
+        send_lua(args.host, args.file.read_bytes(), args.loader_port or loader_port(args.host))
     if listener:
         wait = args.wait if args.wait is not None else (None if args.mode == "boot" else 90.0 if args.diag else 20.0)
         if wait is None:

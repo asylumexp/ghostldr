@@ -19,6 +19,10 @@ void *calloc(unsigned long n, unsigned long size);
 
 struct kfuncs K;
 struct boot_ctx *g_ctx;
+/* SWRR: sceSaveDataMount at its import slot (g_eboot_slot below) */
+static const struct host_game g_swrr = {.name = "SWRR", .save_mount = 0x3893F0};
+const struct host_game *g_hostgame = &g_swrr;
+const char *profile_title(void) { return ""; } /* no profile: dumps outside ghostfs are not tested here */
 
 int vfmt(char *buf, size_t size, const char *f, __builtin_va_list ap) { return vsnprintf(buf, size, f, ap); }
 

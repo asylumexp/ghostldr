@@ -126,6 +126,21 @@ static void add_functions(const struct ext_family *fam)
     }
 }
 
+/* Before the title's modules load (ext.c ext_approot_init): app roots on
+ * USB drives and folders of titles (approot.c).  ext_init runs later as
+ * always. */
+extern const struct ext_early g_approot_early HIDDEN;
+/* the title's main thread is next (ext_exports.title_starting) */
+void ftp_title_starting(void) HIDDEN;
+
+const struct ext_early *ext_early(const struct ghost_api *api)
+{
+    if (!api || api->version != GHOST_API_VERSION || api->size < sizeof(struct ghost_api))
+        return NULL;
+    G = api;
+    return &g_approot_early;
+}
+
 const struct ext_exports *ext_init(const struct ghost_api *api)
 {
     if (!api || api->version != GHOST_API_VERSION || api->size < sizeof(struct ghost_api))
@@ -159,6 +174,6 @@ const struct ext_exports *ext_init(const struct ghost_api *api)
             add_functions(*f);
     }
     g_exports = (struct ext_exports){EXT_EXPORTS_MAGIC, sizeof(g_exports), ext_lookup, lib_policy, g_hle,
-                                     g_nhle, nfam, g_nlibs, ext_sysmodule_failed};
+                                     g_nhle, nfam, g_nlibs, ext_sysmodule_failed, ftp_title_starting};
     return &g_exports;
 }

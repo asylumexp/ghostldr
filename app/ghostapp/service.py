@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
 import string
 import struct
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import webbrowser
 from pathlib import Path
 
@@ -29,6 +31,10 @@ from .settings import Settings, config_dir
 
 TITLE_RE = re.compile(r"^[A-Z0-9_][A-Z0-9_-]{0,14}$")
 LOADER_PORT = 9026
+FTP_PORT = 1212             # ghostldr's FTP server while a title runs (docs/ftp.md)
+USB_MOUNT = "ghostldr_usb"  # where it has the PS5's USB drive
+USB_APP_ROOT = "usb:/ghostldr"
+USB_FS_OK = ("exfat", "msdos")
 LOADER_MIN_INTERVAL = 2.0
 SCAN_FILE_LIMIT = 250_000
 SCAN_TIME_LIMIT = 20.0
@@ -67,8 +73,11 @@ class Service:
         self.loader = {"ip": "", "listening": None, "checked": 0.0, "note": ""}
         self.library = {"entries": [], "refreshed": 0.0, "ok": False, "catalogue": True}
         self.manager = {"url": "", "token": "", "running": False}
+        self.usb_library = {"target": "", "entries": [], "fs": "", "refreshed": 0.0, "ok": False, "stale": False}
+        self.usb_ftp = {"target": "", "listening": None, "checked": 0.0}
         self.last_request = time.time()
         self._console_mod = None
+        self._usb_mod = None
 
     # ---- environment for the scripts ----
 
@@ -117,11 +126,12 @@ class Service:
             "consoles": self.consoles, "consoles_at": self.consoles_at,
             "loader": dict(self.loader), "library": self.library, "packed": self.packed(),
             "manager": dict(self.manager), "jobs": self.jobs.list()[:15],
+            "usb": {"library": self.usb_library, "copies": self.usb_copies(), "target": self.usb_target(quiet=True)},
             "running": [j.id for j in running],
             "console_busy": next((j.summary(progress=False) for j in running if "console" in j.locks), None),
             "latest": {k: (j.id if (j := self.jobs.latest(k)) else None)
                        for k in ("discover", "doctor", "pack", "report", "install", "library", "boot",
-                                 "manager", "stubs", "meta", "remove")},
+                                 "manager", "stubs", "meta", "remove", "usbcopy", "usblist", "usbremove")},
             "runlog": (self.build / "ghostldr/run.log").is_file(),
             "names_table": (self.build / "nid/known_names.txt").is_file(),
         }
@@ -145,6 +155,15 @@ class Service:
             elif info.get("url"):
                 self.manager = {"url": info["url"], "token": info.get("token", "") or self.manager.get("token", ""),
                                 "running": True}
+        elif job.kind == "usblist" and isinstance(tr, T.UsbListTracker) and tr.result.get("ok"):
+            self.usb_library = {"target": job.meta.get("target", ""), "entries": self._usb_named(tr.result["entries"]),
+                                "fs": tr.result.get("fs", ""), "refreshed": time.time(), "ok": True, "stale": False}
+        elif job.kind == "usbcopy" and isinstance(tr, T.UsbCopyTracker) and job.state == "done":
+            self._usb_copied(job, tr)
+        elif job.kind == "usbremove" and job.state == "done":
+            if self.usb_library.get("target") == job.meta.get("target"):
+                self.usb_library["entries"] = [e for e in self.usb_library["entries"]
+                                               if e.get("title") != job.meta.get("title")]
         if job.kind in ("install", "boot", "manager", "library", "remove", "meta", "doctor"):
             self.loader["checked"] = 0.0          # look again
 
@@ -247,6 +266,12 @@ class Service:
         self._remember(known)
         self.loader = {"ip": ip, "listening": None, "checked": 0.0, "note": ""}
         return known
+
+    def set_mode(self, mode: str) -> dict:
+        """How games reach the PS5: installed into SWRR's saved data, or from a USB drive."""
+        if mode not in ("saves", "usb"):
+            raise AppError("Choose saved data or a USB drive.")
+        return self.settings.update(mode=mode)
 
     def forget_console(self) -> None:
         self.settings.update(console={"ip": "", "host_id": "", "name": "", "kind": ""})
@@ -484,6 +509,12 @@ class Service:
                 cands.append(Path(src) / "sce_sys/icon0.png")
         except (OSError, ValueError):
             pass
+        copy = self.usb_copies().get(title) or {}
+        if copy.get("src"):
+            cands.append(Path(copy["src"]) / "sce_sys/icon0.png")
+        drive = self.settings.get("usb_drive")
+        if drive and self.settings.get("usb_where") == "computer":
+            cands.append(Path(drive) / "ghostldr" / title / "app0/sce_sys/icon0.png")
         cache = self.cfg / "art" / title
         cands.append(cache / "icon.png")
         for c in cands:
@@ -511,10 +542,188 @@ class Service:
             return None
         return data if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) < 16 << 20 else None
 
+    # ---- the USB drive ----
+
+    def usb_module(self):
+        if self._usb_mod is None:
+            if str(self.host) not in sys.path:
+                sys.path.insert(0, str(self.host))
+            import usb_drive  # ghostldr/host/usb_drive.py
+            self._usb_mod = usb_drive
+        return self._usb_mod
+
+    def usb_drives(self, bases: list[Path] | None = None) -> list[dict]:
+        """Drives mounted on this computer that could be the USB drive: their
+        file system, size and the titles they already hold.  bases: the
+        folders of mount points to look in (default: the system's)."""
+        home = Path.home()
+        cands: list[Path] = []
+        if os.name == "nt" and bases is None:
+            system = (os.environ.get("SystemDrive") or "C:").upper()
+            cands = [Path(f"{c}:\\") for c in string.ascii_uppercase if f"{c}:" != system and os.path.exists(f"{c}:\\")]
+        else:
+            if bases is None:
+                bases = [Path("/Volumes")] if sys.platform == "darwin" else \
+                    [Path("/media") / home.name, Path("/run/media") / home.name, Path("/media"), Path("/mnt")]
+            for base in bases:
+                try:
+                    for d in sorted(base.iterdir()):
+                        if d.is_dir() and not d.name.startswith(".") and os.path.realpath(d) != "/" and \
+                                d not in cands and d != Path("/media") / home.name:
+                            cands.append(d)
+                except OSError:
+                    pass
+        out = []
+        for d in cands[:24]:
+            try:
+                du = shutil.disk_usage(d)
+            except OSError:
+                continue
+            fs = drive_fs(d) if os.name == "nt" else self.usb_module().fs_type(d)
+            try:
+                titles = sorted(self.usb_module().drive_titles(d))
+            except OSError:
+                titles = []
+            out.append({"path": str(d), "name": d.name or str(d), "fs": fs or "", "fs_ok": fs in USB_FS_OK,
+                        "free": du.free, "total": du.total, "library": (d / "ghostldr").is_dir(), "titles": titles})
+        return out
+
+    def usb_choose(self, where: str, drive: str = "", url: str | None = None) -> dict:
+        """Where the USB drive is: plugged into this computer (its mount point)
+        or into the PS5 (ghostldr's FTP server, or another FTP address; None
+        keeps the one chosen before, "" goes back to ghostldr's)."""
+        if where not in ("computer", "console"):
+            raise AppError("Choose this computer or the PS5.")
+        changes: dict = {"usb_where": where}
+        if where == "computer" and drive:
+            p = Path(drive).expanduser()
+            if not p.is_absolute() or not p.is_dir():
+                raise AppError("That drive isn't connected to this computer.")
+            changes["usb_drive"] = str(p)
+        if where == "console" and url is not None:
+            url = url.strip()
+            if url:
+                u = urllib.parse.urlparse(url)
+                if u.scheme != "ftp" or not u.hostname:
+                    raise AppError("An FTP address looks like ftp://192.168.1.23:2121/mnt/usb0.")
+            changes["usb_url"] = url
+        self.settings.update(**changes)
+        self.usb_ftp["checked"] = 0.0
+        return self.settings.snapshot()
+
+    def usb_target(self, quiet: bool = False) -> str:
+        """The drive as gfs_pack.py --usb and usb_drive.py take it."""
+        st = self.settings.snapshot()
+        if st["usb_where"] == "console":
+            if st["usb_url"]:
+                return st["usb_url"]
+            ip = st["console"]["ip"]
+            if not ip:
+                if quiet:
+                    return ""
+                raise AppError("Choose your PS5 on the Console step first.", 409, action="goto_console")
+            return f"ftp://{ip}:{FTP_PORT}/{USB_MOUNT}"
+        d = st["usb_drive"]
+        if not d or not Path(d).is_dir():
+            if quiet:
+                return ""
+            raise AppError("Choose the USB drive first (USB drive step)." if not d else
+                           "That USB drive isn't connected to this computer any more: plug it in again or choose "
+                           "another.", 409, action="goto_usb")
+        return d
+
+    def usb_status(self) -> dict:
+        """Whether the drive can be written now: mounted here, or the PS5's FTP
+        server answers (it runs only while a ghostldr game runs)."""
+        st = self.settings.snapshot()
+        target = self.usb_target(quiet=True)
+        if st["usb_where"] == "computer":
+            return {"where": "computer", "target": target, "ready": bool(target)}
+        if not target:
+            return {"where": "console", "target": "", "ready": False}
+        u = urllib.parse.urlparse(target)
+        with self.lock:
+            if self.usb_ftp.get("target") != target or time.time() - self.usb_ftp.get("checked", 0) > 2.0:
+                self.usb_ftp = {"target": target, "listening": probe_port(u.hostname or "", u.port or 21),
+                                "checked": time.time()}
+            return {"where": "console", "target": target, "ready": bool(self.usb_ftp["listening"])}
+
+    def usb_copy(self, src: str, title: str = "", fetch_art: bool = False) -> Job:
+        info = self.inspect_dump(src)
+        if not info.get("eboot"):
+            raise AppError("That folder has no eboot.bin. Choose the game's app0 folder.",
+                           suggestions=info.get("suggestions", []))
+        target = self.usb_target()
+        args = ["--src", info["path"], "--usb", target, "--progress", "2"]
+        if title:
+            args += ["--title", norm_title(title)]
+        if fetch_art:
+            args.append("--fetch-art")
+        self.settings.update(dump=info["path"], fetch_art=bool(fetch_art))
+        det = info.get("detect") or {}
+        return self.start("usbcopy", "Copying the game to the USB drive", self.host / "gfs_pack.py", args, {"usb"},
+                          T.UsbCopyTracker(), meta={"src": info["path"], "target": target,
+                                                    "title": title or det.get("title", ""),
+                                                    "name": info.get("profile_name") or info.get("sfo_name") or ""})
+
+    def usb_list(self) -> Job:
+        target = self.usb_target()
+        return self.start("usblist", "Reading the USB drive", self.host / "usb_drive.py", ["list", target], {"usb"},
+                          T.UsbListTracker(), meta={"target": target})
+
+    def usb_remove(self, title: str, confirm: str) -> Job:
+        title = norm_title(title)
+        if str(confirm or "").strip().upper() != title:
+            raise AppError(f"Type {title} to confirm.")
+        target = self.usb_target()
+        return self.start("usbremove", f"Removing {title} from the USB drive", self.host / "usb_drive.py",
+                          ["remove", target, title], {"usb"}, None, meta={"target": target, "title": title})
+
+    def usb_copies(self) -> dict:
+        """The games this app copied to a USB drive: {title: {name, src, target, files, gib, at}}."""
+        try:
+            data = json.loads((self.cfg / "usb_copies.json").read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _usb_copied(self, job: Job, tr: "T.UsbCopyTracker") -> None:
+        title = (tr.summary or {}).get("title") or tr.title or job.meta.get("title", "")
+        if not title:
+            return
+        copies = self.usb_copies()
+        copies[title] = {"name": tr.name or job.meta.get("name", "") or self.profile_name(title),
+                         "src": job.meta.get("src", ""), "target": job.meta.get("target", ""),
+                         "files": (tr.summary or {}).get("files", 0), "gib": (tr.summary or {}).get("gib", 0.0),
+                         "at": time.time()}
+        try:
+            self.cfg.mkdir(parents=True, exist_ok=True)
+            (self.cfg / "usb_copies.json").write_text(json.dumps(copies, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+        lib = self.usb_library
+        if lib.get("target") == job.meta.get("target") or not lib.get("ok"):
+            entries = [e for e in lib.get("entries", []) if e.get("title") != title]
+            entries.append(self._usb_named([{"title": title, "name": copies[title]["name"], "version": ""}])[0])
+            self.usb_library = {**lib, "target": job.meta.get("target", ""), "entries": entries, "ok": True,
+                                "refreshed": lib.get("refreshed") or time.time(), "stale": False}
+
+    def _usb_named(self, entries: list[dict]) -> list[dict]:
+        copies = self.usb_copies()
+        out = []
+        for e in entries:
+            e = dict(e)
+            t = e.get("title", "")
+            e["name"] = e.get("name") or (copies.get(t) or {}).get("name", "") or self.profile_name(t)
+            out.append(e)
+        return out
+
     # ---- playing ----
 
-    def boot(self, title: str = "", select: bool = False, force_preflight: bool = False) -> Job:
-        args = ["boot", "--app-root", "ghostfs", "--no-build"]
+    def boot(self, title: str = "", select: bool = False, force_preflight: bool = False, source: str = "saves") -> Job:
+        if source not in ("saves", "usb"):
+            raise AppError("Play from the saved data or the USB drive.")
+        args = ["boot", "--app-root", USB_APP_ROOT if source == "usb" else "ghostfs", "--no-build"]
         if title and not select:
             args += ["--title", norm_title(title)]
         if select:
@@ -528,8 +737,11 @@ class Service:
         if select and not self.prebuilt()["selector.bin"]:
             raise AppError("This copy has no game selector (build/ghostldr/selector.bin): pick a title instead.")
         label = "Playing " + (title or "the game") if not select else "Playing (game selector)"
+        if source == "usb":
+            label += " from the USB drive"
         return self.start("boot", label, self.host / "run.py", args, {"console", "ports"},
-                          T.BootTracker(title, select), need_console=True, meta={"title": title, "select": select})
+                          T.BootTracker(title, select), need_console=True,
+                          meta={"title": title, "select": select, "source": source})
 
     def stubs(self) -> Job:
         log = self.build / "ghostldr/run.log"
@@ -605,6 +817,21 @@ def sfo_strings(path: Path) -> dict[str, str]:
         return out
     except (OSError, ValueError, struct.error):
         return {}
+
+
+def drive_fs(path: Path) -> str | None:
+    """Windows: the file system of the drive at path ("exfat", "msdos" for FAT32, "ntfs"), or None."""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(64)
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(ctypes.c_wchar_p(str(path)), None, 0, None, None, None,
+                                                          buf, len(buf))
+        if not ok:
+            return None
+        name = buf.value.lower()
+        return {"fat32": "msdos", "fat": "msdos"}.get(name, name)
+    except (OSError, AttributeError, ValueError):
+        return None
 
 
 def probe_port(ip: str, port: int, timeout: float = 0.8) -> bool:

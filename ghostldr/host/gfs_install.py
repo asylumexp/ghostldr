@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Install titles into SWRR save containers over the network (ghostfs).
+"""Install titles into the host game's save containers over the network (ghostfs).
 
-Needs only Luac0re's Remote Lua Loader on 9026 (no kernel exploit).  Sends
+Needs only the remote Lua loader (no kernel exploit): Luac0re's on 9026 in
+SWRR, or UltraC0re's on 8888 in Jak X, which keeps its own containers.  Sends
 ghostldr/lua/gfs_receiver.lua, which listens on GFS_PORT, then streams each
 container laid out by gfs_pack.py straight from the source files.
 
@@ -47,12 +48,14 @@ from pathlib import Path
 
 import gfs_catalog as gc
 import gfs_meta as gm
-from console import console_ip
+from console import console_ip, loader_port
 from gfs_pack import FLAG_INCOMPLETE, OUT_ROOT, default_title, exec_fit, index_header
 
 ROOT = Path(__file__).resolve().parents[2]
 RECEIVER = ROOT / "ghostldr/lua/gfs_receiver.lua"
-# Luac0re creates sockets in the JIT compiler process and passes them over, so a
+# native code the receiver runs a PUT through (ghostldr/native/pump, `make pump`)
+PUMP = ROOT / "ghostldr/data/gfs_pump.bin"
+# The loaders create sockets in the JIT compiler process and pass them over, so a
 # receiver's listening socket outlives it (the compiler keeps its copy): each
 # run listens on a fresh port, and connections to an old one would hang.
 GFS_PORT = 9032 + int(time.time()) % 200
@@ -282,21 +285,25 @@ IP_BOUND_IF = 25                 # macOS: send through this interface whatever t
 
 
 class Receiver:
-    def __init__(self, host: str, interface: str | None = None) -> None:
+    def __init__(self, host: str, interface: str | None = None, pump: bool = True) -> None:
         self.host = host
         self.interface = interface       # send through this interface instead of the default route
+        self.pump = pump and PUMP.is_file()
         self.sock: socket.socket | None = None
 
     def start(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             probe.connect((self.host, 9))
             local_ip = probe.getsockname()[0]
-        lua = (f'GFS_PORT = {GFS_PORT}\nPROBE_LOG_IP = "{local_ip}"\nPROBE_LOG_PORT = {LOG_PORT}\n'
-               + RECEIVER.read_text())
-        with socket.create_connection((self.host, 9026), timeout=10) as s:
+        head = f'GFS_PORT = {GFS_PORT}\nPROBE_LOG_IP = "{local_ip}"\nPROBE_LOG_PORT = {LOG_PORT}\n'
+        if self.pump:
+            head += f'GFS_PUMP_HEX = "{PUMP.read_bytes().hex()}"\n'
+        lua = head + RECEIVER.read_text()
+        port = loader_port(self.host)
+        with socket.create_connection((self.host, port), timeout=10) as s:
             s.sendall(lua.encode())
             s.shutdown(socket.SHUT_WR)
-        log(f"receiver sent to {self.host}:9026")
+        log(f"receiver sent to {self.host}:{port}")
 
     def connect(self) -> None:
         for _ in range(40):
@@ -578,7 +585,7 @@ def fit_check(src: Path, title: str, skip: bool) -> None:
 
 def connect(args) -> Receiver:
     global GFS_PORT
-    rx = Receiver(args.host or console_ip(), args.interface)
+    rx = Receiver(args.host or console_ip(), args.interface, not args.no_pump)
     if args.port:
         GFS_PORT = args.port
     else:
@@ -604,6 +611,8 @@ def main() -> int:
                     help="install even when the title's code cannot fit SWRR's executable memory")
     ap.add_argument("--host")
     ap.add_argument("--interface", help="this computer's network interface to send through (e.g. en0)")
+    ap.add_argument("--no-pump", action="store_true", help="receive and write each chunk in turn from Lua "
+                    "(slower; the native pump does both at once)")
     ap.add_argument("--port", type=int, help="reattach to a receiver already listening on this port "
                     "(it holds Luac0re's loader, so a new one cannot start)")
     gm.add_args(ap)

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Start the ghostldr web manager on the PS5 and show where to open it.
 
-Sends ghostldr/lua/manager.lua to Luac0re's Remote Lua Loader (9026).  The
+Sends ghostldr/lua/manager.lua to the remote Lua loader (Luac0re's on 9026 in
+SWRR, UltraC0re's on 8888 in Jak X).  The
 manager is a small web server inside SWRR (default port 8090): a browser on
 the same network lists the installed titles and their saves, downloads and
 restores saves, and deletes them.  Writes need the session token the PS5
@@ -27,7 +28,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from console import console_ip
+from console import console_ip, loader_port
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "ghostldr/lua/manager.lua"
@@ -134,13 +135,14 @@ def main() -> int:
     listener.bind(("0.0.0.0", LOG_PORT))
     listener.settimeout(0.5)
     try:
-        with socket.create_connection((host, 9026), timeout=10) as s:
+        port = loader_port(host)
+        with socket.create_connection((host, port), timeout=10) as s:
             s.sendall(payload(local_ip, args.port, args.scratch))
             s.shutdown(socket.SHUT_WR)
     except OSError as e:
-        raise SystemExit(f"cannot reach Luac0re's loader on {host}:9026 ({e}): start it in SWRR first, and stop "
+        raise SystemExit(f"cannot reach the Lua loader on {host} ({e}): start it in SWRR or Jak X first, and stop "
                          "any script still holding it")
-    log(f"manager.lua sent to {host}:9026")
+    log(f"manager.lua sent to {host}:{port}")
 
     url = token = None
     port = args.port

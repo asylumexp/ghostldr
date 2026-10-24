@@ -9,6 +9,7 @@ against fakes of the console.
 from __future__ import annotations
 
 import copy
+import os
 import shutil
 import struct
 import subprocess
@@ -102,8 +103,10 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual((b["save_blocks"], b["runtime_reserve_mib"], b["video_reserve_mib"], b["flex_mib"]),
                          (256, 32, 100, 0))
         kinds = [k for k, _ in b["records"]]
-        self.assertEqual(kinds, [profiles.REC_PLAN] + [profiles.REC_TABLE] * 4 + [profiles.REC_TLS]   # tls_sites
-                         + [profiles.REC_NAME])
+        self.assertEqual(kinds, [profiles.REC_PLAN] + [profiles.REC_TABLE] * 4 + [profiles.REC_NEO]  # Pro mode
+                         + [profiles.REC_TLS] + [profiles.REC_NAME])                          # tls_sites, name
+        self.assertEqual(struct.unpack_from("<11I", b["records"][5][1]),   # Ghost's mode 2 (Jak X), GPU heap 1680
+                         (2, 4636, 74, 0, 0, 0, 0, 1680, 0, 0, 0))
         self.assertEqual(b["records"][-1][1].rstrip(b"\0"), b"Ghost of Tsushima")   # the selector's name
         fixed, over, n, *sites = struct.unpack_from("<6I", b["records"][0][1])
         self.assertEqual((fixed, over, n, sites), (3996, 120, 3, [0x896126, 0x89614A, 0xEEE2CF]))
@@ -292,8 +295,9 @@ class CoreProfileTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.tmp.cleanup()
 
-    def run_host(self, *args: str) -> list[str]:
-        out = subprocess.run([str(self.exe), str(self.bundle), *args], capture_output=True, text=True, timeout=60)
+    def run_host(self, *args: str, env: dict[str, str] | None = None) -> list[str]:
+        out = subprocess.run([str(self.exe), str(self.bundle), *args], capture_output=True, text=True, timeout=60,
+                             env={**os.environ, **(env or {})})
         self.assertEqual(out.returncode, 0, out.stderr)
         return out.stdout.splitlines()
 
@@ -305,7 +309,14 @@ class CoreProfileTests(unittest.TestCase):
                       lines)
         self.assertIn("patch rc 0 reported 4520 MiB, stream table 588 MiB, cpu heap 320 MiB", lines)
         self.assertIn("lazy site 0x896126 1, gate 0, flex gate 0", lines)     # no plan-free gates
-        self.assertIn("neo host, available direct ffffffff: 0 + 0 MiB", lines)  # host answers kept
+        # host answers kept, but Neo mode: the plan is for memory mode 0 (Jak X answers 1)
+        self.assertIn("neo 0, available direct ffffffff: 0 + 0 MiB", lines)
+
+    def test_free_walk_steps_over_a_failing_query(self) -> None:
+        # find-next fails inside the 0x13e00000-0x50080000 hole: the walk must
+        # still find the allocations after it and count the same 4532 MiB
+        lines = self.run_host("plan", GHOST_FP, "CUSA11456", env={"GHOSTLDR_TEST_DMQ_GAP": "0x13e00000-0x50080000"})
+        self.assertEqual([ln for ln in lines if ln.startswith("budget:")], ghost_lines())
 
     def test_ghost_is_found_by_fingerprint_without_ghostfs(self) -> None:
         lines = self.run_host("select", GHOST_FP)

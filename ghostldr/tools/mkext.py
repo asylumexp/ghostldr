@@ -23,6 +23,7 @@ FORMAT = 1
 API_HEADER = Path(__file__).resolve().parents[1] / "native/include/ghost_api.h"
 API_VERSION = int(re.search(r"#define GHOST_API_VERSION (\d+)", API_HEADER.read_text()).group(1))
 HEADER = struct.Struct("<QIIIIQ14I2I")
+BLOB_EARLY = 1  # header flags: ext_early is there (struct ext_blob early_entry)
 assert HEADER.size == 96
 PAGE = 0x4000
 
@@ -58,9 +59,12 @@ def code_image(elf: elf64.Elf) -> dict:
     entry = sym["ext_init"].value
     if entry >= text:
         raise SystemExit(f"{elf.path}: ext_init is not in the text")
+    early = sym["ext_early"].value if "ext_early" in sym else None
+    if early is not None and early >= text:
+        raise SystemExit(f"{elf.path}: ext_early is not in the text")
     fam = sym["__ext_families_start"].value
     nfam = (sym["__ext_families_end"].value - fam) // 8
-    return {"image": bytes(img), "memsz": memsz, "text": text, "entry": entry,
+    return {"image": bytes(img), "memsz": memsz, "text": text, "entry": entry, "early": early,
             "relocs": sorted(relocs), "families": (fam, nfam)}
 
 
@@ -85,7 +89,8 @@ def pack(code: dict, nids: tuple[int, bytes, bytes, bytes], abi: int) -> bytes:
     header = HEADER.pack(MAGIC, FORMAT, HEADER.size, API_VERSION, abi, size,
                          image_off, len(code["image"]), code["memsz"], code["text"], code["entry"],
                          reloc_off, len(code["relocs"]), code["families"][0], code["families"][1],
-                         count, keys_off, names_off, str_off, len(pool), 0, 0)
+                         count, keys_off, names_off, str_off, len(pool), code["early"] or 0,
+                         BLOB_EARLY if code["early"] is not None else 0)
     return header + b"".join(parts)
 
 

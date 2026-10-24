@@ -115,6 +115,8 @@ int vdm_alloc_lazy(u64 len, int type, off_t *out)
     return 0;
 }
 
+u32 vdm_lazy_committed_mib(void);
+
 static int commit_chunk(struct vdm *v, u64 ci)
 {
     static u32 failures;
@@ -122,9 +124,14 @@ static int commit_chunk(struct vdm *v, u64 ci)
     int rc = ((int (*)(off_t, off_t, size_t, size_t, int, off_t *))host_real("sceKernelAllocateDirectMemory"))(
         0, (off_t)K.direct_size(), LAZY_CHUNK, LAZY_CHUNK, v->type, &phys);
     if (rc != 0) {
-        if (failures++ < 8)
-            logf("vdm: lazy commit of chunk %lu (type %d) failed %x after %u chunks: out of direct memory", ci,
-                 v->type, rc, v->committed);
+        if (failures++ < 8) {
+            off_t s = 0;
+            size_t avail = 0;
+            K.avail_direct(0, (off_t)K.direct_size(), 0x10000, &s, &avail);
+            logf("vdm: lazy commit of chunk %lu (type %d) failed %x after %u chunks: out of direct memory (%u MiB of "
+                 "lazy reservations committed, largest free block %lu KiB)",
+                 ci, v->type, rc, v->committed, vdm_lazy_committed_mib(), (u64)avail >> 10);
+        }
         return rc;
     }
     v->chunk[ci] = (u64)phys;

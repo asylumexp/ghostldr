@@ -142,6 +142,8 @@
       toast(e.message, true, "Go there", () => go("home", "console"));
     } else if (d.action === "goto_game") {
       toast(e.message, true, "Go there", () => go("home", "game"));
+    } else if (d.action === "goto_usb") {
+      toast(e.message, true, "Go there", () => go("home", "usb"));
     } else if (d.action === "goto_manager") {
       toast(e.message, true, "Go there", () => go("library"));
     } else if (e.status !== 0) {        // 0: the offline banner says it
@@ -173,12 +175,16 @@
     trouble: null,
     runlog: null,
     startedDiscovery: false,
+    drives: null,                      // drives mounted on this computer (USB path)
+    drivesLoading: false,
+    usbStatus: null,                   // whether the PS5's FTP server answers
+    listed: {},                        // drives read once already this session
   };
 
   // ---------- jobs: one slot per kind of card, each following its latest job ----------
   const KIND_SLOT = { discover: "discover", doctor: "doctor", pack: "pack", report: "report", install: "install",
                       library: "library", remove: "libjob", meta: "libjob", boot: "boot", manager: "manager",
-                      stubs: "stubs" };
+                      stubs: "stubs", usbcopy: "usbcopy", usblist: "usblist", usbremove: "libjob" };
   const slots = {};
   for (const s of new Set(Object.values(KIND_SLOT))) slots[s] = { id: "", job: null, lines: [], seen: 0 };
   const MAX_KEEP = { boot: 6000 };
@@ -348,6 +354,24 @@
     }, 3000);
   }
 
+  // Whether the PS5's FTP server answers, while the USB step (drive in the PS5) is open.
+  function usbLoop() {
+    setTimeout(async () => {
+      const wants = !document.hidden && S && view === "home" && currentStep() === "usb" &&
+        S.settings.usb_where === "console" && S.usb.target;
+      if (wants) {
+        try {
+          const st = await api("/api/usb/status");
+          const was = ui.usbStatus && ui.usbStatus.ready;
+          ui.usbStatus = st;
+          if (st.ready && !was) autoList();
+          render();
+        } catch (e) { /* the state poll reports it */ }
+      }
+      usbLoop();
+    }, 3000);
+  }
+
   let didFirst = false;
   function firstRun() {
     if (didFirst || !S) return;
@@ -372,11 +396,81 @@
     if (v === "help") showHelpPane(helpPane);
   }
 
+  // ---------- the two paths: saved data or a USB drive ----------
+  // until a path is chosen: the recommended USB drive, unless games were already prepared or installed
+  const mode = () => (S && S.settings.mode) ||
+    (S && (S.packed.length || (S.library && S.library.entries.length)) ? "saves" : "usb");
+  const usbMode = () => mode() === "usb";
+  const STEP_ORDER = { saves: ["console", "game", "install", "play"], usb: ["console", "game", "usb", "play"] };
+  const thirdStep = () => (usbMode() ? "usb" : "install");
+  function fixStep(st) {                 // the third step follows the path
+    if (st === "install" || st === "usb") return thirdStep();
+    return st;
+  }
+  // {title: entry} on the chosen USB drive as last read, or null
+  function usbMap() {
+    if (!S || !S.usb) return null;
+    const lib = S.usb.library;
+    if (!lib || !lib.ok || !S.usb.target || lib.target !== S.usb.target) return null;
+    const m = {};
+    for (const e of lib.entries) if (e.title) m[e.title] = e;
+    return m;
+  }
+  const dumpTitle = () => (ui.dump && ui.dump.eboot && ui.dump.detect && ui.dump.detect.title) || "";
+  function onDrive(title) {
+    if (!title || !S) return false;
+    const m = usbMap();
+    if (m) return !!m[title];
+    const c = S.usb.copies[title];
+    return !!(c && c.target === S.usb.target);
+  }
+  function autoList(force) {
+    const t = S && S.usb.target;
+    if (!t || slotRunning("usblist") || (!force && (ui.listed[t] || (S.usb.library.ok && S.usb.library.target === t)))) return;
+    ui.listed[t] = true;
+    startJob(null, "/api/usb/list", {}, "usblist");
+  }
+  async function setMode(m, btn) {
+    await act(btn, async () => {
+      await api("/api/mode", { mode: m });
+      await refresh();
+      if (step) step = fixStep(step);
+    });
+  }
+  async function chooseUsb(btn, body) {
+    await act(btn, async () => {
+      await api("/api/usb/choose", body);
+      ui.usbStatus = null;
+      await refresh();
+      if (body.where === "computer" && body.drive) autoList();
+    });
+  }
+  async function loadDrives() {
+    if (ui.drivesLoading) return;
+    ui.drivesLoading = true;
+    render();
+    try {
+      ui.drives = (await api("/api/usb/drives", {})).drives;
+    } catch (e) {
+      handleError(e);
+      ui.drives = ui.drives || [];
+    } finally {
+      ui.drivesLoading = false;
+      render();
+    }
+  }
+
   function currentStep() {
-    if (step) return step;
+    if (step) return fixStep(step);
     if (!S) return "console";
     if (!S.settings.console.ip) return "console";
     if (slotRunning("boot")) return "play";
+    if (usbMode()) {
+      if (slotRunning("usbcopy")) return "usb";
+      const t = dumpTitle();
+      if (t && onDrive(t)) return "play";
+      return ui.dump || S.settings.dump ? "usb" : "game";
+    }
     if (slotRunning("install")) return "install";
     if (!S.packed.length) return "game";
     const lib = installedMap();
@@ -413,12 +507,14 @@
         `The prebuilt loader files are missing (build/ghostldr/${missing.join(", ")}). Unpack the release zip again and start the app from inside it.`]);
     }
     if (view === "home") {
+      renderPaths();
       renderStepper();
       const cur = currentStep();
       for (const p of $$(".panel")) p.hidden = p.dataset.step !== cur;
       if (cur === "console") renderConsole();
       if (cur === "game") renderGame();
       if (cur === "install") renderInstall();
+      if (cur === "usb") renderUsb();
       if (cur === "play") renderPlay();
       renderLoader();
     } else if (view === "library") {
@@ -448,7 +544,31 @@
     chip.title = st.long || st.text;
   }
 
+  function renderPaths() {
+    const chosen = !!S.settings.mode;
+    $("#paths").classList.toggle("chosen", chosen);
+    $("#paths-hint").textContent = chosen ? "You can switch any time." : "Pick one to start. You can switch any time.";
+    for (const b of $$(".path")) b.setAttribute("aria-checked", String(chosen && b.dataset.mode === mode()));
+  }
+
+  function usbStepState() {
+    const cp = progressOf("usbcopy");
+    if (slotRunning("usbcopy")) {
+      return { cls: "running", text: cp && cp.phase === "copying" && cp.need_gib ? `${cp.done_gib.toFixed(1)} of ${cp.need_gib.toFixed(1)} GiB` : "Copying…" };
+    }
+    const t = dumpTitle();
+    if (t && onDrive(t)) return { cls: "done", text: "On the drive" };
+    if (!S.usb.target) return { cls: "attention", text: "No drive chosen" };
+    return { cls: "", text: "Not copied" };
+  }
+
   function renderStepper() {
+    const third = $$(".step")[2];
+    if (third.dataset.step !== thirdStep()) {
+      third.dataset.step = thirdStep();
+      $(".lbl", third).textContent = usbMode() ? "USB drive" : "Install";
+    }
+    const order = STEP_ORDER[mode()];
     const lib = installedMap();
     const c = S.settings.console;
     const title = selectedInstallTitle();
@@ -464,6 +584,7 @@
         lib && title && lib[title] && lib[title].complete ? { cls: "done", text: "Installed" } :
         lib && title && lib[title] ? { cls: "attention", text: "Not finished" } :
         { cls: "", text: lib ? "Not installed" : "Not checked" },
+      usb: usbStepState(),
       play: slotRunning("boot") ? { cls: "running", text: "Playing" } : { cls: "", text: "" },
     };
     const cur = currentStep();
@@ -473,7 +594,7 @@
       b.className = "step " + s.cls + (name === cur ? " current" : "");
       $(".st", b).textContent = s.text;
       const num = $(".num", b);
-      const want = s.cls === "done" && name !== cur ? "check" : String(["console", "game", "install", "play"].indexOf(name) + 1);
+      const want = s.cls === "done" && name !== cur ? "check" : String(order.indexOf(name) + 1);
       if (num._v !== want) {
         num._v = want;
         if (want === "check") {
@@ -509,6 +630,8 @@
     discover: ["Search again", () => startJob(null, "/api/discover", {}, "discover")],
     pick_console: ["Choose a console", () => go("home", "console")],
     goto_game: ["Go to Game", () => go("home", "game")],
+    goto_usb: ["Go to USB drive", () => go("home", "usb")],
+    goto_play: ["Go to Play", () => go("home", "play")],
     goto_console: ["Go to Console", () => go("home", "console")],
     firewall: ["Firewall help", () => go("help", null, "firewall")],
     refresh_library: ["Refresh the Library", () => { go("library"); startJob($("#btn-lib-refresh"), "/api/library/refresh", {}, "library"); }],
@@ -753,11 +876,18 @@
     const ok = d && d.eboot && !d.error;
     const doneHere = ok && pj && pj.state === "done" && pj.meta && pj.meta.src === d.path;
     const already = ok && packedFor(d.path);
+    const usb = usbMode();
+    once($("#game-sub"), String(usb), () => usb
+      ? ["Pick the folder of your own game dump — the one with ", h("code", {}, "eboot.bin"), " and ", h("code", {}, "sce_module"), ". The next step copies it to the USB drive."]
+      : ["Pick the folder of your own game dump — the one with ", h("code", {}, "eboot.bin"), " and ", h("code", {}, "sce_module"), ". Preparing it only writes a small layout on this computer; nothing is sent yet."]);
     const btnPack = $("#btn-pack");
+    btnPack.hidden = usb;
     btnPack.disabled = !ok || packing || !!ui.inspecting;
     btnPack.className = "btn " + (already ? "secondary" : "primary");
     fill(btnPack, packing ? [spinner(), "Preparing…"] : already ? "Prepare again" : "Prepare game");
-    $("#btn-game-next").hidden = !(doneHere || already) || packing;
+    $("#btn-game-next").hidden = usb || !(doneHere || already) || packing;
+    $("#btn-game-usb").hidden = !usb;
+    $("#btn-game-usb").disabled = !ok || !!ui.inspecting;
     $("#btn-report").disabled = !ok || slotRunning("report");
     $("#btn-pick").disabled = !!ui.inspecting;
   }
@@ -958,8 +1088,198 @@
     return out;
   }
 
+  // ---------- 3. the USB drive ----------
+  const FS_NAMES = { exfat: "exFAT", msdos: "FAT32", apfs: "APFS", hfs: "Mac OS Extended", ntfs: "NTFS" };
+
+  function drivesBody() {
+    const st = S.settings;
+    const list = ui.drives || [];
+    const out = [];
+    if (ui.drivesLoading && !list.length) {
+      out.push(h("div", { class: "searching" }, h("span", { class: "spin" }), "Looking for drives…"));
+    } else if (!list.length) {
+      out.push(h("div", { class: "empty" }, "No drive found. Plug the USB drive into this computer, then search again."));
+    } else {
+      out.push(h("h4", { class: "sub-label" }, "Which drive?"));
+      out.push(h("div", { class: "list", role: "radiogroup", "aria-label": "Drives on this computer" }, list.map((d) => {
+        const sel = d.path === st.usb_drive;
+        const meta = [FS_NAMES[d.fs] || d.fs || "unknown format", `${fmtSize(d.free)} free of ${fmtSize(d.total)}`,
+                      d.titles.length ? plural(d.titles.length, "game") + " for ghostldr" : ""].filter(Boolean).join(" · ");
+        const badge = !d.fs_ok ? h("span", { class: "pill warn" }, "The PS5 can't read this format")
+          : d.fs === "msdos" ? h("span", { class: "pill warn" }, "FAT32: no file over 4 GiB") : h("span", { class: "pill ok" }, "Ready");
+        return h("button", { class: "item" + (sel ? " selected" : ""), type: "button", role: "radio", "aria-checked": String(sel),
+                             onclick: (ev) => chooseUsb(ev.currentTarget, { where: "computer", drive: d.path }) },
+          h("span", { class: "radio" }), h("span", { class: "grow" }, h("span", { class: "name" }, d.name), h("span", { class: "meta" }, meta)),
+          h("span", { class: "badges" }, badge));
+      })));
+    }
+    const chosen = list.find((d) => d.path === st.usb_drive);
+    if (st.usb_drive && !chosen && ui.drives && !ui.drivesLoading) {
+      out.push(h("div", { class: "callout warn" }, h("b", {}, "The chosen drive isn't connected"),
+        `${st.usb_drive} can't be found. Plug it in again, or choose another drive.`));
+    }
+    if (chosen && !chosen.fs_ok) {
+      out.push(h("div", { class: "callout warn" }, h("b", {}, "Format this drive exFAT first"),
+        "The PS5 reads exFAT and FAT32 drives only. Formatting erases the drive: copy off anything you want to keep first."));
+    }
+    out.push(h("div", { class: "row" }, h("button", { class: "btn ghost sm", type: "button", disabled: ui.drivesLoading, onclick: () => loadDrives() },
+      ui.drivesLoading ? "Searching…" : "Search again")));
+    return out;
+  }
+
+  function ftpBody(ready) {
+    const st = S.settings;
+    if (!S.usb.target) {
+      return h("div", { class: "callout info" }, h("b", {}, "Choose your PS5 first"), "The copy goes to its address. ",
+        h("button", { class: "btn secondary sm", type: "button", onclick: () => go("home", "console") }, "Go to Console"));
+    }
+    const us = ui.usbStatus;
+    const checked = us && us.target === S.usb.target;
+    return [
+      h("ol", { class: "checklist" },
+        h("li", {}, "Plug the drive into the PS5."),
+        h("li", {}, "Play any game with ghostldr (Play step). It can stay at its menu: while it runs, its FTP server carries the copy."),
+        h("li", { class: "auto " + (ready ? "ok" : "wait") }, st.usb_url ? "The FTP server answers." : "ghostldr's FTP server answers (port 1212).",
+          h("span", { class: "loader-state " + (ready ? "ok" : "") }, ready ? "Answering. Ready." : checked ? "Not answering yet. Checking every few seconds…" : "Checking…"))),
+      h("p", { class: "hint" }, "Copying to ", h("code", {}, S.usb.target)),
+      h("details", { class: "inline-form", open: st.usb_url ? true : null },
+        h("summary", {}, "Use another FTP address (a jailbroken PS5's FTP server)"),
+        h("form", { class: "row", onsubmit: (e) => { e.preventDefault(); chooseUsb($("button", e.currentTarget), { where: "console", url: $("input", e.currentTarget).value.trim() }); } },
+          h("input", { type: "text", placeholder: "ftp://192.168.1.23:2121/mnt/usb0", value: st.usb_url, autocomplete: "off", spellcheck: "false", "aria-label": "FTP address" }),
+          h("button", { class: "btn secondary sm", type: "submit" }, "Use"),
+          st.usb_url ? h("button", { class: "btn ghost sm", type: "button", onclick: (e) => chooseUsb(e.currentTarget, { where: "console", url: "" }) }, "Use ghostldr's") : null)),
+    ];
+  }
+
+  function usbGameBody() {
+    const d = ui.dump;
+    if (ui.inspecting && !d) return h("p", { class: "hint" }, spinner(), " Looking at the folder…");
+    if (!d || !d.eboot) {
+      return h("div", { class: "callout info" }, h("b", {}, "Choose a game first"), "Pick its folder on the Game step. ",
+        h("button", { class: "btn secondary sm", type: "button", onclick: () => go("home", "game") }, "Go to Game"));
+    }
+    const det = d.detect || {};
+    const name = d.profile_name || d.sfo_name || det.title || "Unrecognised game";
+    const sub = [det.title && name !== det.title ? det.title : "", det.version ? "v" + det.version : ""].filter(Boolean).join(" · ");
+    return [
+      h("div", { class: "title-line" }, h("span", {}, name), sub ? h("span", { class: "tid" }, sub) : null),
+      h("ul", { class: "facts" },
+        d.bytes !== undefined ? h("li", {}, h("b", {}, fmtSize(d.bytes)), " to copy") : null,
+        d.files !== undefined ? h("li", {}, h("b", {}, d.files.toLocaleString()), " files") : null,
+        det.title && onDrive(det.title) ? h("li", { class: "ok" }, "✓ On the drive") : null),
+      h("p", { class: "hint" }, h("code", {}, d.path), " · ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("home", "game"); } }, "Change")),
+    ];
+  }
+
+  function usbCopyResult(job, cp) {
+    if (!cp || job.state !== "done" || !cp.summary) return null;
+    const s = cp.summary;
+    const out = [h("div", { class: "stats" },
+      stat("Game", cp.name || s.title), stat("Title ID", s.title), stat("Size", fmtSize(s.gib * 2 ** 30)),
+      stat("Copied", s.copied.toLocaleString() + " files"), stat("Already there", s.kept.toLocaleString()))];
+    const res = h("div", { class: "result" }, fitBox(cp.fit, true));
+    res.append(h("div", { class: "callout ok" }, h("b", {}, "On the drive"), S.settings.usb_where === "computer"
+      ? "Eject the drive from this computer and plug it into the PS5, then go to Play."
+      : "Before playing it, restart SWRR: close it, start it again and open HALL OF FAME."));
+    if (cp.selector) res.append(h("p", { class: "hint" }, "In the game selector: " + cp.selector));
+    out.push(res);
+    return out;
+  }
+
+  function renderUsb() {
+    const st = S.settings;
+    const where = st.usb_where;
+    for (const b of $$("#usb-where .item")) {
+      const on = b.dataset.where === where;
+      b.classList.toggle("selected", on);
+      b.setAttribute("aria-checked", String(on));
+    }
+    if (where === "computer" && !ui.drives && !ui.drivesLoading) loadDrives();
+    if (where === "computer" && S.usb.target) autoList();
+    const ready = where === "console" && !!(ui.usbStatus && ui.usbStatus.target === S.usb.target && ui.usbStatus.ready);
+    once($("#usb-where-body"), JSON.stringify(where === "computer" ? [where, ui.drives, ui.drivesLoading, st.usb_drive]
+      : [where, S.usb.target, st.usb_url, ready, !!ui.usbStatus]), () => (where === "computer" ? drivesBody() : ftpBody(ready)));
+    once($("#usb-game"), JSON.stringify([ui.dump, ui.inspecting, onDrive(dumpTitle())]), usbGameBody);
+
+    // what the drive holds
+    const lj = slots.usblist.job;
+    const reading = isRunning(lj);
+    const m = usbMap();
+    const lb = $("#btn-usb-list");
+    lb.disabled = reading || !S.usb.target;
+    fill(lb, reading ? [spinner(), "Reading…"] : "Read the drive");
+    once($("#usb-ondrive"), JSON.stringify([m && S.usb.library.entries, reading, S.usb.target, artSig()]), () => {
+      if (!S.usb.target) return h("p", { class: "hint" }, "Choose the drive first.");
+      if (!m) return h("p", { class: "hint" }, reading ? "Reading the drive…" : where === "console" ? "Not read yet. The PS5's FTP server must be answering." : "Not read yet.");
+      if (!S.usb.library.entries.length) return h("p", { class: "hint" }, "No games for ghostldr on it yet.");
+      return h("div", { class: "list" }, S.usb.library.entries.map((e) => h("div", { class: "item static" }, artThumb(e.title, e.name),
+        h("span", { class: "grow" }, h("span", { class: "name" }, e.name || e.title),
+          h("span", { class: "meta" }, [e.title, e.version ? "v" + e.version : ""].filter(Boolean).join(" · "))))));
+    });
+    renderProblem($("#usb-list-problem"), lj);
+
+    // the copy
+    const cj = slots.usbcopy.job;
+    const cp = progressOf("usbcopy");
+    const copying = isRunning(cj);
+    const shown = cj && (copying || cj.meta.target === S.usb.target);   // a finished copy to another drive: not this one's
+    $("#usbcopy-card").hidden = !shown;
+    if (shown) {
+      const jname = (cp && cp.name) || cj.meta.name || cj.meta.title || "the game";
+      $("#usbcopy-head").textContent = copying ? `Copying ${jname}` : cj.state === "done" ? `Copied ${jname}` :
+        cj.state === "cancelled" ? `${jname}: copy stopped` : `Copying ${jname}`;
+      pill($("#usbcopy-pill"), cj, { running: "Copying", done: "On the drive", cancelled: "Stopped" });
+      let pct = 0, indet = false, left = "", right = "";
+      if (cp && cp.phase === "copying") {
+        pct = cp.need_gib > 0 ? cp.done_gib / cp.need_gib * 100 : cp.todo ? cp.count / cp.todo * 100 : 0;
+        left = `${cp.done_gib.toFixed(1)} of ${cp.need_gib.toFixed(1)} GiB · ${cp.count.toLocaleString()} of ${cp.todo.toLocaleString()} files`;
+        if (copying && cp.rate) right = `${cp.rate} MiB/s · about ${fmtMinutes((cp.need_gib - cp.done_gib) * 1024 / cp.rate / 60)} left`;
+      } else if (cp && cp.phase === "finishing") {
+        pct = 99;
+        left = copying ? "Writing the name and art…" : "";
+      } else if (copying) {
+        indet = true;
+        left = "Looking at the drive…";
+      }
+      if (cj.state === "done") { pct = 100; left = cp && cp.summary && !cp.summary.copied ? "Everything was on the drive already." : "Done."; right = ""; }
+      if (!copying && cj.state !== "done") { left = ""; right = ""; }
+      const bar = $("#usbcopy-progress");
+      bar.className = "progress" + (indet ? " indet" : "") + (cj.state === "done" ? " done" : cj.state === "failed" ? " failed" : "");
+      $(".bar", bar).style.width = Math.min(100, pct) + "%";
+      $("#usbcopy-left").textContent = left;
+      $("#usbcopy-right").textContent = right;
+      once($("#usbcopy-result"), JSON.stringify([cj.state, cp && [cp.summary, cp.fit, cp.selector, cp.name]]), () => usbCopyResult(cj, cp));
+      renderProblem($("#usbcopy-problem"), cj, { cancelled: "Stopped. What was copied stays on the drive: Copy continues from there." });
+      const cancel = $("#btn-usbcopy-cancel");
+      cancel.hidden = !copying;
+      cancel.disabled = !!cj.cancel_requested;
+    }
+
+    // the buttons
+    const d = ui.dump;
+    const ok = d && d.eboot && !d.error;
+    const chosen = where === "computer" ? (ui.drives || []).find((x) => x.path === st.usb_drive) : null;
+    const fsBad = !!(chosen && !chosen.fs_ok);
+    const t = dumpTitle();
+    const there = t && onDrive(t);
+    const btn = $("#btn-usb-copy");
+    btn.disabled = !ok || copying || !S.usb.target || fsBad || (where === "console" && !ready);
+    btn.className = "btn " + (there && !copying ? "secondary" : "primary");
+    fill(btn, copying ? [spinner(), "Copying…"] : there ? "Copy again" : shown && cj.state === "cancelled" ? "Continue copying" : "Copy to USB drive");
+    $("#btn-usb-next").hidden = copying || !there;
+    $("#usb-copy-hint").textContent = copying ? "You can use this computer meanwhile; stopping is safe." : !ok ? "Choose a game first." :
+      !S.usb.target ? (where === "computer" ? "Choose the drive first." : "Choose your PS5 first.") : fsBad ? "Format the drive exFAT first." :
+      where === "console" && !ready ? "Waiting for the PS5's FTP server: play a game with ghostldr first." : there ? "Copying again only sends what changed." : "";
+  }
+
   // ---------- 4. play ----------
   function playChoices() {
+    if (usbMode()) {
+      const m = usbMap();
+      if (m) return S.usb.library.entries.map((e) => ({ title: e.title, name: e.name, version: e.version, complete: true }));
+      return Object.entries(S.usb.copies).filter(([, c]) => c.target === S.usb.target)
+        .map(([t, c]) => ({ title: t, name: c.name, gib: c.gib, complete: true, guess: true }));
+    }
     const lib = installedMap();
     const list = [];
     if (lib) {
@@ -972,7 +1292,9 @@
 
   function renderPlay() {
     const list = playChoices();
-    const lib = installedMap();
+    const usb = usbMode();
+    const lib = usb ? usbMap() : installedMap();
+    $("#play-usb-plug").hidden = !(usb && S.settings.usb_where === "computer");
     const canSelect = S.prebuilt["selector.bin"];
     const usable = list.filter((c) => c.complete && c.title);
     if (!ui.playChoice || (ui.playChoice !== "*select*" && !usable.some((c) => c.title === ui.playChoice))) {
@@ -982,9 +1304,12 @@
         recent.map((t) => usable.find((c) => c.title === t)).find(Boolean) || usable[0];
       ui.playChoice = pickIt ? pickIt.title : canSelect ? "*select*" : "";
     }
-    once($("#play-choices"), JSON.stringify([list, ui.playChoice, !!lib, canSelect, artSig()]), () => {
+    once($("#play-choices"), JSON.stringify([list, ui.playChoice, !!lib, canSelect, artSig(), usb]), () => {
       const out = [];
-      if (!list.length) {
+      if (!list.length && usb) {
+        out.push(h("div", { class: "empty" }, "No game on the USB drive yet.",
+          h("br"), h("button", { class: "btn secondary sm", type: "button", onclick: () => go("home", "usb") }, "Go to USB drive")));
+      } else if (!list.length) {
         out.push(h("div", { class: "empty" }, lib ? "Nothing is installed on the PS5 yet." : "No game prepared yet.",
           h("br"), h("button", { class: "btn secondary sm", type: "button", onclick: () => go("home", lib ? "install" : "game") }, lib ? "Go to Install" : "Go to Game")));
       }
@@ -1005,7 +1330,9 @@
           h("span", { class: "grow" }, h("span", { class: "name" }, "Pick on the PS5"),
             h("span", { class: "meta" }, "Shows the game selector on the TV"))));
       }
-      if (!lib && list.length) out.push(h("p", { class: "hint" }, "Showing the games prepared on this computer. ",
+      if (!lib && list.length && usb) out.push(h("p", { class: "hint" }, "Showing the games this app copied to the drive. ",
+        h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("library"); } }, "Read the drive"), " in the Library to see everything on it."));
+      else if (!lib && list.length) out.push(h("p", { class: "hint" }, "Showing the games prepared on this computer. ",
         h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("library"); } }, "Refresh the Library"), " to see what's on the PS5."));
       return out;
     });
@@ -1035,7 +1362,8 @@
     const label = running ? "Playing…" : "Play";
     if (btn._l !== label) { btn._l = label; btn.innerHTML = playSvg; btn.append(label); }
     $("#play-hint").textContent = !S.settings.console.ip ? "Choose your PS5 first." : busyOther ? `Wait for “${S.console_busy.label}”.` :
-      !ui.playChoice ? "Install a game first." : running ? "" : "Make sure SWRR was restarted and the loader listens.";
+      !ui.playChoice ? (usb ? "Copy a game to the USB drive first." : "Install a game first.") : running ? "" :
+      usb ? "Make sure the drive is in the PS5, SWRR was restarted and the loader listens." : "Make sure SWRR was restarted and the loader listens.";
   }
 
   function bootNotes(job, bp, running) {
@@ -1069,7 +1397,7 @@
     const select = choice === "*select*";
     if (!select && choice) api("/api/settings", { title: choice }).catch(() => {});
     go("home", "play");
-    await startJob($("#btn-play"), "/api/boot", { title: select ? "" : choice, select, force_preflight: !!force }, "boot");
+    await startJob($("#btn-play"), "/api/boot", { title: select ? "" : choice, select, force_preflight: !!force, source: mode() }, "boot");
   }
 
   // ---------- art ----------
@@ -1139,6 +1467,30 @@
           h("div", { class: "acts" }, h("button", { class: "btn ghost sm", type: "button", onclick: () => { ui.installTitle = p.title; go("home", "install"); } }, "Install")))));
     });
 
+    // the USB drive
+    const ulj = slots.usblist.job;
+    const ureading = isRunning(ulj);
+    const um = usbMap();
+    const ub = $("#btn-usb-lib-refresh");
+    ub.disabled = ureading || !S.usb.target;
+    fill(ub, ureading ? [spinner(), "Reading…"] : "Read the drive");
+    $("#usb-lib-status").textContent = !S.usb.target ? "No USB drive chosen yet: choose one on the USB drive step (USB drive path)." :
+      ureading ? "Reading the drive…" :
+      um ? `${plural(S.usb.library.entries.length, "game")} on ${S.usb.target} · read ${fmtAgo(S.usb.library.refreshed)}` :
+      S.settings.usb_where === "console" ? `Not read yet. A drive in the PS5 is read through ghostldr's FTP server, while a game runs.` : "Not read yet.";
+    renderProblem($("#usb-lib-problem"), ulj);
+    once($("#usb-tiles"), JSON.stringify([um && S.usb.library.entries, artKeys, S.usb.target, S.console_busy && S.console_busy.id]), () => {
+      if (!um) return null;
+      if (!S.usb.library.entries.length) return h("div", { class: "empty lib-empty" }, "No games for ghostldr on this drive yet.");
+      return S.usb.library.entries.map((e) => h("div", { class: "tile" },
+        tileArt(e.title, e.name, null),
+        h("div", { class: "body" }, h("div", { class: "name" }, e.name || e.title),
+          h("div", { class: "meta" }, [e.title, e.version ? "v" + e.version : ""].filter(Boolean).join(" · ")),
+          h("div", { class: "acts" },
+            h("button", { class: "btn ghost sm", type: "button", onclick: async () => { ui.playChoice = e.title; if (!usbMode()) await setMode("usb"); go("home", "play"); } }, "Play"),
+            h("button", { class: "btn ghost sm danger-text", type: "button", onclick: (ev) => removeUsbTitle(ev.currentTarget, e) }, "Remove")))));
+    });
+
     // library jobs (remove, name & art)
     const xj = slots.libjob.job;
     $("#libjob-card").hidden = !xj;
@@ -1146,7 +1498,8 @@
       $("#libjob-head").textContent = xj.label;
       pill($("#libjob-pill"), xj, { running: "Working" });
       $("#libjob-msg").textContent = isRunning(xj) ? "Working with the PS5…" :
-        xj.state === "done" ? (xj.kind === "remove" ? "Removed. Its progress save was kept." : "Updated. Restart SWRR before playing.") : "";
+        xj.state === "done" ? (xj.kind === "remove" ? "Removed. Its progress save was kept." :
+          xj.kind === "usbremove" ? "Removed from the USB drive. Its progress save on the PS5 was kept." : "Updated. Restart SWRR before playing.") : "";
       renderProblem($("#libjob-problem"), xj);
     }
 
@@ -1174,6 +1527,13 @@
       text: "This downloads the game's official picture and background from the PlayStation Store and writes one small entry to the PS5. The game, its progress and SWRR's own save aren't touched. SWRR must be at HALL OF FAME.",
       ok: "Update" });
     if (ok) startJob(btn, "/api/library/meta", { title: e.title, fetch_art: true }, "libjob");
+  }
+
+  async function removeUsbTitle(btn, e) {
+    const typed = await confirmBox({ title: `Remove ${e.name || e.title} from the USB drive?`,
+      text: "This deletes the game's folder from the drive's ghostldr folder. Its progress (save) on the PS5 is kept, and nothing else on the drive is touched. You'd need to copy it again to play.",
+      ok: "Remove", danger: true, field: { label: `Type ${e.title} to confirm`, expect: e.title } });
+    if (typed) startJob(btn, "/api/usb/remove", { title: e.title, confirm: typed }, "libjob");
   }
 
   async function removeTitle(btn, e) {
@@ -1364,7 +1724,11 @@
       });
     });
     $("#btn-doctor").addEventListener("click", (e) => startJob(e.currentTarget, "/api/doctor", { title: selectedInstallTitle() }, "doctor"));
-    $("#btn-console-next").addEventListener("click", () => go("home", S.packed.length ? (installedMap() ? "play" : "install") : "game"));
+    $("#btn-console-next").addEventListener("click", () => {
+      if (usbMode()) go("home", !ui.dump ? "game" : onDrive(dumpTitle()) ? "play" : "usb");
+      else go("home", S.packed.length ? (installedMap() ? "play" : "install") : "game");
+    });
+    for (const b of $$(".path")) b.addEventListener("click", (e) => setMode(e.currentTarget.dataset.mode, e.currentTarget));
 
     // game
     $("#btn-pick").addEventListener("click", (e) => pickFolder(e.currentTarget));
@@ -1387,6 +1751,19 @@
       if (p) ui.installTitle = p.title;
       go("home", "install");
     });
+
+    // the USB drive
+    $("#btn-game-usb").addEventListener("click", () => go("home", "usb"));
+    for (const b of $$("#usb-where .item")) b.addEventListener("click", (e) => chooseUsb(e.currentTarget, { where: e.currentTarget.dataset.where }));
+    $("#btn-usb-copy").addEventListener("click", (e) => {
+      if (!ui.dump) return;
+      startJob(e.currentTarget, "/api/usb/copy", { src: ui.dump.path, title: $("#inp-title").value.trim(), fetch_art: $("#chk-art").checked }, "usbcopy");
+    });
+    $("#btn-usbcopy-cancel").addEventListener("click", () => cancelJob("usbcopy", {
+      title: "Stop copying?", text: "What was already copied stays on the drive. Press Copy later to continue from there.", ok: "Stop" }));
+    $("#btn-usb-next").addEventListener("click", () => { const t = dumpTitle(); if (t) ui.playChoice = t; go("home", "play"); });
+    $("#btn-usb-list").addEventListener("click", (e) => startJob(e.currentTarget, "/api/usb/list", {}, "usblist"));
+    $("#btn-usb-lib-refresh").addEventListener("click", (e) => startJob(e.currentTarget, "/api/usb/list", {}, "usblist"));
 
     // install
     $("#sel-install").addEventListener("change", (e) => { ui.installTitle = e.currentTarget.value; render(); });
@@ -1430,5 +1807,5 @@
   readToken();
   if (!TOKEN) { $("#notoken").hidden = false; return; }
   wire();
-  refresh().then(() => { pollLoop(); loaderLoop(); });
+  refresh().then(() => { pollLoop(); loaderLoop(); usbLoop(); });
 })();

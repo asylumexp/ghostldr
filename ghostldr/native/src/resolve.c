@@ -23,15 +23,29 @@ int host_module_handle(const char *modname, u32 *out)
         *out = (u32)g_ctx->libkernel_handle;
         return 0;
     }
+    char file[96];
+    fmt(file, sizeof(file), "%s.sprx", modname);
     for (u32 i = 0; i < g_nhost; i++)
         if (strcmp(g_host[i].name, modname) == 0) {
+            /* one that did not load may have been loaded since, by the
+             * title's sceSysmoduleLoadModule (Jak X loads few by name) */
+            u32 h;
+            if (g_host[i].status != 0 && host_find_module(file, &h) == 0) {
+                g_host[i].handle = h, g_host[i].status = 0;
+                logf("host: %s is loaded now (handle %x)", file, h);
+            }
             *out = g_host[i].handle;
             return g_host[i].status;
         }
-    char file[96];
-    fmt(file, sizeof(file), "%s.sprx", modname);
     u32 handle = 0;
     int status = host_find_module(file, &handle);
+    /* a Pro-mode host (Jak X) runs the Neo build of the GPU driver, which
+     * exports the same library: bind to it, never load a second driver */
+    if (status != 0 && strcmp(modname, "libSceGnmDriver") == 0 &&
+        host_find_module("libSceGnmDriverForNeoMode.sprx", &handle) == 0) {
+        status = 0;
+        logf("host: %s is libSceGnmDriverForNeoMode.sprx here (handle %x)", file, handle);
+    }
     if (status != 0) {
         int res = 0;
         s32 h = (s32)call_gadget6((u64)K.load_start_module, (u64)file, 0, 0, 0, 0, (u64)&res);
@@ -95,12 +109,49 @@ struct stub_info {
     const char *lib, *nid, *name;
     s64 ret;     /* what the stub returns (the library's policy; 0 by default) */
     bool denied; /* no host fallback for its library */
+    const char *modname; /* the host module it would come from (late binding) */
+    u64 target;  /* bound late: the host function, once its module is loaded */
+    u32 tries;
 };
 static u64 g_stub_base;
 static u8 *g_stub_buf;
 static struct stub_info *g_stubs; /* allocated with the stub area (keeps the core image small) */
 static u64 *g_count_target;
 static u32 g_nstubs, g_stubs_flushed;
+
+/* A host module that did not load at boot is often loaded later by the
+ * title's own sceSysmoduleLoadModule (in Jak X the bare-name load refuses
+ * libSceHttp2 until then): before answering for an import of one, look for
+ * the module again (64 times at most) and, once it is there, forward this
+ * call and all later ones to the real function. */
+#define LATE_TRIES 64
+static volatile int g_late_lock;
+
+u64 c_late_target(u32 idx)
+{
+    if (idx >= g_nstubs)
+        return 0;
+    struct stub_info *s = &g_stubs[idx];
+    u64 t = __atomic_load_n(&s->target, __ATOMIC_ACQUIRE);
+    if (t || s->denied || !s->name || !s->modname || s->tries >= LATE_TRIES)
+        return t;
+    while (__atomic_exchange_n(&g_late_lock, 1, __ATOMIC_ACQUIRE))
+        K.usleep(100);
+    t = s->target;
+    if (!t && s->tries++ < LATE_TRIES) {
+        char file[96];
+        u32 handle;
+        fmt(file, sizeof(file), "%s.sprx", s->modname);
+        void *a = host_find_module(file, &handle) == 0 ? host_dlsym(handle, s->name) : NULL;
+        if (a) {
+            __atomic_store_n(&s->target, (u64)a, __ATOMIC_RELEASE);
+            t = (u64)a;
+            logf("late bind: %s %s (%s) -> %p: %s is loaded now", s->lib, s->nid, s->name, a, file);
+        }
+    }
+    __atomic_store_n(&g_late_lock, 0, __ATOMIC_RELEASE);
+    return t;
+}
 
 u64 c_unresolved(u32 idx)
 {
@@ -117,7 +168,15 @@ u64 c_unresolved(u32 idx)
     return (u64)s->ret;
 }
 
-/* eax = stub index; preserve argument registers, return c_unresolved's value */
+/* eax = stub index; preserve argument registers (xmm0-7 too: a late-bound
+ * target gets them), then jump to c_late_target's function or return
+ * c_unresolved's value */
+#define RESTORE_ARGS                                                                                        \
+    "movdqu xmm0, [rsp]\n movdqu xmm1, [rsp + 16]\n movdqu xmm2, [rsp + 32]\n movdqu xmm3, [rsp + 48]\n"   \
+    "movdqu xmm4, [rsp + 64]\n movdqu xmm5, [rsp + 80]\n movdqu xmm6, [rsp + 96]\n movdqu xmm7, [rsp + 112]\n" \
+    "add rsp, 144\n"                                                                                        \
+    "pop r9\n pop r8\n pop rcx\n pop rdx\n pop rsi\n pop rdi\n"                                             \
+    "leave\n"
 __attribute__((naked, used)) static void unresolved_entry(void)
 {
     __asm__ volatile(
@@ -126,11 +185,18 @@ __attribute__((naked, used)) static void unresolved_entry(void)
         "mov rbp, rsp\n"
         "and rsp, -16\n"
         "push rdi\n push rsi\n push rdx\n push rcx\n push r8\n push r9\n"
+        "push rax\n push rax\n" /* the index, at [rsp + 128] below */
+        "sub rsp, 128\n"
+        "movdqu [rsp], xmm0\n movdqu [rsp + 16], xmm1\n movdqu [rsp + 32], xmm2\n movdqu [rsp + 48], xmm3\n"
+        "movdqu [rsp + 64], xmm4\n movdqu [rsp + 80], xmm5\n movdqu [rsp + 96], xmm6\n movdqu [rsp + 112], xmm7\n"
         "mov edi, eax\n"
-        "call c_unresolved\n"
-        "pop r9\n pop r8\n pop rcx\n pop rdx\n pop rsi\n pop rdi\n"
-        "leave\n"
-        "ret\n"
+        "call c_late_target\n"
+        "test rax, rax\n"
+        "jz 1f\n"
+        "mov r11, rax\n" RESTORE_ARGS "jmp r11\n"
+        "1:\n"
+        "mov edi, [rsp + 128]\n"
+        "call c_unresolved\n" RESTORE_ARGS "ret\n"
         ".att_syntax prefix\n");
 }
 
@@ -160,19 +226,19 @@ u64 stub_alloc_code(const u8 *code, u32 len)
     if (len > STUB_SIZE || !stubs_ready())
         return 0;
     u32 idx = g_nstubs++;
-    g_stubs[idx] = (struct stub_info){"hook", "", "trampoline", 0, false};
+    g_stubs[idx] = (struct stub_info){"hook", "", "trampoline", 0, false, NULL, 0, 0};
     memcpy(g_stub_buf + idx * STUB_SIZE, code, len);
     return g_stub_base + idx * STUB_SIZE;
 }
 
-u64 unresolved_stub(const char *lib, const char *nid, s64 ret, bool denied)
+u64 unresolved_stub(const char *lib, const char *nid, const char *modname, s64 ret, bool denied)
 {
     if (!stubs_ready())
         return 0;
     u32 idx = g_nstubs++;
     const char *name = nid_to_name(nid);
     g_stubs[idx] = (struct stub_info){arena_strdup(lib), arena_strdup(nid), name ? arena_strdup(name) : NULL, ret,
-                                      denied};
+                                      denied, modname && !denied ? arena_strdup(modname) : NULL, 0, 0};
     u8 *s = g_stub_buf + idx * STUB_SIZE;
     s[0] = 0xB8;                        /* mov eax, idx */
     *(u32 *)(s + 1) = idx;
@@ -205,7 +271,7 @@ static u64 counting_stub(u64 target, const char *lib, const char *nid, const cha
         return target;
     u32 idx = g_nstubs++;
     g_stubs[idx] = (struct stub_info){arena_strdup(lib), arena_strdup(nid), name ? arena_strdup(name) : NULL, 0,
-                                      false};
+                                      false, NULL, 0, 0};
     g_count_target[idx] = target;
     u64 at = g_stub_base + idx * STUB_SIZE;
     u8 *c = g_stub_buf + idx * STUB_SIZE;
@@ -293,7 +359,7 @@ u64 resolve_import(struct module *m, const char *encoded, bool weak, int kind)
         if (g_logged_denied++ < 200)
             logf("denied: %s needs %s:%s (%s): %s has no host fallback, the stub returns %x", m->name, lib, nid,
                  name ? name : "?", pol->name, (u32)ret);
-        return kind == IMPORT_OBJECT ? 0 : unresolved_stub(lib, nid, ret, true);
+        return kind == IMPORT_OBJECT ? 0 : unresolved_stub(lib, nid, NULL, ret, true);
     }
     if (name) {
         u32 handle;
@@ -307,5 +373,5 @@ u64 resolve_import(struct module *m, const char *encoded, bool weak, int kind)
         logf("unresolved%s: %s needs %s:%s (%s) from module %s%s", weak ? " (weak)" : "", m->name,
              lib ? lib : "?", nid, name ? name : "?", modname ? modname : "?",
              kind == IMPORT_OBJECT ? ": a variable, bound to 0" : "");
-    return kind == IMPORT_OBJECT ? 0 : unresolved_stub(lib ? lib : "?", nid, ret, false);
+    return kind == IMPORT_OBJECT ? 0 : unresolved_stub(lib ? lib : "?", nid, modname, ret, false);
 }

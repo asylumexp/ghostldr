@@ -4,12 +4,13 @@ DHCP can move the console, so the host tools look it up with the PlayStation
 device discovery protocol: a PS5 answers on UDP 9302 (protocol 00030010), a
 PS4 on UDP 987 (protocol 00020020).  A PS4's answer names the running app;
 a PS5's doesn't, so SWRR is also recognised by Luac0re's loader listening on
-TCP 9026 (an empty connection runs nothing).
+TCP 9026, and Jak X by UltraC0re's on TCP 8888 (an empty connection runs
+nothing on either).
   PS_HOST     use this address, no lookup (PS5_HOST works too)
   PS_HOST_ID  the console's host-id (as `python3 ghostldr/host/console.py --list`
               shows it): find that console wherever it is (PS5_HOST_ID works too)
   neither     use the only console that is on; with several, the only one
-              running SWRR or Luac0re's loader. Whenever more than one console
+              running SWRR or a loader. Whenever more than one console
               answers, they are listed (on stderr) with the one used marked; if
               no single one stands out, a terminal asks which to use, anything
               else stops with the list.
@@ -33,7 +34,8 @@ PROTOCOLS = {
     "PS5": (9302, b"SRCH * HTTP/1.1\ndevice-discovery-protocol-version:00030010\n"),
     "PS4": (987, b"SRCH * HTTP/1.1\ndevice-discovery-protocol-version:00020020\n"),
 }
-LOADER_PORT = 9026
+LOADER_PORT = 9026            # Luac0re in SWRR
+LOADERS = {9026: "Luac0re", 8888: "UltraC0re"}   # UltraC0re in Jak X
 SWRR_TITLES = {r["title"]: name.upper() for name, r in REGIONS.items()}
 
 
@@ -47,7 +49,7 @@ class Console:
     on: bool = True           # False: rest mode (status 620)
     app_id: str = ""          # running app's title ID (PS4 answers only)
     app_name: str = ""
-    loader: bool = False      # Luac0re's loader accepts connections on 9026
+    loader: int = 0           # the port a loader accepts connections on (LOADERS), 0: none
 
     @property
     def swrr(self) -> str:
@@ -68,7 +70,7 @@ class Console:
         if self.swrr:
             parts.append(f"SWRR {self.swrr}")
         if self.loader:
-            parts.append(f"Luac0re loader on {LOADER_PORT}")
+            parts.append(f"{LOADERS[self.loader]} loader on {self.loader}")
         return "  ".join(parts)
 
 
@@ -93,12 +95,20 @@ def parse_reply(ip: str, reply: bytes, kind: str = "") -> Console:
     )
 
 
-def loader_listening(ip: str, timeout: float = 0.6) -> bool:
-    try:
-        socket.create_connection((ip, LOADER_PORT), timeout=timeout).close()
-        return True
-    except OSError:
-        return False
+def loader_listening(ip: str, timeout: float = 0.6) -> int:
+    """The port of the Lua loader listening at `ip` (Luac0re's first), or 0."""
+    for port in LOADERS:
+        try:
+            socket.create_connection((ip, port), timeout=timeout).close()
+            return port
+        except OSError:
+            continue
+    return 0
+
+
+def loader_port(ip: str) -> int:
+    """Where to send Lua at `ip`: the loader that answers, else Luac0re's port."""
+    return loader_listening(ip, timeout=2.0) or LOADER_PORT
 
 
 def discover(wait: float = 2.0, check_loader: bool = True) -> dict[str, Console]:
@@ -120,7 +130,7 @@ def discover(wait: float = 2.0, check_loader: bool = True) -> dict[str, Console]
                 found[ip] = parse_reply(ip, data, kinds.get(port, ""))
     if check_loader:
         for c in found.values():
-            c.loader = c.on and loader_listening(c.ip)
+            c.loader = loader_listening(c.ip) if c.on else 0
     return found
 
 
@@ -146,7 +156,7 @@ def host_id(ip: str, timeout: float = 1.5) -> str:
 
 def pick(found: dict[str, Console], want_id: str = "") -> list[Console]:
     """The candidates: by host-id if given; else the consoles that are on,
-    narrowed to those running SWRR or Luac0re's loader when that leaves one."""
+    narrowed to those running SWRR or a loader when that leaves one."""
     if want_id:
         return [c for c in found.values() if c.host_id == want_id]
     on = [c for c in found.values() if c.on]
@@ -213,7 +223,8 @@ def console_ip(quiet: bool = False) -> str:
         why = ""
         if chosen and not want:
             why = ("running SWRR " + chosen.swrr) if chosen.swrr else \
-                  ("Luac0re's loader is listening" if chosen.loader else "the only one that is on")
+                  (f"{LOADERS[chosen.loader]}'s loader is listening" if chosen.loader
+                   else "the only one that is on")
         elif chosen:
             why = "host-id " + want
         show(found, chosen, why)

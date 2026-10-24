@@ -136,7 +136,7 @@ class ServerTest(TempDirs):
         self.assertEqual(self.request("GET", "/api/state", token=self.server.token[:-1])[0], 401)
         status, data = self.request("GET", "/api/state")
         self.assertEqual(status, 200)
-        self.assertEqual(data["version"], "0.4.0")
+        self.assertEqual(data["version"], "0.6.0")
 
     def test_every_api_route_checks_the_token(self) -> None:
         from ghostapp.server import ROUTES
@@ -374,10 +374,11 @@ class ServiceJobTest(TempDirs):
 
     def wait(self, job):
         self.assertTrue(wait_for(lambda: not job.running))
+        self.assertTrue(self.service.jobs.idle.wait(10))      # and its finish callbacks (the library, ...) have run
         return job
 
     def test_discovery_remembers_the_console_with_the_loader(self) -> None:
-        a = host_console.Console("192.0.2.10", "AAAA11112222", "Living room", "PS5", "13600007", True, loader=True)
+        a = host_console.Console("192.0.2.10", "AAAA11112222", "Living room", "PS5", "13600007", True, loader=9026)
         b = host_console.Console("192.0.2.11", "BBBB33334444", "Bedroom", "PS5", "14200000", False)
         write(self.root / "ghostldr/host/console.py", f"""
             print("1) " + {a.describe()!r})
@@ -463,7 +464,172 @@ class ServiceJobTest(TempDirs):
         self.assertEqual(self.service.settings.get("title"), "CUSA00900")
 
 
+class UsbPathTest(ServiceJobTest):
+    """The USB drive path: where the drive is, copying, reading and removing, playing from it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.service.settings.update(console={"ip": "192.0.2.10"})
+        self.dump = self.tmp / "CUSA00900/app0"
+        write(self.dump / "eboot.bin", "x")
+        self.drive = self.tmp / "DRIVE"
+        self.drive.mkdir()
+        write(self.root / "ghostldr/host/profiles.py", "print('')\n")          # detect: nothing known
+        write(self.root / "ghostldr/host/gfs_pack.py", "import sys\nprint(sys.argv[1:])\n")
+
+    def args(self, job) -> list:
+        self.wait(job)
+        return eval(job.lines[-1])
+
+    def test_where_the_drive_is(self) -> None:
+        svc = self.service
+        with self.assertRaises(AppError) as ctx:
+            svc.usb_target()
+        self.assertEqual(ctx.exception.extra.get("action"), "goto_usb")
+        svc.usb_choose("computer", str(self.drive))
+        self.assertEqual(self.args(svc.usb_copy(str(self.dump))),
+                         ["--src", str(self.dump), "--usb", str(self.drive), "--progress", "2"])
+        svc.usb_choose("console")
+        self.assertEqual(self.args(svc.usb_copy(str(self.dump), "cusa00900", fetch_art=True))[3:],
+                         ["ftp://192.0.2.10:1212/ghostldr_usb", "--progress", "2", "--title", "CUSA00900", "--fetch-art"])
+        svc.usb_choose("console", url="ftp://192.0.2.11:2121/mnt/usb0")      # a jailbroken PS5's ftpsrv
+        svc.usb_choose("console")                                            # kept when none is given
+        self.assertEqual(svc.usb_target(), "ftp://192.0.2.11:2121/mnt/usb0")
+        svc.usb_choose("console", url="")                                    # back to ghostldr's
+        self.assertEqual(svc.usb_target(), "ftp://192.0.2.10:1212/ghostldr_usb")
+        for bad in (lambda: svc.usb_choose("elsewhere"), lambda: svc.usb_choose("console", url="http://192.0.2.11/"),
+                    lambda: svc.usb_choose("computer", str(self.tmp / "unplugged")),
+                    lambda: svc.usb_copy(str(self.tmp))):
+            with self.assertRaises(AppError):
+                bad()
+        svc.usb_choose("computer")
+        self.assertEqual(svc.usb_target(), str(self.drive))                  # the drive chosen before
+        self.drive.rmdir()                                                   # unplugged since
+        with self.assertRaises(AppError):
+            svc.usb_target()
+        self.assertEqual(svc.state()["usb"]["target"], "")
+
+    def test_copy_read_and_remove(self) -> None:
+        svc = self.service
+        svc.usb_choose("computer", str(self.drive))
+        write(self.root / "ghostldr/host/gfs_pack.py", """
+            print("CUSA00900: copying 3 of 5 files, 1.50 GiB")
+            print("CUSA00900: 0.5 of 1.5 GiB, 1 of 3 files, 120 MiB/s")
+            print("selector: CUSA00900: name 'Bloodborne' (param.sfo), icon: the title's sce_sys, backdrop: none")
+            print("CUSA00900: 5 files, 1.62 GiB in /Volumes/D/ghostldr/CUSA00900 (exfat): 3 copied, 2 already there, "
+                  "0 removed; progress goes to G00900SAVE on the console")
+            print("executable memory: needs multi-buffer placement (eboot.bin: VU1 16 MiB)")
+        """)
+        job = self.wait(svc.usb_copy(str(self.dump)))
+        self.assertEqual(job.state, "done")
+        pr = job.tracker.snapshot()
+        self.assertEqual((pr["phase"], pr["files"], pr["todo"], pr["done_gib"], pr["rate"], pr["name"]),
+                         ("done", 5, 3, 0.5, 120, "Bloodborne"))
+        self.assertEqual((pr["summary"]["copied"], pr["summary"]["kept"], pr["summary"]["prefix"]), (3, 2, "G00900"))
+        self.assertEqual(pr["fit"]["kind"], "multi")
+        st = svc.state()["usb"]
+        self.assertEqual(st["copies"]["CUSA00900"]["name"], "Bloodborne")
+        self.assertEqual(st["copies"]["CUSA00900"]["target"], str(self.drive))
+        self.assertEqual([e["title"] for e in st["library"]["entries"]], ["CUSA00900"])
+        # reading the drive replaces what the app knew
+        write(self.root / "ghostldr/host/usb_drive.py", f"""
+            import sys
+            assert sys.argv[1:] == ["list", {str(self.drive)!r}], sys.argv
+            print({str(self.drive)!r} + " (exfat): 2 title(s)")
+            print("  CUSA00900  Bloodborne  01.09")
+            print("  LAPY20001")
+        """)
+        job = self.wait(svc.usb_list())
+        self.assertEqual(job.state, "done")
+        lib = svc.usb_library
+        self.assertEqual((lib["ok"], lib["fs"], lib["target"]), (True, "exfat", str(self.drive)))
+        self.assertEqual([(e["title"], e["name"], e["version"]) for e in lib["entries"]],
+                         [("CUSA00900", "Bloodborne", "01.09"), ("LAPY20001", "", "")])
+        with self.assertRaises(AppError):
+            svc.usb_remove("LAPY20001", "CUSA00900")                          # typed the wrong title
+        write(self.root / "ghostldr/host/usb_drive.py", "print('removed')\n")
+        job = self.wait(svc.usb_remove("lapy20001", "LAPY20001"))
+        self.assertEqual(job.state, "done")
+        self.assertEqual([e["title"] for e in svc.usb_library["entries"]], ["CUSA00900"])
+
+    def test_play_from_the_drive(self) -> None:
+        for n in ("core.bin", "core.json", "ext.bin", "selector.bin"):
+            write(self.root / "build/ghostldr" / n, "x")
+        write(self.root / "ghostldr/host/run.py", "import sys\nprint(sys.argv[1:])\n")
+        self.assertEqual(self.args(self.service.boot("CUSA00900", source="usb")),
+                         ["boot", "--app-root", "usb:/ghostldr", "--no-build", "--title", "CUSA00900"])
+        self.assertEqual(self.args(self.service.boot("", select=True, source="usb")),
+                         ["boot", "--app-root", "usb:/ghostldr", "--no-build", "--select"])
+        with self.assertRaises(AppError):
+            self.service.boot("CUSA00900", source="somewhere")
+
+    def test_the_path_is_remembered(self) -> None:
+        self.assertEqual(self.service.state()["settings"]["mode"], "")       # not chosen yet
+        self.service.set_mode("usb")
+        self.assertEqual(Service(self.root, cfg=self.cfg).settings.get("mode"), "usb")
+        with self.assertRaises(AppError):
+            self.service.set_mode("cloud")
+
+    def test_drives_on_this_computer(self) -> None:
+        vols = self.tmp / "Volumes"
+        write(vols / "MYDRIVE/ghostldr/CUSA00900/app0/eboot.bin", "x")
+        write(vols / "MYDRIVE/ghostldr/not a title/app0/eboot.bin", "x")
+        (vols / "Backup").mkdir()
+        (vols / ".hidden").mkdir()
+        usb = self.service.usb_module()
+        with mock.patch.object(usb, "fs_type", side_effect=lambda p: {"MYDRIVE": "exfat", "Backup": "hfs"}[p.name]):
+            drives = {d["name"]: d for d in self.service.usb_drives([vols])}
+        self.assertEqual(sorted(drives), ["Backup", "MYDRIVE"])
+        my = drives["MYDRIVE"]
+        self.assertEqual((my["fs"], my["fs_ok"], my["library"], my["titles"]), ("exfat", True, True, ["CUSA00900"]))
+        self.assertGreater(my["total"], 0)
+        self.assertEqual((drives["Backup"]["fs_ok"], drives["Backup"]["titles"]), (False, []))
+
+
 # ---------------------------------------------------------------- parsers
+
+class UsbParserTest(unittest.TestCase):
+    def test_copy_lines_as_usb_drive_prints_them(self) -> None:
+        import usb_drive
+        with tempfile.TemporaryDirectory() as t:
+            src, drive = Path(t) / "src", Path(t) / "drive"
+            for i in range(3):
+                write(src / f"f{i}.bin", "x" * 1000)
+            drive.mkdir()
+            lines: list[str] = []
+            d = usb_drive.open_drive(drive)
+            usb_drive._copy(d, src, "ghostldr/T/app0", ["f0.bin", "f1.bin", "f2.bin"], usb_drive.tree(src), "CUSA00900",
+                            lines.append, 1, progress=-1)
+        evs = [P.parse_usb_line(ln) for ln in lines]
+        self.assertEqual(evs[0], {"event": "start", "title": "CUSA00900", "todo": 3, "files": 3, "gib": 0.0})
+        self.assertEqual([e["event"] for e in evs[1:]], ["progress"] * 3)
+        self.assertEqual((evs[-1]["count"], evs[-1]["todo"]), (3, 3))
+
+    def test_other_lines(self) -> None:
+        self.assertEqual(P.parse_usb_line("ftp://192.0.2.10:1212/ghostldr_usb: copying over 10 connection(s); the server "
+                                          "refused more (421)"), {"event": "connections", "count": 10})
+        self.assertEqual(P.parse_usb_line("ftp://x: file system and free space aren't known over FTP (exFAT ...)"),
+                         {"event": "ftp"})
+        self.assertEqual(P.parse_usb_line("selector: LAPY20001: name 'PS4-Xplorer' (param.sfo), icon: none")["name"],
+                         "PS4-Xplorer")
+        self.assertIsNone(P.parse_usb_line("boot it with: python3 ghostldr/host/run.py boot --app-root usb:/ghostldr"))
+        r = P.parse_usb_list("ftp://192.0.2.10:1212/ghostldr_usb (unknown file system): 2 title(s)\n  LAPY20001\n"
+                             "  CUSA00900    01.09\n")
+        self.assertEqual((r["ok"], r["fs"]), (True, "unknown file system"))
+        self.assertEqual(r["entries"], [{"title": "LAPY20001", "name": "", "version": ""},
+                                        {"title": "CUSA00900", "name": "", "version": "01.09"}])
+        self.assertFalse(P.parse_usb_list("no mounted drive has a ghostldr folder")["ok"])
+
+    def test_usb_problems(self) -> None:
+        cases = {"ftp://192.0.2.10:1212/ghostldr_usb: [Errno 61] Connection refused": "usb_ftp",
+                 "ftp://192.0.2.10:1212/ghostldr_usb: no such folder on the console (a USB drive is at /mnt/usb0..7)":
+                     "usb_no_drive",
+                 "/Volumes/D: FAT32 holds no file of 4 GiB or more (big.pkg, 5.1 GiB): format the drive exFAT": "usb_fat32",
+                 "/Volumes/D: 30.0 GiB to copy, 2.1 GiB free": "usb_space"}
+        for line, pid in cases.items():
+            self.assertEqual(problems.diagnose([line])["id"], pid, line)
+        self.assertEqual(problems.diagnose(["ConnectionRefusedError: [Errno 61] Connection refused"])["id"], "loader_send")
+
 
 class InstallParserTest(unittest.TestCase):
     def test_progress_line(self) -> None:
@@ -580,7 +746,7 @@ class ConsoleParserTest(unittest.TestCase):
 
     def test_console_list_as_console_py_prints_it(self) -> None:
         on = host_console.Console("192.0.2.10", "AAAA11112222", "Living room PS5", "PS5", "13600007", True,
-                                  loader=True)
+                                  loader=9026)
         rest = host_console.Console("192.0.2.11", "BBBB33334444", "Spare", "PS5", "14200000", False)
         ps4 = host_console.Console("192.0.2.12", "CCCC", "Old  one", "PS4", "12020001", True, "CUSA03474",
                                    "Star Wars Racer Revenge")
