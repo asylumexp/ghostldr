@@ -19,7 +19,10 @@
  *     created, a function written and called, destroyed (stops at the first
  *     failure);
  *  6. last: each buffer's first 16 KiB, read and written through the
- *     compiler by the same probes.
+ *     compiler by the same probes;
+ *  7. on a PS4 only, before 4-6: SWRR's budget, the kernel's limits for the
+ *     application (the 2.5 GiB of the sixth report), and one try to raise
+ *     its direct memory limit, put back at once.
  */
 #include "ghost.h"
 
@@ -162,6 +165,205 @@ COLD static void diag_memory(void)
     host_dmem_census();
 }
 
+/* ---- 7. PS4: SWRR's budget (docs/ps4.md, the sixth report) ----
+ * System calls go through this process's own libkernel stub for each number
+ * (a PS4 runs a system call only from its own stub).  Numbers, and the
+ * prototypes of getid, get_ptype, get_proc_type_info and the resident
+ * counts, are psdevwiki's; budget_get's and budget_set's are unknown, so
+ * everything the kernel may write ends at an unmapped page: a wrong guess
+ * fails with EFAULT and never overwrites memory.  The libkernel functions
+ * around them (sceKernelGetBudget, sceKernelSetGameDirectMemoryLimit, ...)
+ * are only dumped, for their prototypes, never called. */
+#define MiB (1UL << 20)
+typedef s64 (*sysfn)(u64, u64, u64, u64, u64, u64);
+
+static const struct {
+    u32 nr;
+    const char *name;
+} k_budget_sys[] = {
+    {570, "budget_get"},        {571, "budget_set"},           {609, "budget_getid"},
+    {610, "budget_get_ptype"},  {612, "get_proc_type_info"},  {613, "get_resident_count"},
+    {615, "get_resident_fmem_count"},
+};
+enum { B_GET, B_SET, B_GETID, B_PTYPE, B_PTINFO, B_RES, B_FMEM };
+
+/* this number's "mov rax, N; mov r10, rcx; syscall" in libkernel's text */
+COLD static sysfn lk_stub(const u8 *t, u64 size, u32 nr)
+{
+    static const u8 tail[5] = {0x49, 0x89, 0xca, 0x0f, 0x05};
+    for (u64 i = 0; i + 12 <= size; i++) {
+        u32 n;
+        memcpy(&n, t + i + 3, 4);
+        if (t[i] == 0x48 && t[i + 1] == 0xc7 && t[i + 2] == 0xc0 && n == nr && memcmp(t + i + 7, tail, 5) == 0)
+            return (sysfn)(u64)(t + i);
+    }
+    return NULL;
+}
+
+/* 64 KiB of zeroes with an unmapped page right after them */
+COLD static u8 *guarded(void)
+{
+    void *p = NULL;
+    if (K.mmap(NULL, 0x20000, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0, &p) != 0 || !p)
+        return NULL;
+    K.munmap((u8 *)p + 0x10000, 0x10000);
+    memset(p, 0, 0x10000);
+    return p;
+}
+
+/* bytes up to the last non-zero one, rounded up to 8 */
+COLD static u64 used_len(const u8 *b, u64 max)
+{
+    u64 n = max;
+    while (n && !b[n - 1])
+        n--;
+    return ALIGN_UP(n, 8);
+}
+
+/* sigaction's argument (crash.c's) */
+struct bsigaction {
+    u64 handler;
+    int flags;
+    u32 mask[4];
+};
+#define SIGSYS 12
+
+COLD static void diag_budget_calls(void);
+
+/* A system call the kernel refuses through nosys() also sends SIGSYS, which
+ * would end SWRR: it is ignored while the calls run, then put back. */
+COLD static void diag_budget(void)
+{
+    int (*sigaction)(int, const struct bsigaction *, struct bsigaction *) = lk("sigaction");
+    struct bsigaction ign, old;
+    memset(&ign, 0, sizeof(ign));
+    memset(&old, 0, sizeof(old));
+    ign.handler = 1; /* SIG_IGN */
+    if (!sigaction || sigaction(SIGSYS, &ign, &old) != 0) {
+        logf("diag: budget: SIGSYS cannot be ignored here: nothing called");
+        return;
+    }
+    diag_budget_calls();
+    sigaction(SIGSYS, &old, NULL);
+}
+
+COLD static void diag_budget_calls(void)
+{
+    struct sce_module_info lkm;
+    memset(&lkm, 0, sizeof(lkm));
+    lkm.size = sizeof(lkm);
+    u32 seg = 0;
+    if (K.module_info((u32)g_ctx->libkernel_handle, &lkm) != 0) {
+        logf("diag: budget: no module info for libkernel");
+        return;
+    }
+    while (seg < lkm.nsegs && seg < 4 && !(lkm.segs[seg].prot & PROT_EXEC))
+        seg++;
+    if (seg >= lkm.nsegs || seg >= 4) {
+        logf("diag: budget: libkernel's text not found");
+        return;
+    }
+    const u8 *text = (const u8 *)lkm.segs[seg].base;
+    sysfn f[ARRAY_SIZE(k_budget_sys)];
+    for (u32 i = 0; i < ARRAY_SIZE(k_budget_sys); i++) {
+        f[i] = lk_stub(text, lkm.segs[seg].size, k_budget_sys[i].nr);
+        logf("diag: budget: %s (%u): libkernel stub %lx%s", k_budget_sys[i].name, k_budget_sys[i].nr, (u64)f[i],
+             f[i] ? "" : " (none: not called)");
+    }
+    static const char *const fns[] = {"sceKernelGetBudget", "sceKernelSetBudget", "sceKernelGetResourceLimit",
+                                      "sceKernelGetResource", "sceKernelGetProcessTypeOfBudget",
+                                      "sceKernelGetProcessType", "sceKernelSetGameDirectMemoryLimit"};
+    for (u32 i = 0; i < ARRAY_SIZE(fns); i++) { /* a PS4's libkernel is readable; nothing here is called */
+        const void *a = lk(fns[i]);
+        logf("diag: budget: %s at %lx%s", fns[i], (u64)a, a ? ", its first 96 bytes:" : " (not exported here)");
+        if (a)
+            log_hex("diag:   code", a, 96);
+    }
+    u8 *g = guarded();
+    if (!g) {
+        logf("diag: budget: no guarded buffer (mmap failed)");
+        return;
+    }
+    int *err = K.errno_fn();
+    u64 pid = (u64)K.getpid();
+    s64 id = f[B_GETID] ? f[B_GETID](0, 0, 0, 0, 0, 0) : -1;
+    logf("diag: budget: getid() -> %ld (errno %d)", id, id < 0 ? *err : 0);
+    if (f[B_PTYPE] && id >= 0) {
+        s64 pt = f[B_PTYPE]((u64)id, 0, 0, 0, 0, 0);
+        logf("diag: budget: get_ptype(%ld) -> %ld (errno %d)", id, pt, pt < 0 ? *err : 0);
+    }
+    if (f[B_PTINFO]) {
+        u8 *pti = g + 0x10000 - 0x100;
+        s64 r = f[B_PTINFO]((u64)pti, 0, 0, 0, 0, 0);
+        logf("diag: budget: get_proc_type_info() -> %ld (errno %d)", r, r < 0 ? *err : 0);
+        if (r >= 0)
+            log_hex("diag:   info", pti, 64);
+        memset(pti, 0, 0x100);
+    }
+    if (f[B_RES]) {
+        s64 r = f[B_RES](pid, 0, 0, 0, 0, 0);
+        logf("diag: budget: get_resident_count(%lu) -> %ld (errno %d)", pid, r, r < 0 ? *err : 0);
+    }
+    if (f[B_FMEM]) {
+        s64 r = f[B_FMEM](pid, 0, 0, 0, 0, 0);
+        logf("diag: budget: get_resident_fmem_count(%lu) -> %ld (errno %d)", pid, r, r < 0 ? *err : 0);
+    }
+    if (!f[B_GET] || id < 0) {
+        K.munmap(g, 0x10000);
+        return;
+    }
+    /* budget_get(id, out, &count), else budget_get(id, out, count): out runs
+     * to the unmapped page, the count is a u32 at the buffer's start */
+    u32 *cnt = (u32 *)g;
+    u8 *out = g + 0x1000;
+    *cnt = 64;
+    int shape = 0;
+    s64 gr = f[B_GET]((u64)id, (u64)out, (u64)cnt, 0, 0, 0);
+    logf("diag: budget: get(%ld, out, &count 64) -> %ld (errno %d), count now %u", id, gr, gr < 0 ? *err : 0, *cnt);
+    if (gr < 0) {
+        memset(out, 0, 0x10000 - 0x1000);
+        shape = 1;
+        gr = f[B_GET]((u64)id, (u64)out, 64, 0, 0, 0);
+        logf("diag: budget: get(%ld, out, 64) -> %ld (errno %d)", id, gr, gr < 0 ? *err : 0);
+    }
+    u64 n = used_len(out, 0x7000);
+    if (n)
+        log_hex("diag:   budget", out, n < 0x400 ? n : 0x400);
+    else
+        logf("diag: budget: nothing written");
+    /* the direct memory limit: the u64 near the 2.5 GiB SWRR gets */
+    s64 at = -1;
+    for (u64 o = 0; gr >= 0 && o + 8 <= n; o += 8) {
+        u64 v;
+        memcpy(&v, out + o, 8);
+        if (v >= 2300 * MiB && v <= 2800 * MiB) {
+            logf("diag: budget: +%lx holds %lu MiB: taken for the direct memory limit", o, v / MiB);
+            at = (s64)o;
+            break;
+        }
+    }
+    if (at < 0 || !f[B_SET]) {
+        logf("diag: budget: set not tried (%s)", !f[B_SET] ? "no stub" : gr < 0 ? "get failed" : "no limit near 2.5 GiB found");
+        K.munmap(g, 0x10000);
+        return;
+    }
+    /* one try to raise it to the 4608 MiB a PS4 game's range spans; put
+     * back at once with what get returned */
+    u8 *raised = g + 0x8000;
+    memcpy(raised, out, n);
+    u64 want = 4608 * MiB;
+    memcpy(raised + at, &want, 8);
+    u64 a3 = shape ? 64 : (u64)cnt;
+    s64 sr = f[B_SET]((u64)id, (u64)raised, a3, 0, 0, 0);
+    logf("diag: budget: set(%ld, limit -> %lu MiB) -> %ld (errno %d)", id, want / MiB, sr, sr < 0 ? *err : 0);
+    if (sr >= 0) {
+        logf("diag: budget: now the kernel hands out %lu MiB more direct memory (type 0)", budget_allocatable(0) / MiB);
+        s64 br = f[B_SET]((u64)id, (u64)out, a3, 0, 0, 0);
+        logf("diag: budget: set back -> %ld (errno %d)", br, br < 0 ? *err : 0);
+    }
+    K.munmap(g, 0x10000);
+}
+
 COLD static void diag_writes(void)
 {
     /* the shared scratch: a compiler write must show here */
@@ -226,10 +428,13 @@ COLD static void diag_headers(void)
 COLD int ghost_diag(void)
 {
     logf("diag: start (nothing is booted or released)");
+    bool ps4 = is_ps4();
     diag_platform();
     g_ctx->flags |= CTX_FLAG_PS4; /* from here on: the PS4 boot's checks, on any console */
     diag_threads();
     diag_memory();
+    if (ps4)
+        diag_budget();
     diag_jit_views();
     diag_writes();
     diag_headers();
