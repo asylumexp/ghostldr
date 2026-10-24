@@ -430,7 +430,8 @@ pre.rawout:empty::before, pre.log:empty::before { content: "Nothing yet."; color
 .path[aria-checked="true"] .path-ico { background: var(--accent); color: var(--accent-ink); }
 .path-ico svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .path-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.path-name { font-weight: 700; font-size: 1.02rem; }
+.path-name { font-weight: 700; font-size: 1.02rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.path-name .pill { font-size: .72rem; }
 .path-sub { font-size: .88rem; color: var(--muted); }
 /* once chosen, the paths shrink to a switch above the steps */
 .paths.chosen .paths-head { font-size: .95rem; color: var(--muted); font-weight: 600; }

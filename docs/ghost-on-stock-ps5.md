@@ -2,8 +2,8 @@
 
 This guide runs a CUSA11456 v2.18 backup inside *Star Wars Racer Revenge* through
 Luac0re on a PS5 with no jailbreak and no payloads.
-The game files go into SWRR's own save containers over the network.
-After that the console needs nothing but SWRR.
+The game files go on a USB drive plugged into the PS5 (recommended: no install, faster loads),
+or into SWRR's own save containers over the network.
 
 ## What you need
 
@@ -11,12 +11,12 @@ After that the console needs nothing but SWRR.
 - **The game.** *Star Wars Racer Revenge*, USA (**CUSA03474**) or Europe (**CUSA03492**).
   - ghostldr uses fixed offsets in SWRR's 01.02 executable (the save-data import slot, the video handle, a bootstrap gadget). US and EU run the same executable, so the offsets hold for both.
   - Each region keeps its own saved data. Install the game data from the SWRR you will play in; an install made in one region doesn't appear in the other.
-- **A USB drive.** exFAT or FAT32.
-- **A computer on the same network.** The install moves 53 GiB over LAN. It needs:
+- **A USB drive, exFAT.** It carries the Luac0re save import, and the game itself (about 70 GB free) on the recommended way.
+- **A computer on the same network.** It needs:
   - this repo, Python 3.11+ and LLVM 18 (run.py builds the core; see [Building from source](../README.md#building-from-source));
   - the dependencies from `tools/fetch_deps.sh`;
   - your own extracted Ghost files at `build/ghost/app0` (eboot.bin, sce_module/, cache/, movies/ ...).
-- **About 60 GB free** on the PS5.
+- **About 60 GB free** on the PS5, only to install the game into SWRR's saved data instead of using the drive (that moves 53 GiB over the LAN).
 
 ## 1. Trigger Luac0re
 
@@ -46,7 +46,19 @@ export PS_HOST=192.168.1.123
 
 `PS_HOST_ID` follows the console when DHCP moves it. The older names `PS5_HOST_ID` and `PS5_HOST` still work.
 
-## 3. Install the game data
+## 3. Put the game on the PS5
+
+### On a USB drive (recommended)
+
+Plug the drive into the computer (here `/Volumes/MYDRIVE`) and copy the dump onto it:
+
+```bash
+python3 ghostldr/host/gfs_pack.py --usb /Volumes/MYDRIVE
+```
+
+It copies `build/ghost/app0` to `ghostldr/CUSA11456/app0` on the drive as it is, with a `prefix` file (`GHOST`, so Ghost's progress is `GHOSTSAVE` as with an install) and the selector's `meta.bin`. Nothing is packed: copying the folder by hand works too ([usb.md](usb.md#putting-titles-on-a-drive)). Then plug the drive into the PS5. More games go next to it with `--src`; `usb_drive.py list` shows what a drive holds. With a game running, the PS5's FTP server takes copies onto the drive in it ([ftp.md](ftp.md)).
+
+### Or install it into SWRR's saved data
 
 With Luac0re's loader listening (step 1):
 
@@ -67,7 +79,7 @@ python3 ghostldr/host/gfs_install.py
 - **Speed:** about 25 MB/s, the rate the PS5 writes save data at (Ghost takes about 40 minutes). A link slower than that (busy Wi-Fi) sets the pace instead. `--no-pump` falls back to the older, slower path (about 14 MB/s).
 - **Storage:** the containers belong to the SWRR region you installed from, for the signed-in user. They appear in the PS5's saved-data list as SWRR saves (about 56 GB). Deleting them there removes the install.
 
-### More titles
+#### More installed titles
 
 Titles are installed side by side; installing one never deletes another. Pack the other dump, then install it the same way:
 
@@ -88,7 +100,13 @@ python3 ghostldr/host/gfs_install.py --title CUSA12345
 
 ## 4. Boot Ghost
 
-With Luac0re's loader listening (a fresh SWRR start after every Ghost session):
+With Luac0re's loader listening (a fresh SWRR start after every Ghost session), from the USB drive:
+
+```bash
+python3 ghostldr/host/run.py boot --app-root usb:/ghostldr --snap
+```
+
+or, installed into the saved data:
 
 ```bash
 python3 ghostldr/host/run.py boot --app-root ghostfs --snap
@@ -97,7 +115,7 @@ python3 ghostldr/host/run.py boot --app-root ghostfs --snap
 From a release zip (prebuilt core, no LLVM), add `--no-build`.
 
 - **Extension:** run.py serves `build/ghostldr/ext.bin` (the NID table and extra HLE code) on TCP 18195, and the core fetches it before touching the title. Without it, the boot stops there with `ext: ...` in the log. See [ghostldr/native/ext/README.md](../ghostldr/native/ext/README.md).
-- **Several titles installed:** add `--title CUSA11456`. Without it the only installed title boots; with several, the log lists them and the boot stops.
+- **Several titles:** add `--title CUSA11456`. Without it the only title boots; with several, the game selector shows them on the TV.
 - **Logging:** the core logs to `build/ghostldr/run.log` (UDP 18194 to this computer). Expect `ghostfs: CUSA11456, 40116 entries ...`, `profile: CUSA11456 own profile ...`, then `ghostfs: mounted GHOST000 ...` and the boot progress.
 - **Load times:** the first load reads several GiB from the containers, so the title screen and the first world load take longer than from an internal drive.
 - **Saves:** Ghost's saves go into a separate container, **GHOSTSAVE**, which is created on the first save. SWRR's own save is never touched.

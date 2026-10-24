@@ -2,6 +2,8 @@
 
 ghostldr can boot titles from a folder on a USB drive instead of installing them into SWRR's save containers ([ghostfs-catalogue.md](ghostfs-catalogue.md)). It needs no jailbreak: the PS5's own USB storage service mounts the drive into SWRR's sandbox, and the title's files are read from there as plain files.
 
+**This is the recommended way to run games.** There's no install step and no packing: a game is its dump's `app0` folder copied onto the drive. Games load faster than installed ones, and SWRR's saved data only holds their progress. Install into the saved data instead when you have no spare drive, or in Jak X, where drives are untested.
+
 Tested on a stock PS5 at firmware 13.60 with SWRR (US), with no jailbreak: Ghost of Tsushima and Bloodborne boot from a drive into gameplay, started directly and through the game selector, and PS4-Xplorer reaches its menus. Both games load faster from the drive than from an install ([Measured](#booting-titles-from-the-drive)). Missing or empty folders stop the boot cleanly.
 
 ## The drive
@@ -66,7 +68,7 @@ Through it, PS4-Xplorer's 79 files went on in 4 s, and large files at 25 MiB/s o
   - It copies `app0` without macOS metadata, then writes `prefix`, and `meta.bin` when there's a name or art to show.
   - On a mounted drive it refuses files of 4 GiB or more on FAT32 and checks the free space first. Over FTP neither is known, so it can't check them.
 - Running it again resumes or updates the copy. Files already there with the same size are kept (on a mounted drive, also only when not older), changed ones are copied again, and files the dump no longer has are removed. On a mounted drive each file is written under a `.part` name and renamed when complete. Over FTP files are written in place, because a rename costs the console's exFAT about a quarter of a small file's time. A file cut short is shorter, so the next run copies it again.
-- Copying by hand works too, as long as the layout matches. The `prefix` file is optional.
+- **Copying by hand works too:** copy the dump's `app0` folder to `<drive>/ghostldr/<TITLE>/app0`, with the folder named after the title ID. Nothing is packed or converted. `prefix` and `meta.bin` are optional. Without `prefix` the title's progress goes to `G` plus its ID's digits (`G12345SAVE`), not to its profile's prefix, so for Ghost write a one-line `prefix` file saying `GHOST` to keep using `GHOSTSAVE` (`gfs_pack.py --usb` writes it). Without `meta.bin` the selector shows the profile's name, or the title ID, on a drawn tile.
 
 ## Booting
 

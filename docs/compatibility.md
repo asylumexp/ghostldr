@@ -2,8 +2,8 @@
 
 ghostldr loads PS4 titles, games and homebrew alike, inside SWRR. **Ghost of Tsushima (CUSA11456 v2.18) is the most tested title. Bloodborne (CUSA00900 v1.09) also reaches gameplay, and OpenOrbis homebrew runs ([Homebrew](#homebrew)).** Nothing in the loader is tied to Ghost: everything Ghost needs that other titles don't lives in its profile, `ghostldr/data/titles/CUSA11456.json`, and only applies to that build of its executable. Another title will boot as far as its imports and memory needs allow. This page is the loop for finding out how far that is and for closing the gaps.
 
-1. [Pack](#1-pack) the dump, with or without an open-order file.
-2. [Install](#2-install) it next to whatever is installed already.
+1. Put the dump on a [USB drive](#on-a-usb-drive-recommended) (recommended), or [pack](#1-pack) it, with or without an open-order file,
+2. and [install](#2-install) it next to whatever is installed already.
 3. [Boot](#3-boot) it and [read the log](#4-read-the-log).
 4. [Write a profile](#5-write-a-profile): memory, save size, app parameters, [HLE rules](#6-hle-rules) for single imports.
 5. Write C for what rules can't express, in the [runtime extension](#7-c-level-hle).
@@ -11,9 +11,21 @@ ghostldr loads PS4 titles, games and homebrew alike, inside SWRR. **Ghost of Tsu
 
 Homebrew built with the OpenOrbis toolchain has its own section: [Homebrew](#homebrew).
 
-## 1. Pack
+## On a USB drive (recommended)
 
-(To boot titles from a USB drive instead of installing them, see [usb.md](usb.md): `gfs_pack.py --usb` copies a dump onto a drive.)
+A USB drive is the quicker loop for trying a title: nothing is packed or installed, and copying again after a change only sends what changed.
+
+```bash
+python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0 --usb /Volumes/MYDRIVE
+```
+
+```bash
+python3 ghostldr/host/run.py boot --app-root usb:/ghostldr --title CUSA12345 --snap
+```
+
+It also runs the executable-memory check below. Copying the `app0` folder to `<drive>/ghostldr/CUSA12345/app0` by hand works too ([usb.md](usb.md)). Profiles, HLE rules and the log work the same way; only the open order (step 8) is for installed titles. Steps 1 and 2 are the saved-data way.
+
+## 1. Pack
 
 ```bash
 python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0
@@ -42,6 +54,8 @@ python3 ghostldr/host/gfs_install.py --title CUSA12345
 ```bash
 python3 ghostldr/host/run.py boot --app-root ghostfs --title CUSA12345 --snap
 ```
+
+(`--app-root usb:/ghostldr` for a title on a USB drive.)
 
 - `--title` picks among the installed titles; without it the only installed one boots, or the core logs the list and stops.
 - run.py sends every profile it knows with the core; the core uses the title's, or the generic default.

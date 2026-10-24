@@ -2,8 +2,8 @@
 
 A desktop app for everything in [using-the-release.md](../docs/using-the-release.md), without a terminal. It is a wizard with a status and one main button per step, along one of two paths you choose at the top:
 
-- **Saved data:** **Console → Game → Install → Play**. Each game is installed into SWRR's saved data on the PS5 ([ghostfs-catalogue.md](../docs/ghostfs-catalogue.md)).
-- **USB drive:** **Console → Game → USB drive → Play**. The game is copied to an exFAT USB drive, which the PS5 reads it from ([usb.md](../docs/usb.md)). The drive can be plugged into this computer, or into the PS5 while a game started by ghostldr runs, through its FTP server ([ftp.md](../docs/ftp.md)).
+- **USB drive (recommended):** **Console → Game → USB drive → Play**. The game is copied to an exFAT USB drive, which the PS5 reads it from: no install step, and games load faster ([usb.md](../docs/usb.md)). The drive can be plugged into this computer, or into the PS5 while a game started by ghostldr runs, through its FTP server ([ftp.md](../docs/ftp.md)).
+- **Saved data:** **Console → Game → Install → Play**. Each game is installed into SWRR's saved data on the PS5, with no drive ([ghostfs-catalogue.md](../docs/ghostfs-catalogue.md)).
 
 The app remembers the path, and you can switch any time. Besides the wizard there is:
 

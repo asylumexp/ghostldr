@@ -2,7 +2,7 @@
 
 ghostldr runs PS4 game dumps and OpenOrbis homebrew inside *Star Wars Racer Revenge* (SWRR) on a stock PS5. It uses [Luac0re](https://github.com/Gezine/Luac0re)'s userland JIT exploit: no kernel exploit, no jailbreak.
 
-You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your own game dump, and a computer with Python 3.11+. No game files are included.
+You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your own game dump, an exFAT USB drive (recommended; installing into SWRR's saved data needs none), and a computer with Python 3.11+. No game files are included.
 
 [![Ghost of Tsushima running inside SWRR on a stock PS5 (click for the full video)](docs/media/ghostldr-demo-preview.gif)](docs/media/ghostldr-demo.mp4?raw=true)
 
@@ -10,10 +10,11 @@ You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your o
 
 ## What works
 
+- **Games run from a USB drive** plugged into the PS5: no install step, and they load faster than installed ones ([docs/usb.md](docs/usb.md)). This is the recommended way. Games can also be installed into SWRR's saved data instead, with no drive.
 - **Ghost of Tsushima v2.18** (CUSA11456) plays. It is the most tested title.
 - **Bloodborne 1.09** (CUSA00900) reaches gameplay, with its large executable spread over several JIT buffers and no memory plan yet.
 - **OpenOrbis homebrew** runs ([details](docs/compatibility.md#homebrew)).
-- **Titles on a USB drive** boot without installing, and load faster than installed ones ([docs/usb.md](docs/usb.md)). While a title runs, an FTP server on the console puts more onto the drive ([docs/ftp.md](docs/ftp.md)).
+- **An FTP server on the PS5** while a game runs, to put more games onto the drive in it ([docs/ftp.md](docs/ftp.md)).
 - **Other games** boot as far as their imports and memory allow.
 - **PS4 consoles** are experimental: no title has booted on one yet ([docs/ps4.md](docs/ps4.md)).
 - **Jak X instead of SWRR** (EU CUSA07992 1.04, with [UltraC0re](https://github.com/matem6/UltraC0re)) is experimental: Ghost plays there, in its PS4 Pro mode, from its own install in Jak X's save data ([docs/jakx.md](docs/jakx.md)).
@@ -22,7 +23,7 @@ You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your o
 
 Download the [latest release](https://github.com/asylumexp/ghostldr/releases/latest) and follow [docs/using-the-release.md](docs/using-the-release.md).
 
-Prefer not to use a terminal? The [desktop app](app/README.md) walks through the same steps: find the console, check the setup, prepare and install a game, and play. The release page has an installer for macOS, Windows and Linux with Python included, and the release zip has it in `app/` (with Python 3.11+).
+Prefer not to use a terminal? The [desktop app](app/README.md) walks through the same steps: find the console, check the setup, copy a game to a USB drive (or install it into SWRR's saved data), and play. The release page has an installer for macOS, Windows and Linux with Python included, and the release zip has it in `app/` (with Python 3.11+).
 
 Quick start, from the release folder: start Luac0re in SWRR until its loader listens on port 9026, then check the setup.
 
@@ -30,7 +31,19 @@ Quick start, from the release folder: start Luac0re in SWRR until its loader lis
 python3 ghostldr/host/run.py doctor
 ```
 
-Pack and install your dump, once per title. Install from the SWRR region you will play in: US and EU keep separate saved data.
+Copy your dump to an exFAT USB drive plugged into the computer (here mounted at `/Volumes/MYDRIVE`):
+
+```bash
+python3 ghostldr/host/gfs_pack.py --src /path/to/app0 --usb /Volumes/MYDRIVE
+```
+
+Plug the drive into the PS5, restart SWRR, start Luac0re again, and boot:
+
+```bash
+python3 ghostldr/host/run.py boot --app-root usb:/ghostldr --no-build
+```
+
+No drive? Install the game into SWRR's saved data instead, once per title (about 40 minutes for Ghost), from the SWRR region you will play in:
 
 ```bash
 python3 ghostldr/host/gfs_pack.py --src /path/to/app0
@@ -40,21 +53,17 @@ python3 ghostldr/host/gfs_pack.py --src /path/to/app0
 python3 ghostldr/host/gfs_install.py
 ```
 
-Restart SWRR, start Luac0re again, and boot:
-
-```bash
-python3 ghostldr/host/run.py boot --no-build
-```
+Then restart SWRR, start Luac0re again, and boot with `python3 ghostldr/host/run.py boot --no-build`.
 
 The computer's firewall must let Python receive on UDP 18194 and TCP 18195–18196.
 
 ## Documentation
 
 - [Using the release](docs/using-the-release.md): download to gameplay, step by step.
+- [USB drives](docs/usb.md): games on a USB drive, the recommended way.
 - [Ghost on a stock PS5](docs/ghost-on-stock-ps5.md): the same from source, with more troubleshooting.
 - [Compatibility](docs/compatibility.md): other games, homebrew, profiles, reading the log.
-- [Game selector](docs/selector.md): the picker for several installed titles.
-- [USB drives](docs/usb.md): booting titles from a USB drive.
+- [Game selector](docs/selector.md): the picker for several games, on a drive or installed.
 - [FTP server](docs/ftp.md): the console's files over FTP while a title runs.
 - [Web manager](docs/manager.md): save backup and restore from a browser.
 - [Host tooling](docs/host-tooling.md): `run.py doctor`, the boot preflight, the stub report.

@@ -374,6 +374,7 @@ class ServiceJobTest(TempDirs):
 
     def wait(self, job):
         self.assertTrue(wait_for(lambda: not job.running))
+        self.assertTrue(self.service.jobs.idle.wait(10))      # and its finish callbacks (the library, ...) have run
         return job
 
     def test_discovery_remembers_the_console_with_the_loader(self) -> None:

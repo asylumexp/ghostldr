@@ -397,7 +397,9 @@
   }
 
   // ---------- the two paths: saved data or a USB drive ----------
-  const mode = () => (S && S.settings.mode) || "saves";
+  // until a path is chosen: the recommended USB drive, unless games were already prepared or installed
+  const mode = () => (S && S.settings.mode) ||
+    (S && (S.packed.length || (S.library && S.library.entries.length)) ? "saves" : "usb");
   const usbMode = () => mode() === "usb";
   const STEP_ORDER = { saves: ["console", "game", "install", "play"], usb: ["console", "game", "usb", "play"] };
   const thirdStep = () => (usbMode() ? "usb" : "install");
