@@ -24,7 +24,10 @@
  *     application (the 2.5 GiB of the sixth report): the budget calls, the
  *     per-type limits sceKernelGetResourceLimit returns, and the game direct
  *     memory limit sysctl (sceKernelSetGameDirectMemoryLimit's), with one
- *     try each to raise the budget and the sysctl, put back at once.
+ *     try each to raise the budget and the sysctl, put back at once;
+ *  8. on a PS4 only, after 2: the compiler process's direct and flexible
+ *     memory, what the kernel hands out there and here, and the
+ *     locked-memory budget sysctls.
  */
 #include "ghost.h"
 
@@ -232,6 +235,7 @@ struct bsigaction {
 #define SIGSYS 12
 
 COLD static void diag_budget_calls(void);
+COLD static const u8 *lk_text(u64 *size);
 COLD static void diag_resource_limits(void);
 COLD static void diag_dmem_limit(void);
 
@@ -251,29 +255,45 @@ COLD static void diag_budget(void)
     diag_budget_calls();
     diag_resource_limits();
     diag_dmem_limit();
+    /* this process's direct memory container: sys_dmem_container(-1) (586) */
+    u64 tsize = 0;
+    const u8 *text = lk_text(&tsize);
+    sysfn m586 = text ? lk_stub(text, tsize, 586) : NULL;
+    if (m586) {
+        s64 id = m586((u64)-1, 0, 0, 0, 0, 0);
+        logf("diag: budget: dmem_container(-1) -> %ld (errno %d)", id, id < 0 ? *K.errno_fn() : 0);
+    }
     sigaction(SIGSYS, &old, NULL);
 }
 
-COLD static void diag_budget_calls(void)
+/* this process's libkernel text (readable on a PS4) */
+COLD static const u8 *lk_text(u64 *size)
 {
     struct sce_module_info lkm;
     memset(&lkm, 0, sizeof(lkm));
     lkm.size = sizeof(lkm);
     u32 seg = 0;
-    if (K.module_info((u32)g_ctx->libkernel_handle, &lkm) != 0) {
-        logf("diag: budget: no module info for libkernel");
-        return;
-    }
+    if (K.module_info((u32)g_ctx->libkernel_handle, &lkm) != 0)
+        return NULL;
     while (seg < lkm.nsegs && seg < 4 && !(lkm.segs[seg].prot & PROT_EXEC))
         seg++;
-    if (seg >= lkm.nsegs || seg >= 4) {
+    if (seg >= lkm.nsegs || seg >= 4)
+        return NULL;
+    *size = lkm.segs[seg].size;
+    return (const u8 *)lkm.segs[seg].base;
+}
+
+COLD static void diag_budget_calls(void)
+{
+    u64 tsize = 0;
+    const u8 *text = lk_text(&tsize);
+    if (!text) {
         logf("diag: budget: libkernel's text not found");
         return;
     }
-    const u8 *text = (const u8 *)lkm.segs[seg].base;
     sysfn f[ARRAY_SIZE(k_budget_sys)];
     for (u32 i = 0; i < ARRAY_SIZE(k_budget_sys); i++) {
-        f[i] = lk_stub(text, lkm.segs[seg].size, k_budget_sys[i].nr);
+        f[i] = lk_stub(text, tsize, k_budget_sys[i].nr);
         logf("diag: budget: %s (%u): libkernel stub %lx%s", k_budget_sys[i].name, k_budget_sys[i].nr, (u64)f[i],
              f[i] ? "" : " (none: not called)");
     }
@@ -531,6 +551,105 @@ COLD static void diag_headers(void)
     }
 }
 
+/* ---- 9. PS4: the compiler process's memory ----
+ * SWRR's budget on a 12.02 PS4 is 2560 MiB, exactly 4608 - 2048, and the
+ * compiler process joins the same budget (SceSysCore, the seventh report).
+ * If it holds the other 2 GiB, possibly in another direct memory container
+ * this process can't see, that is the cut.  Its libkernel is this one's at
+ * another base: the delta comes from the stubs both have, and libkernel
+ * functions are called there by jit_call with their outputs in the shared
+ * scratch.  Read-only, except direct memory taken there in pieces and
+ * released at once, as here. */
+COLD static void diag_compiler_memory(void)
+{
+    u64 tsize = 0;
+    const u8 *text = lk_text(&tsize);
+    sysfn m20 = text ? lk_stub(text, tsize, 20) : NULL, m232 = text ? lk_stub(text, tsize, 232) : NULL;
+    u64 c20 = jit_sys_stub(20), c232 = jit_sys_stub(232);
+    if (!m20 || !m232 || !c20 || !c232) {
+        logf("diag: compiler memory: no stubs to place its libkernel (here %lx %lx, there %lx %lx)", (u64)m20,
+             (u64)m232, c20, c232);
+        return;
+    }
+    u64 delta = c232 - (u64)m232;
+    logf("diag: compiler memory: libkernel there = here + %lx (getpid's stubs give %lx)", delta, c20 - (u64)m20);
+    if (c20 - (u64)m20 != delta) {
+        logf("diag: compiler memory: the stubs disagree: nothing called there");
+        return;
+    }
+#define THERE(name) ((u64)lk(name) ? (u64)lk(name) + delta : 0)
+    u64 out = g_ctx->oob_scratch + 0x71000; /* compiler-visible scratch, past jitrpc.c's */
+    u64 f_size = THERE("sceKernelGetDirectMemorySize"), f_avail = THERE("sceKernelAvailableDirectMemorySize");
+    u64 f_query = THERE("sceKernelDirectMemoryQuery"), f_alloc = THERE("sceKernelAllocateDirectMemory");
+    u64 f_rel = THERE("sceKernelReleaseDirectMemory"), f_flex = THERE("sceKernelAvailableFlexibleMemorySize");
+    u64 f_cflex = THERE("sceKernelConfiguredFlexibleMemorySize");
+#undef THERE
+    u64 size = f_size ? jit_call(f_size, 0, 0, 0, 0, 0, 0, 0) : 0;
+    logf("diag: compiler memory: direct memory size there %lu MiB", size >> 20);
+    if (!size || size > 0x200000000) {
+        logf("diag: compiler memory: implausible size: nothing more called there");
+        return;
+    }
+    memset((void *)out, 0, 0x100);
+    u32 rc = f_avail ? (u32)jit_call(f_avail, 0, 0, size, 0x4000, out, out + 8, 0) : ~0u;
+    logf("diag: compiler memory: largest free block there %lu MiB at %lx (rc %x)", *(u64 *)(out + 8) >> 20,
+         *(u64 *)out, rc);
+    /* its own direct memory allocations, as sceKernelDirectMemoryQuery walks them */
+    u64 total = 0, off = 0;
+    for (u32 i = 0; f_query && i < 64; i++) {
+        memset((void *)out, 0, 0x100);
+        if ((u32)jit_call(f_query, 0, off, 1 /* find next */, out, 24, 0, 0) != 0)
+            break;
+        u64 st = *(u64 *)out, en = *(u64 *)(out + 8);
+        if (en <= st || en <= off)
+            break;
+        logf("diag: compiler memory:   allocated %lx-%lx (%lu MiB) type %d", st, en, (en - st) >> 20,
+             *(s32 *)(out + 16));
+        total += en - st;
+        off = en;
+    }
+    logf("diag: compiler memory: %lu MiB of direct memory allocated there", total >> 20);
+    for (u32 k = 0; k < 2; k++) {
+        u64 fn = k ? f_cflex : f_flex;
+        memset((void *)out, 0, 16);
+        rc = fn ? (u32)jit_call(fn, 0, out, 0, 0, 0, 0, 0) : ~0u;
+        logf("diag: compiler memory: flexible memory %s there %lu MiB (rc %x)", k ? "configured" : "available",
+             *(u64 *)out >> 20, rc);
+    }
+    /* what the kernel hands out there: pieces taken, then all released */
+    struct hole {
+        u64 s, len;
+    } got[32];
+    u32 n = 0;
+    u64 sum = 0;
+    while (f_alloc && f_rel && f_avail && n < ARRAY_SIZE(got)) {
+        memset((void *)out, 0, 0x20);
+        if ((u32)jit_call(f_avail, 0, 0, size, 0x200000, out, out + 8, 0) != 0)
+            break;
+        u64 len = ALIGN_DOWN(*(u64 *)(out + 8), 0x200000);
+        while (len >= 0x200000 && (u32)jit_call(f_alloc, 0, 0, size, len, 0x200000, 0, out + 16) != 0)
+            len = ALIGN_DOWN(len / 2, 0x200000);
+        if (len < 0x200000)
+            break;
+        got[n++] = (struct hole){*(u64 *)(out + 16), len};
+        sum += len;
+    }
+    for (u32 i = 0; i < n; i++)
+        jit_call(f_rel, 0, got[i].s, got[i].len, 0, 0, 0, 0);
+    logf("diag: compiler memory: the kernel hands out %lu MiB more direct memory there; here %lu MiB", sum >> 20,
+         budget_allocatable(0) >> 20);
+    /* the locked-memory budget sysctls games read */
+    int (*sbn)(const char *, void *, size_t *, const void *, size_t) = lk("sysctlbyname");
+    static const char *const names[] = {"vm.budgets.mlock_avail", "vm.budgets.mlock_total"};
+    for (u32 i = 0; sbn && i < ARRAY_SIZE(names); i++) {
+        u64 v = 0;
+        size_t len = sizeof(v);
+        int r = sbn(names[i], &v, &len, NULL, 0);
+        logf("diag: compiler memory: %s = %lx (%lu MiB), %lu bytes: rc %d errno %d", names[i], v, v >> 20, (u64)len,
+             r, r ? *K.errno_fn() : 0);
+    }
+}
+
 COLD int ghost_diag(void)
 {
     logf("diag: start (nothing is booted or released)");
@@ -542,6 +661,8 @@ COLD int ghost_diag(void)
     if (ps4)
         diag_budget();
     diag_jit_views();
+    if (ps4)
+        diag_compiler_memory();
     diag_writes();
     diag_headers();
     logf("diag: done");
