@@ -17,7 +17,7 @@ Use any FTP client in passive mode, the usual default: FileZilla, WinSCP, Cyberd
 `run.py boot` prints the address once the boot is sent:
 
 ```
-FTP: ftp://192.168.1.50:1212/ once the title starts (any user and password)
+FTP: ftp://192.168.1.23:1212/ once the title starts (any user and password)
 ```
 
 The server starts as the title's main thread is created, so it's up shortly after the title begins to load, and it stays up until SWRR closes. The console's log shows it:
@@ -25,7 +25,7 @@ The server starts as the title's main thread is created, so it's up shortly afte
 ```
 ftp: listening socket buffers: send 2048 KiB (had 32), receive 2048 KiB (had 64)
 ftp: listening on TCP 1212 (10 clients at once, 128 KiB each)
-ftp 1: 192.168.1.20 connected; starting in /ghostldr_usb
+ftp 1: 192.168.1.123 connected; starting in /ghostldr_usb
 ftp 1: STOR /ghostldr_usb/ghostldr-ftp-test/d.bin: 67108864 bytes in 2466 ms (26575 KiB/s; the file took 497 ms)
 ```
 
