@@ -27,7 +27,9 @@
 #include "np_async.h"
 
 /* none of this is hot: optimize for size (the extension shares a 48 KiB area) */
+#if defined(__clang__)
 #pragma clang attribute push(__attribute__((minsize)), apply_to = function)
+#endif
 
 #define E(x) ((s32)(x))
 /* libSceNpManager */
@@ -1388,4 +1390,6 @@ static const struct ext_lib k_libs[] = {
 
 EXT_FAMILY_LIBS("np", k_hle, k_libs, NULL);
 
+#if defined(__clang__)
 #pragma clang attribute pop
+#endif

@@ -290,7 +290,7 @@ static void test_webapi(void)
     check_eq(NP(WA, "sceNpWebApiDeleteExtdPushEventFilter", lib, f), 0, "DeleteExtdPushEventFilter");
     check_eq(NP(WA, "sceNpWebApiDeleteExtdPushEventFilter", lib, f), (s32)0x8055291C, "deleted extended filter");
     u64 stats[4] = {9, 9, 9, 9};
-    NP(WA, "sceNpWebApiGetMemoryPoolStats", lib, P(stats));
+    (void)NP(WA, "sceNpWebApiGetMemoryPoolStats", lib, P(stats));
     check(stats[0] == 0x20000 && stats[1] == 0, "WebApi pool stats");
     u8 npid[0x24] = {0};
     check(NP(WA, "sceNpWebApiUtilityParseNpId", P("{}"), P(npid)) == 0 && npid[0] == 'G',
@@ -542,7 +542,7 @@ static void test_others(void)
         ok &= NP(UDS, "sceNpUniversalDataSystemCreateEvent", P("activityEnd"), 0, P(&evs[i])) == 0 && evs[i];
     check(ok && evs[0] != evs[1] && evs[68] == evs[69], "an empty pool still answers (one spare block)");
     for (int i = 0; i < 70; i++)
-        NP(UDS, "sceNpUniversalDataSystemDestroyEvent", P(evs[i]));
+        (void)NP(UDS, "sceNpUniversalDataSystemDestroyEvent", P(evs[i]));
     check(NP(UDS, "sceNpUniversalDataSystemCreateEvent", P("x"), 0, P(&ev)) == 0 && ev && ev != evs[69],
           "blocks return to the pool");
 
@@ -558,7 +558,7 @@ static void test_others(void)
     check(info[0x4140] == 0x5A && info[0x414F] == 0x5A, "nothing past the struct");
     *(u64 *)info = 0x100000; /* a bogus size never writes past 0x4140 */
     memset(info + 0x4140, 0x5A, 16);
-    NP(GI, "sceNpGameIntentReceiveIntent", P(info));
+    (void)NP(GI, "sceNpGameIntentReceiveIntent", P(info));
     check(info[0x4140] == 0x5A, "a bogus size is clamped");
     char val[0x25];
     memset(val, 'x', sizeof(val));

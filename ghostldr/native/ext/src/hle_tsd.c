@@ -153,13 +153,15 @@ static void thread_exit_hook(void)
 static s64 hle_set_thread_dtors(void (*fn)(void))
 {
     g_title_dtors = fn;
-    g_thread_dtors = thread_exit_hook;
+    if (G->thread_dtors) /* a host without the core's slot (test harnesses) has nowhere to publish it */
+        g_thread_dtors = thread_exit_hook;
     return 0;
 }
 
 static int tsd_init(void)
 {
-    g_thread_dtors = thread_exit_hook;
+    if (G->thread_dtors)
+        g_thread_dtors = thread_exit_hook;
     return 0;
 }
 

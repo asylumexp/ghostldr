@@ -23,7 +23,7 @@
  */
 #include "ghost.h"
 
-#define COLD __attribute__((minsize, cold))
+#define COLD GHOST_COLD
 #define MAX_MAP 512
 
 void host_dmem_census(void);

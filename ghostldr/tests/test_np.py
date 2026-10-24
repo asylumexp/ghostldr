@@ -131,7 +131,7 @@ class NpFamiliesOnHost(unittest.TestCase):
         out = self.run_np("ghost")
         self.assertIn("trophy: title CUSA11456, 77 trophies", out)
         self.assertIn("trophy 5 unlocked locally", out)
-        self.assertIn("kept in memory only", out)  # until the savedata family's title store is merged
+        self.assertIn("np_host: ok the record is 1072 bytes", out)  # the savedata family's title store is merged: records persist
 
     def test_trophy_title_from_the_np_title_id(self) -> None:
         out = self.run_np("npid")  # Ghost's dump has no param.sfo

@@ -26,6 +26,13 @@ typedef _Bool bool;
 
 #define HIDDEN __attribute__((visibility("hidden")))
 #define NOINLINE __attribute__((noinline))
+/* for boot-time code where small beats fast: minsize is clang-only, so
+ * other compilers keep just the cold half */
+#if defined(__clang__)
+#define GHOST_COLD __attribute__((minsize, cold))
+#else
+#define GHOST_COLD __attribute__((cold))
+#endif
 #define ALIGN_UP(x, a) (((x) + ((a) - 1)) & ~((u64)(a) - 1))
 #define ALIGN_DOWN(x, a) ((x) & ~((u64)(a) - 1))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))

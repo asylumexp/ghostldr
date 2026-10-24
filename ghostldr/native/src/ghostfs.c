@@ -42,7 +42,7 @@ void *host_real_in(const char *modname, const char *name);
 #define E_INVAL ((s32)0x80020016)
 #define E_ROFS ((s32)0x8002001e)
 #define E_NOMEM ((s32)0x8002000c)
-#define COLD __attribute__((minsize, cold)) /* boot-time code: small beats fast */
+#define COLD GHOST_COLD /* boot-time code: small beats fast */
 
 /* gfs_pack.py: version 2 has a 128-byte header (title, layout id, flags);
  * version 1 (GHOSTIDX until 2026-10-21) stops at prefix, 64 bytes */

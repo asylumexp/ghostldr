@@ -23,7 +23,7 @@
 _Static_assert(sizeof(struct boot_ctx) <= PROFILE_SLOT * 8, "boot_ctx grew into the profile slot");
 
 #define MAX_RULES 32
-#define COLD __attribute__((minsize, cold)) /* boot-time code: small beats fast */
+#define COLD GHOST_COLD /* boot-time code: small beats fast */
 
 u64 stub_alloc_code(const u8 *code, u32 len);
 u64 budget_resolve(const char *nid);

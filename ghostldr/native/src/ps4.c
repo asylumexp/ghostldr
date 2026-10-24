@@ -5,7 +5,7 @@
  */
 #include "ghost.h"
 
-#define COLD __attribute__((minsize, cold))
+#define COLD GHOST_COLD
 
 /* Bytes of the code region that boot.c fills through the compiler, from the
  * region's 64 KiB-aligned start: each prx image at 64 KiB alignment

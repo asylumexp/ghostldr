@@ -8,7 +8,9 @@
 #include "title_store.h"
 
 /* none of this is hot: optimize for size (the extension shares a 48 KiB area) */
+#if defined(__clang__)
 #pragma clang attribute push(__attribute__((minsize)), apply_to = function)
+#endif
 
 #define MEM_RECORDS 8
 
@@ -70,4 +72,6 @@ __attribute__((weak)) s32 title_store_write(const char *name, const void *buf, u
     return rc;
 }
 
+#if defined(__clang__)
 #pragma clang attribute pop
+#endif

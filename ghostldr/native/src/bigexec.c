@@ -39,7 +39,7 @@
  */
 #include "bxplan.h"
 
-#define COLD __attribute__((minsize, cold))
+#define COLD GHOST_COLD
 #define MiB (1UL << 20)
 #define SYS_close 6
 #define BX_HINT 0x2000000000UL /* where the module's range is reserved (a hint) */
