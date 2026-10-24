@@ -45,7 +45,7 @@ class NpOnlineFamilies(unittest.TestCase):
                  f"-I{NATIVE / 'include'}", f"-DGHOST_ABI={abi}u"]
         objs = []
         core = NATIVE / "src"
-        sources = [(core / f"{name}.c", flags) for name in ("ext", "resolve", "elf", "nid")]
+        sources = [(core / f"{name}.c", flags) for name in ("ext", "sha256", "resolve", "elf", "nid")]
         sources += [(HERE / "ext_host/np_online.c", flags), (HERE / "ext_host/sys.c", ["-O1"]),
                     (HERE / "ext_host/np_online_sys.c", ["-O1"])]
         for src, extra in sources:

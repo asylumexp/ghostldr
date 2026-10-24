@@ -160,7 +160,7 @@ class OnHost(unittest.TestCase):
                  f"-DGHOST_ABI={abi}u"]
         core = ROOT / "ghostldr/native/src"
         objs = []
-        for src, extra in [(core / "ext.c", flags), (core / "nid.c", flags), (here / "ext_host/fam_host.c", flags),
+        for src, extra in [(core / "ext.c", flags), (core / "sha256.c", flags), (core / "nid.c", flags), (here / "ext_host/fam_host.c", flags),
                            (here / "ext_host/sys.c", ["-O1"])]:
             obj = Path(cls.tmp.name) / (src.stem + ".o")
             subprocess.run(cc + extra + ["-c", str(src), "-o", str(obj)], check=True)

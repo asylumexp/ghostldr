@@ -37,6 +37,7 @@ build/ghostldr/preflight.md.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -138,6 +139,7 @@ def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int],
         f"GHOSTLDR_EXT_PORT = {EXT_PORT}",
         f"GHOSTLDR_EXT_SIZE = {len(ext)}",
         f"GHOSTLDR_EXT_CRC = {zlib.crc32(ext):#x}",
+        f'GHOSTLDR_EXT_SHA256 = "{hashlib.sha256(ext).hexdigest()}"',
         f"GHOSTLDR_SEL_PORT = {SEL_PORT}",
         f"GHOSTLDR_SEL_SIZE = {len(sel)}",
         f"GHOSTLDR_SEL_CRC = {zlib.crc32(sel):#x}",

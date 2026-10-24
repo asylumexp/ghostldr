@@ -67,7 +67,7 @@ class NpFamiliesOnHost(unittest.TestCase):
                  f"-I{ROOT / 'ghostldr/native/include'}", f"-DGHOST_ABI={abi}u"]
         core = ROOT / "ghostldr/native/src"
         # env.c loads the extension as in test_ext.py; np_host.c has the main and the API table
-        sources = [(core / f"{name}.c", flags) for name in ("ext", "resolve", "elf", "nid")] + [
+        sources = [(core / f"{name}.c", flags) for name in ("ext", "sha256", "resolve", "elf", "nid")] + [
             (HERE / "ext_host/env.c", flags + ["-Dmain=ext_host_main", "-Dg_ghost_api=ext_host_api"]),
             (HERE / "ext_host/np_host.c", flags),
             (HERE / "ext_host/sys.c", ["-O1"]),

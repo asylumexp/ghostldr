@@ -42,6 +42,9 @@ static u32 g_nid_count;
 static const struct ext_exports *g_exp;
 static u32 g_ext_hits;
 
+/* src/sha256.c: SHA-256 (FIPS 180-4) for the extension pin below. */
+void sha256(const u8 *data, u64 len, u8 out[32]);
+
 static u32 crc32(const u8 *p, u64 n)
 {
     u32 table[256];
@@ -261,12 +264,33 @@ int ext_fetch(void)
         ext_release();
         return -1;
     }
+    /* SHA-256 pin: CRC-32 is a checksum, not a fingerprint - a swapped
+     * or patched blob passes it with the right four bytes appended.
+     * run.py pins the blob it built by writing the digest's first
+     * 24 bytes into the boot context (GHOSTLDR_EXT_SHA256); a context
+     * too small to carry them, or all zero bytes, is an older launcher
+     * and skips the check. */
+    int sha_pinned = 0;
+    if (c->size >= __builtin_offsetof(struct boot_ctx, ext_sha256) + sizeof(c->ext_sha256)) {
+        for (int i = 0; i < (int)sizeof(c->ext_sha256); i++)
+            sha_pinned |= c->ext_sha256[i];
+        sha_pinned = sha_pinned != 0;
+    }
+    if (sha_pinned) {
+        u8 digest[32];
+        sha256(g_blob, size, digest);
+        if (memcmp(digest, c->ext_sha256, sizeof(c->ext_sha256)) != 0) {
+            logf("ext: SHA-256 mismatch: the served blob is not the one this boot pinned");
+            ext_release();
+            return -1;
+        }
+    }
     if (ext_validate() != 0) {
         ext_release();
         return -1;
     }
-    logf("ext: received %lu bytes (CRC %08x) into %s memory: code %x bytes (text %x), %u relocations, %u NIDs",
-         size, crc, g_blob_flex ? "flexible" : "direct", g_hdr->image_memsz, g_hdr->text_size, g_hdr->reloc_count,
+    logf("ext: received %lu bytes (CRC %08x%s) into %s memory: code %x bytes (text %x), %u relocations, %u NIDs",
+         size, crc, sha_pinned ? ", SHA-256 verified" : "", g_blob_flex ? "flexible" : "direct", g_hdr->image_memsz, g_hdr->text_size, g_hdr->reloc_count,
          g_nid_count);
     return 0;
 }

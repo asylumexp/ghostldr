@@ -41,7 +41,7 @@ class DialogsOnHost(unittest.TestCase):
                  f"-I{ROOT / 'ghostldr/native/include'}", f"-DGHOST_ABI={abi}u"]
         core = ROOT / "ghostldr/native/src"
         objs = []
-        for src, extra in [(core / "ext.c", flags), (core / "nid.c", flags), (HERE / "ext_host/dialog.c", flags),
+        for src, extra in [(core / "ext.c", flags), (core / "sha256.c", flags), (core / "nid.c", flags), (HERE / "ext_host/dialog.c", flags),
                            (HERE / "ext_host/sys.c", ["-O1"])]:
             obj = tmp / (src.stem + ".o")
             subprocess.run(cc + extra + ["-c", str(src), "-o", str(obj)], check=True)

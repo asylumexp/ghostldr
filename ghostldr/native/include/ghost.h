@@ -89,6 +89,14 @@ struct boot_ctx {
     /* the console's firmware from Luac0re's FW_VERSION, as 0xMMmm (12.02 ->
      * 0x1202); 0: unknown.  The platform is ctx flag CTX_FLAG_PS4. */
     u64 fw;
+    /* the first 24 bytes of the extension blob's SHA-256, pinned by
+     * run.py through ghostldr.lua (GHOSTLDR_EXT_SHA256): ext.c verifies
+     * the served blob against it after the CRC-32 screen, when the boot
+     * context is large enough to carry it and any byte is nonzero.
+     * 192 bits: a collision or a second preimage is not the threat;
+     * a wrong or swapped blob is.  The bytes end exactly at the
+     * profile slot (PROFILE_SLOT * 8 == 504). */
+    u8 ext_sha256[24];
 };
 
 /* ---- runtime (rt.c) ---- */
