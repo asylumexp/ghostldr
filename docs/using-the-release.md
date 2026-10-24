@@ -40,7 +40,7 @@ You still need everything under What you need, including the firewall rules. [ap
 
 ## 1. Download and unpack
 
-From the release page, download `ghostldr-v0.5.1.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
+From the release page, download `ghostldr-v0.6.0.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
 
 ```bash
 shasum -a 256 --ignore-missing -c SHA256SUMS.txt
@@ -49,11 +49,11 @@ shasum -a 256 --ignore-missing -c SHA256SUMS.txt
 Unpack it and work from inside the folder; every command below runs there:
 
 ```bash
-unzip ghostldr-v0.5.1.zip
+unzip ghostldr-v0.6.0.zip
 ```
 
 ```bash
-cd ghostldr-v0.5.1
+cd ghostldr-v0.6.0
 ```
 
 ## 2. Put the game files in place
@@ -135,6 +135,22 @@ The first boot takes a minute or two. On a new save Ghost goes through brightnes
 `run.py` keeps printing the console's log until you press Ctrl+C; stopping it doesn't stop the game. The session is also written to `build/ghostldr/run.log`. That file is what to look at, or share, if something goes wrong.
 
 **Every later session:** close SWRR, start it again, open HALL OF FAME, and run the same `run.py` command. The install is only needed once per PSN user.
+
+## Or: games on a USB drive (instead of steps 4 and 5)
+
+A game can stay on an exFAT USB drive instead of being installed: copy it there, plug the drive into the PS5 and boot from it. There's no install step, and games load faster ([usb.md](usb.md)). With the dump in place (step 2) and the drive plugged into the computer (here `/Volumes/MYDRIVE`; on Windows a drive letter such as `E:\`):
+
+```bash
+python3 ghostldr/host/gfs_pack.py --usb /Volumes/MYDRIVE
+```
+
+Then plug the drive into the PS5, restart SWRR, open HALL OF FAME and boot:
+
+```bash
+python3 ghostldr/host/run.py boot --app-root usb:/ghostldr --title CUSA11456 --no-build
+```
+
+While a game runs, the PS5 also serves FTP on port 1212 ([ftp.md](ftp.md)), so more games can go onto a drive that's already in the PS5: `--usb ftp://PS5-ADDRESS:1212/ghostldr_usb`. The game's progress goes to SWRR's saved data either way.
 
 ## Names and pictures in the game selector (optional)
 
