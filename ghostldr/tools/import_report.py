@@ -138,10 +138,11 @@ def hle_entries(text: str, tables_only: bool) -> list[tuple[str, str]]:
     return out
 
 
-# budget.c's plan-free memory calls ({"name", fn} in k_mem[]): resolved by NID
-# ahead of everything else when the title has no memory plan (the default)
+# budget.c's memory calls ({"name", fn, every} in k_mem[]): resolved by NID
+# ahead of everything else when the title has no memory plan (the default),
+# and those marked every for planned titles too
 _PLAN_FREE_TABLE = re.compile(r"\bk_mem\s*\[\s*\]\s*=\s*\{(.*?)\n\s*\}\s*;", re.S)
-_PLAN_FREE_ENTRY = re.compile(r'\{\s*"(\w+)"\s*,\s*\w+\s*\}')
+_PLAN_FREE_ENTRY = re.compile(r'\{\s*"(\w+)"\s*,\s*\w+\s*(?:,\s*\w+\s*)?\}')
 
 
 def load_core_hle(native: Path) -> dict[tuple[str, str], str]:

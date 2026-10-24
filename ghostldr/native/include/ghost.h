@@ -356,7 +356,10 @@ int vdm_alloc(u64 start, u64 end, u64 len, u64 align, int type, off_t *out);
 int vdm_map(void **addr, u64 len, int prot, int flags, u64 off, u64 align);
 int vdm_release(u64 off, u64 len);
 int vdm_expand_entry(const void *entry, void *out, int cap);
-int vdm_alloc_lazy(u64 len, int type, off_t *out);
+int vdm_alloc_lazy(u64 len, int type, bool zero, off_t *out); /* zero: each chunk zeroed when committed */
+u64 vdm_lazy_bytes(u64 off);                                 /* committed behind a lazy allocation */
+bool vdm_lazy(u64 off);                                      /* off is a lazy allocation's */
+int vdm_query(u64 off, bool next, u64 *start, u64 *end, int *type); /* 0, or -1: none */
 u32 vdm_lazy_committed_mib(void);
 
 /* ---- ghostfs.c: the title's /app0 in SWRR save containers ---- */
@@ -389,6 +392,18 @@ int vfs_stat(const char *path, void *st);
 int vfs_getdents(int fd, void *buf, int size);
 void vdm_log_lazy(void);
 bool budget_lazy_site(u64 eboot_off);
+bool budget_planned(void); /* a profile's manual memory plan applies (not run.py --auto-memory) */
+/* automatic memory plans for titles without a manual one (automem.c) */
+bool automem_on(void);
+bool automem_lazy(u64 len);
+u64 automem_plan(struct module *m, u8 *text, u64 phys); /* plan time: what the title is told */
+void automem_note_alloc(u64 site, u64 len, int type, bool lazy, u64 off);
+void automem_note_release(u64 off, u64 len);
+bool automem_admit(u64 total, u64 len, u64 told); /* reserve past what the title was told, lazily */
+#define AM_OOM_TOLD 1 /* an allocation refused past what the title was told */
+#define AM_OOM_REAL 2 /* a lazy commit found no direct memory */
+void automem_note_out_of_memory(int kind, u64 short_bytes);
+void automem_start(void); /* the title starts: peaks and the learned plan saved as it runs */
 u64 budget_allocatable(int type); /* PS4: direct memory of a type the kernel hands out now (taken and released) */
 int hle_map_flex(void **addr, size_t len, int prot, int flags); /* flexible memory, backed by direct (hle.c) */
 int budget_flex_unmap(void *addr, size_t len); /* a whole flex-as-direct block back, budget included */
@@ -583,8 +598,13 @@ bool bx_in_view(const struct module *m, u64 addr);                 /* executable
  * 512 keep Remote Play, 1024 start game modules at boot, 2048 show the game selector,
  * 4096 selector: built-in font only (sel_api.h), 8192 the console is a PS4,
  * 16384 PS4 diagnostic (diag.c), 32768 the host is Jak X under UltraC0re,
- * 262144 the app root is a library (65536 and 131072 are free); bits 48-63
- * hold the FTP server's port (CTX_FTP_PORT) */
+ * 262144 the app root is a library, 65536 no automatic memory plan, 131072
+ * the automatic plan even over a manual one, 524288 forget the learned
+ * memory plan (automem.c); bits 48-63 hold the FTP server's port
+ * (CTX_FTP_PORT) */
+#define CTX_FLAG_NO_AUTO_MEM 65536      /* plan-free titles keep the plain budget (run.py --no-auto-memory) */
+#define CTX_FLAG_AUTO_MEM 131072        /* the automatic plan instead of a profile's manual one (run.py --auto-memory) */
+#define CTX_FLAG_AUTO_MEM_FORGET 524288 /* start the learned memory plan over (run.py --forget-memory) */
 #define CTX_FLAG_KEEP_REMOTE_PLAY 512 /* the title's sceRemoteplayProhibit is a no-op (run.py --keep-remote-play) */
 #define CTX_FLAG_BOOT_START_ALL 1024 /* start IsGame modules at boot too (run.py --boot-start-modules) */
 #define CTX_FLAG_SELECT 2048           /* game selector: show it even when the title is known (run.py --select) */

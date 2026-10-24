@@ -92,7 +92,7 @@ void budget_flex_note(s64 len);
  * own data before (homebrew draws over framebuffers it never cleared).
  * Plan-free titles only: a memory plan's lazily backed pools must stay
  * uncommitted, and Ghost runs as measured. */
-static bool zero_new_memory(void) { return !profile_has(PF_PLAN); }
+static bool zero_new_memory(void) { return !budget_planned(); }
 
 /* Flexible memory is scarce inside SWRR: back named/unnamed flexible
  * mappings with direct memory instead, within the title's flex budget
@@ -181,23 +181,26 @@ int hle_alloc_direct(off_t start, off_t end, size_t len, size_t align, int type,
     u64 ra = (u64)__builtin_return_address(0);
     u64 site = g_main_mod ? ra - g_main_mod->base : ra;
     int rc;
-    if (budget_lazy_site(site))
-        rc = vdm_alloc_lazy(len, type, out);
-    else
+    bool lazy = budget_lazy_site(site) || automem_lazy(len); /* committed as it is mapped (vdm.c) */
+    if (lazy && (rc = vdm_alloc_lazy(len, type, zero_new_memory(), out)) != 0)
+        lazy = false;
+    if (!lazy)
         rc = ((int (*)(off_t, off_t, size_t, size_t, int, off_t *))host_real("sceKernelAllocateDirectMemory"))(
             start, end, len, align, type, out);
-    bool planfree = !profile_has(PF_PLAN); /* its offsets are handles: any free memory will do */
+    bool planfree = !budget_planned(); /* its offsets are handles: any free memory will do */
     if (rc != 0 && planfree && (start || (u64)end < real_size))
         rc = ((int (*)(off_t, off_t, size_t, size_t, int, off_t *))host_real("sceKernelAllocateDirectMemory"))(
             0, (off_t)real_size, len, align, type, out);
     if (rc != 0 && len >= 0x200000) /* no single hole is big enough: scatter it (vdm.c) */
         rc = vdm_alloc(planfree ? 0 : (u64)start, planfree ? real_size : (u64)end, len, align, type, out);
-    if (rc == 0 && out && zero_new_memory() && !budget_lazy_site(site))
+    if (rc == 0 && out && zero_new_memory() && !lazy)
         zero_direct(*out, len);
     if (rc == 0)
         budget_alloc_note((s64)len);
-    if (rc == 0 && out)
-        usage_add_alloc((u64)*out, len, type, g_main_mod ? ra - g_main_mod->base : ra);
+    if (rc == 0 && out) {
+        usage_add_alloc((u64)*out, len, type, site);
+        automem_note_alloc(site, len, type, lazy, (u64)*out);
+    }
     logf("AllocateDirectMemory(%lx-%lx, len %lx, align %lx, type %d) -> %x phys %lx from eboot+%lx", (u64)start,
          (u64)end, len, align, type, rc, out ? (u64)*out : 0, g_main_mod ? ra - g_main_mod->base : ra);
     if (rc != 0) { /* refused with a block this large free: the kernel's limit, not the holes (docs/ps4.md) */
@@ -295,12 +298,92 @@ static int hle_batch_map2(const struct batch_entry *e, int n, int *done, int fla
 
 static int hle_release_direct(off_t start, size_t len)
 {
+    automem_note_release((u64)start, len);
     int rc = vdm_is((u64)start) ? vdm_release((u64)start, len)
                                 : ((int (*)(off_t, size_t))host_real("sceKernelReleaseDirectMemory"))(start, len);
     if (rc == 0)
         budget_alloc_note(-(s64)len);
     logf("ReleaseDirectMemory(%lx, %lx) -> %x", (u64)start, len, rc);
     return rc;
+}
+
+/* The other direct-memory calls, for synthetic offsets (vdm.c: lazy or
+ * scattered allocations); anything else goes to the kernel.  Resolved by
+ * NID for every title (budget.c). */
+int hle_map_named_direct(void **addr, size_t len, int prot, int flags, off_t phys, size_t align, const char *name)
+{
+    if (!vdm_is((u64)phys))
+        return ((int (*)(void **, size_t, int, int, off_t, size_t, const char *))host_real(
+            "sceKernelMapNamedDirectMemory"))(addr, len, prot, flags, phys, align, name);
+    void *want = addr ? *addr : NULL;
+    int rc = vdm_map(addr, len, prot, flags, (u64)phys, align);
+    if (rc == 0)
+        usage_add_map((u64)phys, len);
+    logf("MapNamedDirectMemory(%s, want %p, len %lx, prot %x, flags %x, phys %lx) -> %x at %p", name ? name : "",
+         want, len, prot, flags, (u64)phys, rc, addr ? *addr : NULL);
+    return rc;
+}
+
+/* a lazy or scattered allocation keeps the type it was allocated with */
+int hle_map_direct2(void **addr, size_t len, int type, int prot, int flags, off_t phys, size_t align)
+{
+    if (!vdm_is((u64)phys))
+        return ((int (*)(void **, size_t, int, int, int, off_t, size_t))host_real("sceKernelMapDirectMemory2"))(
+            addr, len, type, prot, flags, phys, align);
+    void *want = addr ? *addr : NULL;
+    int rc = vdm_map(addr, len, prot, flags, (u64)phys, align);
+    if (rc == 0)
+        usage_add_map((u64)phys, len);
+    logf("MapDirectMemory2(want %p, len %lx, type %d, prot %x, flags %x, phys %lx) -> %x at %p", want, len, type,
+         prot, flags, (u64)phys, rc, addr ? *addr : NULL);
+    return rc;
+}
+
+int hle_checked_release_direct(off_t start, size_t len)
+{
+    if (!vdm_is((u64)start))
+        return ((int (*)(off_t, size_t))host_real("sceKernelCheckedReleaseDirectMemory"))(start, len);
+    return hle_release_direct(start, len);
+}
+
+struct dmq_info {
+    off_t start, end;
+    int type;
+};
+
+/* the kernel's answer for its own offsets; synthetic ones, and with
+ * find-next the synthetic allocations after the kernel's last one */
+int hle_dmem_query(off_t off, int flags, struct dmq_info *info, size_t size)
+{
+    int rc = vdm_is((u64)off) ? (int)0x80020016
+                              : ((int (*)(off_t, int, struct dmq_info *, size_t))host_real(
+                                    "sceKernelDirectMemoryQuery"))(off, flags, info, size);
+    u64 s, e;
+    int t;
+    if (rc != 0 && info && size >= sizeof(*info) && (vdm_is((u64)off) || (flags & 1)) &&
+        vdm_query((u64)off, flags & 1, &s, &e, &t) == 0) {
+        info->start = (off_t)s, info->end = (off_t)e, info->type = t;
+        rc = 0;
+    }
+    return rc;
+}
+
+int hle_dmem_type(off_t off, int *type, off_t *start, off_t *end)
+{
+    u64 s, e;
+    int t;
+    if (!vdm_is((u64)off))
+        return ((int (*)(off_t, int *, off_t *, off_t *))host_real("sceKernelGetDirectMemoryType"))(off, type, start,
+                                                                                                  end);
+    if (vdm_query((u64)off, false, &s, &e, &t) != 0)
+        return (int)0x80020016;
+    if (type)
+        *type = t;
+    if (start)
+        *start = (off_t)s;
+    if (end)
+        *end = (off_t)e;
+    return 0;
 }
 
 static int hle_mprotect(const void *addr, size_t len, int prot)

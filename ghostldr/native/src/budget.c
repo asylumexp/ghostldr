@@ -60,9 +60,16 @@ COLD static const struct prof_neo *neo_plan(void)
     return host_neo ? profile_record(REC_NEO, 0) : NULL;
 }
 
+/* a profile's manual plan applies, unless run.py --auto-memory asks for the
+ * automatic one (automem.c) */
+bool budget_planned(void)
+{
+    return profile_record(REC_PLAN, 0) && !(g_ctx->flags & CTX_FLAG_AUTO_MEM);
+}
+
 COLD bool budget_lazy_site(u64 eboot_off)
 {
-    const struct prof_plan *p = profile_record(REC_PLAN, 0);
+    const struct prof_plan *p = budget_planned() ? profile_record(REC_PLAN, 0) : NULL;
     for (u32 i = 0; p && i < p->nsites; i++)
         if (p->sites[i] == eboot_off)
             return true;
@@ -242,6 +249,9 @@ COLD static const u64 *image_u64(struct module *m, const u8 *text, u64 addr)
     return (const u64 *)addr;
 }
 
+u64 budget_title_dmem(void) { return g_title_dmem; }
+u64 budget_flex_used(void) { return g_flex_used; }
+
 /* proc param +0x40 -> mem param, +0x10 -> u64 *flexible_memory_size */
 COLD static u64 title_flex(struct module *m, const u8 *text)
 {
@@ -261,7 +271,7 @@ COLD static bool modules_import(const char *prefix)
     return false;
 }
 
-COLD static int plan_free(struct module *m, const u8 *text)
+COLD static int plan_free(struct module *m, u8 *text)
 {
     const struct prof_hdr *h = profile_hdr();
     u64 flex = h->flex_mib ? h->flex_mib * MiB : title_flex(m, text);
@@ -284,6 +294,8 @@ COLD static int plan_free(struct module *m, const u8 *text)
         return -1;
     }
     g_reported_dmem = (u64)d * MiB;
+    if (!(g_ctx->flags & CTX_FLAG_NO_AUTO_MEM))
+        g_reported_dmem = automem_plan(m, (u8 *)text, g_reported_dmem);
     g_flex_cap = flex;
     g_planfree = true;
     return 0;
@@ -291,9 +303,8 @@ COLD static int plan_free(struct module *m, const u8 *text)
 
 COLD int budget_patch_text(struct module *m, u8 *text)
 {
-    const struct prof_plan *plan = profile_record(REC_PLAN, 0);
-    if (plan)
-        return plan_tables(m, text, plan);
+    if (budget_planned())
+        return plan_tables(m, text, profile_record(REC_PLAN, 0));
     return plan_free(m, text);
 }
 
@@ -304,9 +315,12 @@ int budget_alloc_gate(u64 len)
 {
     if (!g_planfree || g_title_dmem + len <= g_reported_dmem)
         return 0;
+    if (automem_admit(g_title_dmem + len, len, g_reported_dmem)) /* lazily, past what the title was told */
+        return 0;
     if (!g_said[0]++)
         logf("budget: direct memory full: %lu of %lu MiB allocated, %lu more asked: EAGAIN", g_title_dmem / MiB,
              g_reported_dmem / MiB, len >> 20);
+    automem_note_out_of_memory(AM_OOM_TOLD, g_title_dmem + len - g_reported_dmem);
     return (int)E_AGAIN;
 }
 
@@ -461,20 +475,33 @@ COLD static int b_kmmap(void *addr, size_t len, int prot, int flags, int fd, off
     return rc;
 }
 
+int hle_map_named_direct(void **addr, size_t len, int prot, int flags, off_t phys, size_t align, const char *name);
+int hle_map_direct2(void **addr, size_t len, int type, int prot, int flags, off_t phys, size_t align);
+int hle_checked_release_direct(off_t start, size_t len);
+int hle_dmem_query(off_t off, int flags, void *info, size_t size);
+int hle_dmem_type(off_t off, int *type, off_t *start, off_t *end);
+
+/* every: for planned titles too (synthetic offsets, vdm.c) */
 static const struct {
     const char *name;
     void *fn;
+    bool every;
 } k_mem[] = {
-    {"sceKernelAvailableDirectMemorySize", b_avail_direct},
-    {"sceKernelAllocateMainDirectMemory", b_alloc_main},
-    {"sceKernelConfiguredFlexibleMemorySize", b_configured_flex},
-    {"sceKernelAvailableFlexibleMemorySize", b_avail_flex},
-    {"sceKernelIsNeoMode", b_zero},
-    {"sceKernelMapNamedSystemFlexibleMemory", b_sys_flex},
-    {"sceKernelMunmap", budget_flex_unmap},
-    {"munmap", b_posix_munmap},
-    {"mmap", b_mmap},
-    {"sceKernelMmap", b_kmmap},
+    {"sceKernelMapNamedDirectMemory", hle_map_named_direct, true},
+    {"sceKernelMapDirectMemory2", hle_map_direct2, true},
+    {"sceKernelCheckedReleaseDirectMemory", hle_checked_release_direct, true},
+    {"sceKernelDirectMemoryQuery", hle_dmem_query, true},
+    {"sceKernelGetDirectMemoryType", hle_dmem_type, true},
+    {"sceKernelAvailableDirectMemorySize", b_avail_direct, false},
+    {"sceKernelAllocateMainDirectMemory", b_alloc_main, false},
+    {"sceKernelConfiguredFlexibleMemorySize", b_configured_flex, false},
+    {"sceKernelAvailableFlexibleMemorySize", b_avail_flex, false},
+    {"sceKernelIsNeoMode", b_zero, false},
+    {"sceKernelMapNamedSystemFlexibleMemory", b_sys_flex, false},
+    {"sceKernelMunmap", budget_flex_unmap, false},
+    {"munmap", b_posix_munmap, false},
+    {"mmap", b_mmap, false},
+    {"sceKernelMmap", b_kmmap, false},
 };
 
 COLD u64 budget_resolve(const char *nid)
@@ -487,7 +514,7 @@ COLD u64 budget_resolve(const char *nid)
             continue;
         /* planned titles keep the host's answers, but Neo mode: a plan is for
          * memory mode 0 unless it names the title's Pro mode (neo_plan) */
-        if (profile_record(REC_PLAN, 0) && (k_mem[i].fn != (void *)b_zero || neo_plan()))
+        if (budget_planned() && !k_mem[i].every && (k_mem[i].fn != (void *)b_zero || neo_plan()))
             return 0;
         return (u64)k_mem[i].fn;
     }

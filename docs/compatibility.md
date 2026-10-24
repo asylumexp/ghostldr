@@ -84,6 +84,34 @@ The log line to look for:
 budget: plan-free: 4532 MiB free in 6 holes (largest 3292) - 64 ghostldr - 100 video - 448 flex = 3920 MiB direct memory, one run; Neo mode 0
 ```
 
+### Memory learned at run time
+
+A plan-free title also gets an automatic memory plan (`automem.c`) that does what a [manual plan](#memory-plans) does, worked out from how the title behaved on its earlier boots:
+
+- **Lazy commit.** Every direct allocation of 64 MiB or more is backed 2 MiB at a time, when the title first maps that part, and zeroed then. A heap the title fills a little at a time holds only what it uses. Past the plan-free size, such an allocation is still admitted (up to 2 GiB more), so one boot shows the title's whole demand instead of stopping at the first pool too many.
+- **A learned plan per build**, kept with the title's saves (`ghostldr-memory.bin`, about 1 KiB, keyed by the eboot fingerprint). For each large allocation it records the size and how much the title committed. For the whole run it records the most the title reserved and held, whether it ran out (of what it was told, or of real memory), and how long it ran. The next boot tells the title what it reserved last time plus 64 MiB. That is more than is physically free only as far as its heaps left memory unused.
+- **Pool shrinking.** A pool the title maps whole gains nothing from lazy commit. When the title needs more than that overcommit covers, or ran out of real memory, the next boot shrinks its pools before the title starts. It finds each pool as manual plans' tables are found: the pool's size as a u64 in the executable's text, among other sizes, one per memory mode. The pool whose size varies most across the title's memory modes shrinks first. That is a cache the title sizes to the memory it has, like Ghost's streaming pool at 1120–4696 MiB. No pool goes below half its size.
+- **Checks.** The pool's next allocation shows whether those cells were its size. Cells that were not are never patched again. If the title twice stops within two minutes after a pool shrank, the pool goes back to the size it last ran with and shrinks no further. If it runs out of real memory with nothing left to shrink, allocations past what it is told are refused again, as plain plan-free.
+
+The first boot of a build is the plan-free size with lazy commit. On Ghost's own executable, with 4,252 MiB of real memory, the plan settles on its third boot:
+- the streaming pool goes 1120 → 658 → 560 MiB;
+- the engine heap goes 332 → 198 MiB;
+- the title is told 4,420 MiB.
+
+Its manual plan, tuned on hardware, uses 588 MiB of streaming pool and 320 MiB of CPU heap.
+
+- `run.py --no-auto-memory` turns all of this off (plain plan-free).
+- `--auto-memory` uses it even when the profile has a manual plan.
+- `--forget-memory` starts the learned plan over.
+
+The log lines to look for:
+
+```
+automem: learned plan, boot 2 of this build: last time told 4352 MiB, reserved at most 5050, held 4252, ran out of memory; its heaps left 798 MiB unused
+automem: the 1120 MiB pool from eboot+eee115 (its size varies 419% across memory modes) shrinks to 658 MiB, 3 size cells
+automem: eboot+eee115 allocated 658 MiB: the size cells were its pool's
+```
+
 ### Large executables
 
 Code can only run in JIT memory inside SWRR, and new JIT memory is all but used up (768 KiB). ghostldr runs titles in the PS2 emulator's own JIT buffers instead: on a 13.60 PS5 one of 32 MiB (EE), one of 16 MiB and two of 8 MiB, about 64 MiB in all (`arena.c`).

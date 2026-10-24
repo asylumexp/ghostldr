@@ -12,9 +12,10 @@
  * real direct-memory range.  Map/BatchMap/Release translate synthetic
  * offsets back to the pieces and map them back to back.
  *
- * Lazy allocations (budget.c picks them: reservations the title fills only
- * partly) get no physical memory up front; each 2 MiB chunk is committed the
- * first time any part of it is mapped.
+ * Lazy allocations (a memory plan's sites, budget.c, or every large one of a
+ * title without a plan, automem.c) get no physical memory up front; each
+ * 2 MiB chunk is committed the first time any part of it is mapped, and
+ * zeroed then when the allocation asked for it.
  */
 #include "ghost.h"
 
@@ -23,7 +24,7 @@ void *host_real(const char *name);
 
 #define VDM_BASE 0x4000000000UL
 #define VDM_STRIDE 0x400000000UL /* 16 GiB of synthetic offsets per allocation */
-#define VDM_MAX 16
+#define VDM_MAX 64
 #define VDM_PARTS 24
 
 struct vdm_part {
@@ -34,7 +35,7 @@ struct vdm {
     u64 len;
     u32 n;
     struct vdm_part p[VDM_PARTS];
-    bool lazy;
+    bool lazy, zero;
     int type;
     u64 *chunk; /* lazy: physical offset of each 2 MiB chunk, 0 = not committed */
     u32 committed;
@@ -89,7 +90,7 @@ int vdm_alloc(u64 start, u64 end, u64 len, u64 align, int type, off_t *out)
         memset(v, 0, sizeof(*v));
         return 0x80020023; /* ENOMEM-style failure, as the kernel reports */
     }
-    v->len = len;
+    v->len = len, v->type = type;
     *out = (off_t)(VDM_BASE + slot * VDM_STRIDE);
     logf("vdm: %lx bytes (type %d) as %u pieces -> synthetic offset %lx", len, type, v->n, (u64)*out);
     for (u32 i = 0; i < v->n; i++)
@@ -97,7 +98,7 @@ int vdm_alloc(u64 start, u64 end, u64 len, u64 align, int type, off_t *out)
     return 0;
 }
 
-int vdm_alloc_lazy(u64 len, int type, off_t *out)
+int vdm_alloc_lazy(u64 len, int type, bool zero, off_t *out)
 {
     u32 slot = 0;
     while (slot < VDM_MAX && (g_vdm[slot].n || g_vdm[slot].lazy))
@@ -109,7 +110,7 @@ int vdm_alloc_lazy(u64 len, int type, off_t *out)
     v->chunk = page_alloc(n * sizeof(u64));
     if (!v->chunk)
         return 0x8002000c;
-    v->lazy = true, v->type = type, v->len = len, v->committed = 0;
+    v->lazy = true, v->zero = zero, v->type = type, v->len = len, v->committed = 0;
     *out = (off_t)(VDM_BASE + slot * VDM_STRIDE);
     logf("vdm: lazy %lx bytes (type %d, %u chunks) -> synthetic offset %lx", len, type, n, (u64)*out);
     return 0;
@@ -124,6 +125,7 @@ static int commit_chunk(struct vdm *v, u64 ci)
     int rc = ((int (*)(off_t, off_t, size_t, size_t, int, off_t *))host_real("sceKernelAllocateDirectMemory"))(
         0, (off_t)K.direct_size(), LAZY_CHUNK, LAZY_CHUNK, v->type, &phys);
     if (rc != 0) {
+        automem_note_out_of_memory(AM_OOM_REAL, LAZY_CHUNK);
         if (failures++ < 8) {
             off_t s = 0;
             size_t avail = 0;
@@ -134,9 +136,48 @@ static int commit_chunk(struct vdm *v, u64 ci)
         }
         return rc;
     }
+    if (v->zero) { /* a fresh chunk reads as zeros (hle.c) */
+        void *va = NULL;
+        if (K.map_direct(&va, LAZY_CHUNK, PROT_READ | PROT_WRITE, 0, phys, LAZY_CHUNK) == 0) {
+            memset(va, 0, LAZY_CHUNK);
+            K.munmap(va, LAZY_CHUNK);
+        }
+    }
     v->chunk[ci] = (u64)phys;
     v->committed++;
     return 0;
+}
+
+bool vdm_lazy(u64 off)
+{
+    u64 rel;
+    struct vdm *v = vdm_is(off) ? vdm_of(off, &rel) : NULL;
+    return v && v->lazy;
+}
+
+/* bytes committed behind a lazy allocation (automem.c), 0 if it is none */
+u64 vdm_lazy_bytes(u64 off)
+{
+    u64 rel;
+    struct vdm *v = vdm_is(off) ? vdm_of(off, &rel) : NULL;
+    return v && v->lazy ? (u64)v->committed * LAZY_CHUNK : 0;
+}
+
+/* DirectMemoryQuery / GetDirectMemoryType for synthetic offsets: the
+ * allocation holding off, or with next the first one at or after it */
+int vdm_query(u64 off, bool next, u64 *start, u64 *end, int *type)
+{
+    for (u64 i = off < VDM_BASE ? 0 : (off - VDM_BASE) / VDM_STRIDE; i < VDM_MAX; i++) {
+        struct vdm *v = &g_vdm[i];
+        u64 s = VDM_BASE + i * VDM_STRIDE;
+        if ((v->n || v->lazy) && off < s + v->len && (next || off >= s)) {
+            *start = s, *end = s + v->len, *type = v->type;
+            return 0;
+        }
+        if (!next)
+            return -1;
+    }
+    return -1;
 }
 
 u32 vdm_lazy_committed_mib(void)

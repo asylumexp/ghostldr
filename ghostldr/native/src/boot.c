@@ -153,5 +153,6 @@ int ghost_boot(void)
     logf("boot: main thread created rc=%x", rc);
     if (g_ctx->flags & 4)
         crash_start_watchdog();
+    automem_start();
     return rc;
 }

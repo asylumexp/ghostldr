@@ -1,6 +1,6 @@
 /*
- * Runs the core's profile.c and budget.c (and nid.c) in a host process
- * (built for this machine) against fakes of what they read on the console: the boot context
+ * Runs the core's profile.c, budget.c and automem.c (and nid.c) in a host
+ * process (built for this machine) against fakes of what they read on the console: the boot context
  * with a profile bundle, a direct-memory map with the holes a Ghost boot
  * logged (4532 MiB free in 6 holes), and an executable image whose tables
  * hold Ghost 2.18's values.  test_profiles.py builds and drives it:
@@ -8,14 +8,18 @@
  *     profile_host BUNDLE plan|planfree|select FINGERPRINT_HEX|- [TITLE [OPTIONS]]
  *     profile_host BUNDLE rules FINGERPRINT_HEX|- TITLE FUNCTION LIB
  *     profile_host BUNDLE mmap - TITLE        (plan-free anonymous mmap)
+ *     profile_host BUNDLE boot FINGERPRINT_HEX TITLE [RUN]  (one boot of Ghost's allocations)
  *
  * OPTIONS: v = the title imports a video decoder, n = it has no proc param.
+ * The automatic memory plan is off unless GHOSTLDR_TEST_AUTOMEM names the
+ * file its learned plan is kept in (savedata_aux_read/write).
  */
 #include "ghost.h"
 
 long write(int fd, const void *buf, unsigned long n);
 int open(const char *path, int flags, ...);
 long read(int fd, void *buf, unsigned long n);
+int close(int fd);
 int vsnprintf(char *buf, unsigned long size, const char *fmt, __builtin_va_list ap);
 void exit(int code);
 
@@ -109,8 +113,13 @@ static int fake_avail(off_t start, off_t end, size_t align, off_t *s, size_t *si
     return 0;
 }
 
+static u64 g_now_us;
+static u64 fake_process_time(void) { return g_now_us; }
+
 void *host_dlsym(u32 handle, const char *name)
 {
+    if (strcmp(name, "sceKernelGetProcessTime") == 0)
+        return (void *)fake_process_time;
     if (g_cap && strcmp(name, "sceKernelReleaseDirectMemory") == 0)
         return (void *)fake_release;
     return strcmp(name, "sceKernelDirectMemoryQuery") == 0 ? (void *)fake_dmq : NULL;
@@ -122,6 +131,54 @@ void *host_real(const char *name)
 }
 u64 stub_alloc_code(const u8 *code, u32 len) { return 0x5000 + code[1]; } /* mov eax, idx: index in byte 1 */
 int hle_alloc_direct(off_t start, off_t end, size_t len, size_t align, int type, off_t *out) { return 0; }
+int hle_map_named_direct(void **addr, size_t len, int prot, int flags, off_t phys, size_t align, const char *name)
+{
+    return 0;
+}
+int hle_map_direct2(void **addr, size_t len, int type, int prot, int flags, off_t phys, size_t align) { return 0; }
+int hle_checked_release_direct(off_t start, size_t len) { return 0; }
+int hle_dmem_query(off_t off, int flags, void *info, size_t size) { return 0; }
+int hle_dmem_type(off_t off, int *type, off_t *start, off_t *end) { return 0; }
+
+/* the learned memory plan, in the file GHOSTLDR_TEST_AUTOMEM names */
+long pread(int fd, void *buf, unsigned long n, long off);
+long pwrite(int fd, const void *buf, unsigned long n, long off);
+s64 savedata_aux_read(const char *name, void *buf, u64 size)
+{
+    const char *p = getenv("GHOSTLDR_TEST_AUTOMEM");
+    int fd = p ? open(p, 0) : -1;
+    s64 n = fd >= 0 ? pread(fd, buf, size, 0) : -1;
+    if (fd >= 0)
+        close(fd);
+    return n;
+}
+s64 savedata_aux_write(const char *name, const void *buf, u64 size)
+{
+    const char *p = getenv("GHOSTLDR_TEST_AUTOMEM");
+#ifdef __APPLE__
+    int fd = p ? open(p, 0x0002 | 0x0200, 0644) : -1; /* O_RDWR | O_CREAT */
+#else
+    int fd = p ? open(p, 0x0002 | 0x0040, 0644) : -1;
+#endif
+    s64 n = fd >= 0 ? pwrite(fd, buf, size, 0) : -1;
+    if (fd >= 0)
+        close(fd);
+    return n;
+}
+
+/* lazy allocations (vdm.c): synthetic offsets, MiB committed behind each */
+#define LAZY_BASE 0x4000000000UL
+#define LAZY_STRIDE 0x400000000UL
+static u32 g_committed[16];
+bool vdm_lazy(u64 off) { return off >= LAZY_BASE && off < LAZY_BASE + 16 * LAZY_STRIDE; }
+u64 vdm_lazy_bytes(u64 off) { return vdm_lazy(off) ? (u64)g_committed[(off - LAZY_BASE) / LAZY_STRIDE] << 20 : 0; }
+u32 vdm_lazy_committed_mib(void)
+{
+    u32 n = 0;
+    for (u32 i = 0; i < 16; i++)
+        n += g_committed[i];
+    return n;
+}
 int budget_flex_gate(u64 len);
 void budget_flex_note(s64 len);
 
@@ -175,21 +232,37 @@ void compute_nid(const char *name, char out[12]);
 /* ---- the executable: Ghost 2.18's plan tables, a proc param whose mem param
  * says 116 MiB of flexible memory ---- */
 #define MiB (1UL << 20)
-#define TEXT_SIZE 0x1200000
+#define TEXT_SIZE 0x1400000
 #define BASE 0x800000000UL
 static u8 g_text[TEXT_SIZE];
 static struct module g_main;
-static const u64 k_stream[6] = {0x46000000, 0x46000000, 0x46000000, 0x84800000, 0x125800000, 0x125800000};
 
-static void make_text(const char *opt)
+static const u64 k_tables[7][6] = {
+    /* 0x111ccf0, one u64 per memory mode, in MiB: Ghost 2.18's totals, CPU malloc heap, streaming pool,
+     * two small heaps, type-0 engine heap, general GPU heap (read from its executable) */
+    {5184, 5824, 5824, 11648, 12256, 12256}, {384, 664, 384, 864, 484, 964},  {1120, 1120, 1120, 2120, 4696, 4696},
+    {116, 116, 116, 116, 200, 200},          {64, 68, 64, 68, 88, 88},         {332, 448, 332, 658, 548, 1040},
+    {1390, 1586, 1908, 2308, 2038, 2438}};
+
+static void make_text(const char *opt, const u8 *fp)
 {
     bool video = false, param = true;
     for (; *opt; opt++)
         video |= *opt == 'v', param &= *opt != 'n';
-    memcpy(g_text + 0x111cd50, k_stream, sizeof(k_stream));
-    *(u64 *)(g_text + 0x111cd20) = 384 * MiB; /* CPU malloc heap */
-    *(u64 *)(g_text + 0x111ce10) = 1390 * MiB; /* general GPU heap */
-    *(u64 *)(g_text + 0x111cde0) = 332 * MiB;  /* type-0 engine heap */
+    /* GHOSTLDR_TEST_TEXT: a dumped executable's text segment instead */
+    const char *real = getenv("GHOSTLDR_TEST_TEXT");
+    int fd = real ? open(real, 0) : -1;
+    for (long n = 0, got; fd >= 0 && n < TEXT_SIZE && (got = read(fd, g_text + n, TEXT_SIZE - n)) > 0;)
+        n += got;
+    if (fd >= 0) {
+        close(fd);
+    } else {
+        for (u32 t = 0; t < 7; t++)
+            for (u32 i = 0; i < 6; i++)
+                ((u64 *)(g_text + 0x111ccf0))[t * 6 + i] = k_tables[t][i] * MiB;
+        *(u64 *)(g_text + 0x111ccc0) = 0x10000; /* what precedes and follows the run of sizes */
+        *(u64 *)(g_text + 0x111ce40) = 0x358637bd00000000UL;
+    }
     /* proc param at 0x1000: +0x40 -> mem param at 0x1100 {size 0x38, ..., +0x10 -> 0x1200} -> 116 MiB */
     *(u64 *)(g_text + 0x1040) = BASE + 0x1100;
     *(u64 *)(g_text + 0x1100) = 0x38;
@@ -199,7 +272,104 @@ static void make_text(const char *opt)
                              .text_size = TEXT_SIZE, .proc_param = param ? BASE + 0x1000 : 0};
     if (video)
         g_main.import_libs[g_main.n_import_libs++] = (struct libref){1, "libSceVideodec2"};
+    if (fp)
+        memcpy(g_main.fingerprint, fp, 20);
     g_modules = g_main_mod = &g_main;
+}
+
+/* ---- one boot of Ghost's direct allocations (mode 0) against a physical
+ * limit: four pools it maps whole, their sizes read from its tables, and
+ * three heaps it fills as it plays ---- */
+static const struct {
+    u32 site, cell, mib;
+    int type;
+    bool whole;
+} k_allocs[] = {{0xa22119, 0x111cd20, 0, 0, true},  {0x390c4c, 0x111cde0, 0, 0, true},
+                {0x390bc4, 0x111ce10, 0, 3, true},  {0xeee115, 0x111cd50, 0, 3, true},
+                {0x896126, 0, 1096, 0, false},      {0x89614a, 0, 612, 0, false},
+                {0xeee2cf, 0, 116, 0, false}};
+void budget_alloc_note(s64 len);
+void automem_tick(void);
+static u64 g_phys_used, g_phys_limit;
+
+/* commit mib more of allocation i (lazy) or all of it; false: out of real memory */
+static bool commit(u32 i, bool lazy, u32 mib)
+{
+    for (u32 c = 0; c < mib; c += 2) {
+        if (g_phys_used + 2 * MiB > g_phys_limit) {
+            if (lazy)
+                automem_note_out_of_memory(AM_OOM_REAL, 2 * MiB);
+            logf("run: out of memory committing eboot+%x (%lu MiB committed)", k_allocs[i].site, g_phys_used / MiB);
+            return false;
+        }
+        g_phys_used += 2 * MiB;
+        g_committed[i] += lazy ? 2 : 0;
+    }
+    return true;
+}
+
+/* RUN: c<MiB> the heaps commit that much as it plays, p<MiB> the physical
+ * limit (default 4252), e stopped within a minute, w the streaming pool's
+ * size comes from elsewhere (always 1120 MiB), A --auto-memory, F
+ * --forget-memory */
+static int boot(const char *title, const char *run, const u8 *fp)
+{
+    u32 play = 0;
+    bool early = false, fixed_stream = false;
+    g_phys_limit = 4252 * MiB;
+    for (const char *r = run; *r; r++) {
+        if (*r == 'c')
+            play = (u32)strtoul(r + 1, NULL, 10);
+        else if (*r == 'p')
+            g_phys_limit = strtoul(r + 1, NULL, 10) * MiB;
+        early |= *r == 'e';
+        fixed_stream |= *r == 'w';
+        if (*r == 'A')
+            g_ctx->flags |= CTX_FLAG_AUTO_MEM;
+        if (*r == 'F')
+            g_ctx->flags |= CTX_FLAG_AUTO_MEM_FORGET;
+    }
+    profile_select(title);
+    make_text("", fp);
+    profile_bind(fp);
+    if (budget_patch_text(&g_main, g_text) != 0)
+        return 5;
+    u64 off[7] = {0};
+    bool alive = true;
+    g_now_us = 1;
+    for (u32 i = 0; i < ARRAY_SIZE(k_allocs) && alive; i++) {
+        u64 len = k_allocs[i].cell ? *(u64 *)(g_text + k_allocs[i].cell) : k_allocs[i].mib * MiB;
+        if (fixed_stream && k_allocs[i].site == 0xeee115) /* sized elsewhere: the cells are not its */
+            len = 1120 * MiB;
+        if (budget_alloc_gate(len) != 0) {
+            logf("run: eboot+%x %lu MiB refused", k_allocs[i].site, len / MiB);
+            alive = false;
+            break;
+        }
+        bool lazy = budget_lazy_site(k_allocs[i].site) || automem_lazy(len);
+        off[i] = lazy ? LAZY_BASE + i * LAZY_STRIDE : 0x50000000UL + i * 0x10000000UL;
+        budget_alloc_note((s64)len);
+        automem_note_alloc(k_allocs[i].site, len, k_allocs[i].type, lazy, off[i]);
+        if (k_allocs[i].whole || !lazy)
+            alive = commit(i, lazy, (u32)(len / MiB));
+    }
+    automem_tick();
+    for (u32 i = 4; i < ARRAY_SIZE(k_allocs) && alive && play; i++) { /* it plays: the heaps fill */
+        u32 room = (u32)(off[i] ? k_allocs[i].mib : 0), take = play < room ? play : room;
+        if (budget_lazy_site(k_allocs[i].site) || automem_lazy(k_allocs[i].mib * MiB)) {
+            alive = commit(i, true, take);
+            play -= take;
+        }
+    }
+    if (!early) {
+        g_now_us = 1 + 10 * 60000000UL;
+        automem_tick();
+    }
+    logf("run: told %lu MiB; cpu %lu, engine %lu, gpu %lu, stream %lu MiB; %lu MiB committed%s",
+         g_reported_dmem / MiB, *(u64 *)(g_text + 0x111cd20) / MiB, *(u64 *)(g_text + 0x111cde0) / MiB,
+         *(u64 *)(g_text + 0x111ce10) / MiB, *(u64 *)(g_text + 0x111cd50) / MiB, g_phys_used / MiB,
+         alive ? "" : ", stopped");
+    return 0;
 }
 
 static u8 g_bundle[1 << 16];
@@ -217,6 +387,8 @@ int main(int argc, char **argv)
     g_ctx = (struct boot_ctx *)g_ctx_mem;
     g_ctx_mem[63] = (u64)g_bundle;
     K.direct_size = fake_direct_size;
+    if (!getenv("GHOSTLDR_TEST_AUTOMEM"))
+        g_ctx->flags |= CTX_FLAG_NO_AUTO_MEM;
     const char *cap = getenv("GHOSTLDR_TEST_PS4_CAP");
     if (cap) {
         g_cap = strtoul(cap, NULL, 0) * MiB;
@@ -233,7 +405,7 @@ int main(int argc, char **argv)
         /* "select": nothing picked yet (no ghostfs); else the title in argv[4] */
         if (strcmp(sc, "select") != 0)
             profile_select(argc > 4 ? argv[4] : "");
-        make_text(argc > 5 ? argv[5] : "");
+        make_text(argc > 5 ? argv[5] : "", have_fp ? fp : NULL);
         profile_bind(have_fp ? fp : NULL);
         logf("title %s thread %s has plan %u hooks %u diag %u save %u param1 %d", profile_title(),
              profile_thread_name(), profile_has(PF_PLAN), profile_has(PF_HOOKS), profile_has(PF_DIAG),
@@ -259,7 +431,7 @@ int main(int argc, char **argv)
     }
     if (strcmp(sc, "exec") == 0) { /* the code ranges bigexec.c would read */
         profile_select(argv[4]);
-        make_text("");
+        make_text("", have_fp ? fp : NULL);
         profile_bind(have_fp ? fp : NULL);
         const struct prof_exec *x;
         u32 k = 0;
@@ -271,7 +443,7 @@ int main(int argc, char **argv)
     }
     if (strcmp(sc, "rules") == 0) {
         profile_select(argv[4]);
-        make_text("");
+        make_text("", have_fp ? fp : NULL);
         profile_bind(have_fp ? fp : NULL);
         char nid[12];
         compute_nid(argv[5], nid);
@@ -288,7 +460,7 @@ int main(int argc, char **argv)
     if (strcmp(sc, "mmap") == 0) {
         /* a title with no mem param (448 MiB of flexible memory), as OpenOrbis homebrew */
         profile_select(argv[4]);
-        make_text("n");
+        make_text("n", NULL);
         profile_bind(NULL);
         if (budget_patch_text(&g_main, g_text) != 0)
             return 5;
@@ -323,5 +495,7 @@ int main(int argc, char **argv)
         logf("file %p", mm(NULL, 0x4000, PROT_READ, MAP_PRIVATE, 5, 0));
         return 0;
     }
+    if (strcmp(sc, "boot") == 0)
+        return boot(argv[4], argc > 5 ? argv[5] : "", have_fp ? fp : NULL);
     return 4;
 }

@@ -487,6 +487,14 @@ def main() -> int:
                         help="answer every system dialog with buttons by cancelling (to bisect a title hang)")
     parser.add_argument("--ime-fixed-name", action="store_true",
                         help="text input answers \"Player\" instead of the console user's name")
+    memory = parser.add_mutually_exclusive_group()
+    memory.add_argument("--no-auto-memory", action="store_true",
+                        help="a title without a memory plan gets the plain plan-free budget: no lazy commit, no "
+                             "learned plan (docs/compatibility.md#memory-learned-at-run-time)")
+    memory.add_argument("--auto-memory", action="store_true",
+                        help="use the automatic memory plan even when the title's profile has a manual one")
+    parser.add_argument("--forget-memory", action="store_true",
+                        help="start the title's learned memory plan over (it is kept next to its saves)")
     parser.add_argument("--keep-remote-play", action="store_true",
                         help="dev: ignore the title's sceRemoteplayProhibit, so a Remote Play viewer keeps its picture")
     parser.add_argument("--select", action="store_true",
@@ -557,7 +565,9 @@ def main() -> int:
             | (64 if args.ext_jit else 0) | (128 if args.dialog_cancel else 0) | (256 if args.ime_fixed_name else 0) \
             | (512 if args.keep_remote_play else 0) | (1024 if args.boot_start_modules else 0) \
             | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0) \
-            | (16384 if args.diag else 0) | (args.ftp_port << 48 if args.mode == "boot" else 0)
+            | (16384 if args.diag else 0) | (65536 if args.no_auto_memory else 0) \
+            | (131072 if args.auto_memory else 0) | (524288 if args.forget_memory else 0) \
+            | (args.ftp_port << 48 if args.mode == "boot" else 0)
         knobs = {"gpu_heap": args.gpu_heap_mib, "slack": args.slack_mib, "pool1": args.pool1_mib,
                  "cpu_heap": args.cpu_heap_mib}
         ext = EXT.read_bytes() if args.mode == "boot" else b""

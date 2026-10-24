@@ -1,7 +1,7 @@
 """Title profiles: parsing, merging and validation (host/profiles.py), the
-compiled blobs, and the core's side of them: native/src/profile.c and
-budget.c built for this machine (native_host/profile_host.c) and run
-against fakes of the console.
+compiled blobs, and the core's side of them: native/src/profile.c,
+budget.c and automem.c built for this machine (native_host/profile_host.c)
+and run against fakes of the console.
 
     python3 -m unittest discover -s ghostldr/tests
 """
@@ -277,7 +277,7 @@ class CoreProfileTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.exe = Path(cls.tmp.name) / "profile_host"
         build_host("profile_host", [HERE / "native_host/profile_host.c"] +
-                   [NATIVE / f"src/{n}.c" for n in ("profile", "budget", "nid")], cls.exe)
+                   [NATIVE / f"src/{n}.c" for n in ("profile", "budget", "automem", "nid")], cls.exe)
         rule_title = profiles.load("CUSA22222")
         rule_title["hle"] = [{"lib": "libSceNpManager", "function": "sceNpGetState", "value": "0x80550001",
                               "fill": [{"arg": 2, "offset": 4, "size": 4, "value": 7},
@@ -403,6 +403,147 @@ class CoreProfileTests(unittest.TestCase):
         self.assertIn("exec records 1", lines)
         self.assertIn("exec records 0", self.run_host("exec", "22" * 20, "CUSA33333"))
         self.assertIn("exec records 0", self.run_host("exec", GHOST_FP, "CUSA11456"))
+
+
+ANOTHER_GHOST = "00" * 20      # a build of Ghost its profile does not name: plan-free
+
+
+class AutoMemoryTests(unittest.TestCase):
+    """automem.c: Ghost's allocations replayed boot after boot (profile_host
+    boot), the learned plan kept in a file between them, against 4252 MiB of
+    real memory unless a run says otherwise."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        CoreProfileTests.setUpClass.__func__(cls)
+        cls.text = None
+        dump = profiles.DEFAULT_SRC / "eboot.bin"
+        if dump.exists() and profiles.eboot_fingerprint(profiles.DEFAULT_SRC) == GHOST_FP:
+            img = oe.parse(dump)
+            text = next(p for p in img.phdrs if p.type == oe.PT_LOAD and p.vaddr == 0)
+            cls.text = Path(cls.tmp.name) / "text.bin"
+            cls.text.write_bytes(img.read_vaddr(0, text.filesz))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp.cleanup()
+
+    def setUp(self) -> None:
+        self.plan = Path(self.tmp.name) / f"{self.id()}.bin"
+        self.plan.unlink(missing_ok=True)
+
+    def boot(self, run: str = "", fp: str = ANOTHER_GHOST, **env: str) -> list[str]:
+        out = subprocess.run([str(self.exe), str(self.bundle), "boot", fp, "CUSA11456", run], capture_output=True,
+                             text=True, timeout=60, env={**os.environ, "GHOSTLDR_TEST_AUTOMEM": str(self.plan), **env})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return [ln for ln in out.stdout.splitlines() if ln.startswith(("automem:", "run:"))]
+
+    def test_first_boot_is_the_plan_free_budget_with_lazy_commit(self) -> None:
+        lines = self.boot("c1500")
+        self.assertIn("automem: told 4352 MiB of direct memory (4352 MiB for real); allocations of 64 MiB or more "
+                      "are committed as they are mapped, and admitted past that much", lines)
+        # a refusal would have stopped it at the 1096 MiB heap: it reserves all 5050 MiB, then runs out for real
+        self.assertIn("automem: 4934 MiB reserved, past the 4352 MiB the title was told: admitted, committed as it "
+                      "is mapped", lines)
+        self.assertIn("run: told 4352 MiB; cpu 384, engine 332, gpu 1390, stream 1120 MiB; 4252 MiB committed, "
+                      "stopped", lines)
+
+    def test_it_learns_to_shrink_the_streaming_pool_first(self) -> None:
+        self.boot("c1500")
+        second = self.boot("c1500")
+        self.assertIn("automem: learned plan, boot 2 of this build: last time told 4352 MiB, reserved at most 5050, "
+                      "held 4252, ran out of memory; its heaps left 798 MiB unused", second)
+        self.assertIn("automem: the 1120 MiB pool from eboot+eee115 (its size varies 419% across memory modes) "
+                      "shrinks to 658 MiB, 3 size cells", second)
+        self.assertIn("automem: eboot+eee115 allocated 658 MiB: the size cells were its pool's", second)
+        third = self.boot("c1500")
+        self.assertIn("automem: the 1120 MiB pool from eboot+eee115 (its size varies 419% across memory modes) "
+                      "shrinks to 560 MiB, 3 size cells", third)     # half its size at the most
+        self.assertIn("automem: the 332 MiB pool from eboot+390c4c (its size varies 313% across memory modes) "
+                      "shrinks to 198 MiB, 2 size cells", third)
+        self.assertIn("run: told 4352 MiB; cpu 384, engine 198, gpu 1390, stream 560 MiB; 4032 MiB committed", third)
+        fourth = self.boot("c1500")          # it fits: told what it reserves, within what its heaps leave unused
+        self.assertIn("automem: told 4420 MiB of direct memory (4352 MiB for real); allocations of 64 MiB or more "
+                      "are committed as they are mapped, and admitted past that much", fourth)
+        self.assertIn("run: told 4420 MiB; cpu 384, engine 198, gpu 1390, stream 560 MiB; 4032 MiB committed", fourth)
+        self.assertFalse([ln for ln in fourth if "shrinks" in ln])
+
+    def test_a_title_that_fits_is_told_what_its_heaps_leave_unused(self) -> None:
+        self.boot("c200p9000")
+        lines = self.boot("c200p9000")
+        self.assertIn("automem: learned plan, boot 2 of this build: last time told 4352 MiB, reserved at most 5050, "
+                      "held 3426, did not run out; its heaps left 1624 MiB unused", lines)
+        self.assertIn("run: told 5114 MiB; cpu 384, engine 332, gpu 1390, stream 1120 MiB; 3426 MiB committed", lines)
+
+    def test_cells_that_were_not_the_pools_are_never_patched_again(self) -> None:
+        self.boot("c1500w")
+        second = self.boot("c1500w")      # its streaming pool's size comes from somewhere else
+        self.assertIn("automem: eboot+eee115 allocated 1120 MiB: the size cells were not its pool's (never patched "
+                      "again)", second)
+        third = self.boot("c1500w")
+        self.assertFalse([ln for ln in third if "eboot+eee115" in ln], third)
+        self.assertIn("automem: the 332 MiB pool from eboot+390c4c (its size varies 313% across memory modes) "
+                      "shrinks to 166 MiB, 2 size cells", third)
+
+    def test_two_early_stops_undo_the_last_shrink(self) -> None:
+        for run in ("c1500", "c1500", "c1500", "e"):
+            self.boot(run)
+        lines = self.boot("e")
+        self.assertIn("automem: learned plan, boot 5 of this build: last time told 4420 MiB, reserved at most 0, "
+                      "held 0, did not run out but stopped within two minutes; its heaps left 0 MiB unused", lines)
+        lines = self.boot("c1500")
+        self.assertIn("automem: the title twice stopped within two minutes after eboot+eee115's pool shrank: back to "
+                      "658 MiB, the size it ran with, and no smaller from now on", lines)
+        self.assertIn("automem: the title twice stopped within two minutes after eboot+390c4c's pool shrank: it keeps "
+                      "its 332 MiB from now on", lines)
+        lines = self.boot("c1500")         # the next pools by elasticity: the CPU heap, then the GPU heap
+        self.assertIn("automem: the 384 MiB pool from eboot+a22119 (its size varies 251% across memory modes) "
+                      "shrinks to 192 MiB, 2 size cells", lines)
+        self.assertFalse([ln for ln in lines if "pool from eboot+eee115" in ln or "pool from eboot+390c4c" in ln])
+
+    def test_nothing_left_to_shrink_refuses_past_what_it_is_told(self) -> None:
+        for _ in range(6):      # the pools down to their floors one boot after another, then nothing left
+            lines = self.boot("c1700p3200")
+        self.assertIn("automem: out of memory with no pool left to shrink: allocations past what the title is told "
+                      "are refused from now on", lines)
+        lines = self.boot("c1700p3200")
+        self.assertIn("automem: told 4352 MiB of direct memory (4352 MiB for real); allocations of 64 MiB or more are "
+                      "committed as they are mapped", lines)
+        self.assertFalse([ln for ln in lines if "admitted" in ln])
+
+    def test_forget_and_other_builds_start_over(self) -> None:
+        self.boot("c1500")
+        self.boot("c1500")
+        lines = self.boot("c1500F")
+        self.assertFalse([ln for ln in lines if "learned plan" in ln or "pool from" in ln])
+        self.assertIn("run: told 4352 MiB; cpu 384, engine 332, gpu 1390, stream 1120 MiB; 4252 MiB committed, "
+                      "stopped", lines)
+        lines = self.boot("c1500", fp="11" * 20)
+        self.assertFalse([ln for ln in lines if "learned plan" in ln])
+
+    def test_a_manual_plan_wins_unless_auto_memory_is_asked_for(self) -> None:
+        lines = self.boot("c1500", fp=GHOST_FP)
+        self.assertFalse([ln for ln in lines if ln.startswith("automem:")])
+        self.assertIn("run: told 4520 MiB; cpu 320, engine 332, gpu 1390, stream 588 MiB; 4130 MiB committed", lines)
+        lines = self.boot("c1500A", fp=GHOST_FP)
+        self.assertIn("automem: told 4284 MiB of direct memory (4284 MiB for real); allocations of 64 MiB or more "
+                      "are committed as they are mapped, and admitted past that much", lines)
+        self.assertIn("run: told 4284 MiB; cpu 384, engine 332, gpu 1390, stream 1120 MiB; 4252 MiB committed, "
+                      "stopped", lines)
+
+    def test_ghosts_own_executable(self) -> None:
+        """The same, on the text segment of the CUSA11456 dump: each pool's size
+        is found in its own table only, and the streaming pool ranks first."""
+        if not self.text:
+            self.skipTest("needs the CUSA11456 dump in build/ghost/app0")
+        self.boot("c1500", GHOSTLDR_TEST_TEXT=str(self.text))
+        lines = self.boot("c1500", GHOSTLDR_TEST_TEXT=str(self.text))
+        self.assertIn("automem: the 1120 MiB pool from eboot+eee115 (its size varies 419% across memory modes) "
+                      "shrinks to 658 MiB, 3 size cells", lines)
+        self.assertIn("automem: eboot+eee115 pool 1120 -> 658 MiB: 3 of 3 cells written", lines)
+        lines = self.boot("c1500", GHOSTLDR_TEST_TEXT=str(self.text))
+        self.assertIn("automem: the 332 MiB pool from eboot+390c4c (its size varies 313% across memory modes) "
+                      "shrinks to 198 MiB, 2 size cells", lines)
 
 
 if __name__ == "__main__":

@@ -153,6 +153,37 @@ struct sdm_set2 {
     u8 slot;
 };
 
+/* A small file of ghostldr's own next to the title's saves (automem.c's
+ * learned memory plan): read up to size bytes, or write size bytes.  Bytes
+ * read or written, or -1. */
+s64 savedata_aux_read(const char *name, void *buf, u64 size)
+{
+    if (!save_begin())
+        return -1;
+    char p[320];
+    fmt(p, sizeof(p), "%s/%s", save_root(), name);
+    int fd = k_open(p, O_RDONLY, 0);
+    s64 n = fd >= 0 ? k_pread(fd, buf, size, 0) : -1;
+    if (fd >= 0)
+        k_close(fd);
+    save_end();
+    return n;
+}
+
+s64 savedata_aux_write(const char *name, const void *buf, u64 size)
+{
+    if (!save_begin())
+        return -1;
+    char p[320];
+    fmt(p, sizeof(p), "%s/%s", save_root(), name);
+    int fd = k_open(p, O_RDWR | O_CREAT, 0666);
+    s64 n = fd >= 0 ? k_pwrite(fd, buf, size, 0) : -1;
+    if (fd >= 0)
+        k_close(fd);
+    save_end();
+    return n;
+}
+
 static void sdm_path(char *buf, size_t size, u32 slot, const char *what)
 {
     fmt(buf, size, "%s/sdmemory_%u.%s", save_root(), slot, what);
