@@ -637,8 +637,8 @@ int main(int argc, char **argv)
         return 2;
     }
     A = argv[3][0] == 'a';
-    char *env_argv[] = {"np_online", "small", argv[1], argv[2], NULL};
-    check(ext_host_env_main(4, env_argv) == 0, "the core loads the extension (env.c's small mode)");
+    char *env_argv[] = {"np_online", "small", argv[1], argv[2], "-", NULL}; /* "-": no SHA-256 pin */
+    check(ext_host_env_main(5, env_argv) == 0, "the core loads the extension (env.c's small mode)");
     K.usleep = k_usleep;
     K.module_info = k_module_info_np;
     const struct ext_lib *pol = ext_lib_policy("libSceNpWebApi2AsyncRestricted");

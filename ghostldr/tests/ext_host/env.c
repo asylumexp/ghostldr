@@ -19,7 +19,6 @@
  * NAME" for each; exits 0 when every step of the mode behaved as expected.
  */
 #include "ghost_api.h"
-#include <stdio.h> /* sscanf: the SHA256 argument */
 
 /* sys.c: the host OS, kept out of this file's ghost.h world */
 void *sys_map(u64 size);
@@ -267,6 +266,12 @@ static void lookup_nids(const char *path)
     }
 }
 
+/* one hex digit's value, or -1 (the SHA256 argument; no libc in this file) */
+static int hexval(char c)
+{
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 5) {
@@ -280,12 +285,12 @@ int main(int argc, char **argv)
     ctx.ext_crc = sys_strtoul(argv[3]);
     if (strcmp(argv[4], "-") != 0) {   /* the pin: 24 digest bytes as 48 hex chars */
         for (int i = 0; i < (int)sizeof(ctx.ext_sha256); i++) {
-            unsigned v = 0;
-            if (sscanf(argv[4] + 2 * i, "%2x", &v) != 1) {
+            int hi = hexval(argv[4][2 * i]), lo = hi < 0 ? -1 : hexval(argv[4][2 * i + 1]);
+            if (hi < 0 || lo < 0) {
                 logf("ext_host: bad SHA256 argument");
                 return 2;
             }
-            ctx.ext_sha256[i] = (u8)v;
+            ctx.ext_sha256[i] = (u8)(hi << 4 | lo);
         }
     }
     g_ctx = &ctx;

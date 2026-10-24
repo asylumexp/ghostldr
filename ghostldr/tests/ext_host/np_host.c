@@ -743,8 +743,8 @@ int main(int argc, char **argv)
         logf("usage: np_host EXT_BIN CRC APP0_DIR SCENARIO UNLOCK_OFF READ_OFF WRITE_OFF");
         return 2;
     }
-    char *load[] = {"ext_host", "small", argv[1], argv[2], NULL};
-    if (ext_host_main(4, load) != 0) {
+    char *load[] = {"ext_host", "small", argv[1], argv[2], "-", NULL}; /* "-": no SHA-256 pin */
+    if (ext_host_main(5, load) != 0) {
         logf("np_host: FAILED loading the extension");
         return 1;
     }
