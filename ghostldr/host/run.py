@@ -22,7 +22,7 @@ the drive into SWRR's sandbox.  When this computer sees the drive too
 (--usb-drive, else the only mounted one with a ghostldr folder), its titles'
 profiles and dumps are used as installed ones' are.
 
-While the title runs, the console serves FTP on TCP 2121 (--ftp-port; 0:
+While the title runs, the console serves FTP on TCP 1212 (--ftp-port; 0:
 none; docs/ftp.md): any FTP client, any user and password.  Clients start on
 the USB drive when one is plugged in, so titles can go onto it over the
 network while a game is running.
@@ -61,7 +61,7 @@ import usb_drive
 LOG_PORT = 18194
 EXT_PORT = LOG_PORT + 1   # TCP
 SEL_PORT = LOG_PORT + 2   # TCP
-FTP_PORT = 2121           # the console's FTP server (TCP; docs/ftp.md)
+FTP_PORT = 1212           # the console's FTP server (TCP; docs/ftp.md); not ftpsrv's 2121
 LUA_MAX = 500 * 1024      # Luac0re's and UltraC0re's remote Lua loaders read at most this much
 NAMES = ROOT / "build/nid/known_names.txt"
 

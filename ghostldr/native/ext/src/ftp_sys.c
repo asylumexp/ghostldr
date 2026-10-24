@@ -2,7 +2,7 @@
  * ghostldr's FTP server on the console (ftp.h, docs/ftp.md): ftp.c's
  * environment over libkernel, started as the title's main thread is about
  * to be created (ext_exports.title_starting) on run.py --ftp-port's port
- * (2121 unless given; 0: no server).
+ * (1212 unless given; 0: no server).
  *
  * Before the title's code runs, the session to ShellCore's AutoMounter is
  * opened and a USB drive mounted at /ghostldr_usb when one is plugged in

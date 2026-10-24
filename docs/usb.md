@@ -49,7 +49,7 @@ python3 ghostldr/host/usb_drive.py list ftp://PS5:2121/mnt/usb0
 Or, with no jailbreak, through ghostldr's own FTP server while any title runs ([ftp.md](ftp.md)). It has the drive at `/ghostldr_usb`:
 
 ```bash
-python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0 --usb ftp://CONSOLE:2121/ghostldr_usb
+python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0 --usb ftp://CONSOLE:1212/ghostldr_usb
 ```
 
 Through it, PS4-Xplorer's 79 files went on in 4 s, and large files at 25 MiB/s over one connection or 52 MiB/s over eight.

@@ -23,7 +23,7 @@ A map of the repository, for reading or changing the code. To run ghostldr, star
 - **Title profiles:** the title's memory plan, save size, app parameters and HLE rules, as data, bound to its executable's build ([Write a profile](compatibility.md#5-write-a-profile)).
 - **ghostfs:** serves the chosen title's `/app0` from SWRR's save containers ([ghostfs-catalogue.md](ghostfs-catalogue.md)).
 - **USB drives and folders of titles:** `--app-root usb:/ghostldr` (or a dev folder of `<TITLE>/app0` folders). The extension decides before the title's modules load (`ext/src/approot.c`): the system's AutoMounter mounts the drive into SWRR's sandbox, and the title's folder there becomes `/app0` (read-write) ([usb.md](usb.md)).
-- **FTP server:** while a title runs, the extension serves FTP on TCP 2121 (`ext/src/ftp.c`, `ftp_sys.c`), starting clients on the USB drive ([ftp.md](ftp.md)).
+- **FTP server:** while a title runs, the extension serves FTP on TCP 1212 (`ext/src/ftp.c`, `ftp_sys.c`), starting clients on the USB drive ([ftp.md](ftp.md)).
 - **Game selector:** loads, runs and clears the selector module before the title (`sel.c`).
 - **Diagnostics:** a crash handler and watchdog, and a PS4 diagnostic (`run.py probe --diag`, [ps4.md](ps4.md)).
 

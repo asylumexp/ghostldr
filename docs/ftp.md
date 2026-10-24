@@ -1,6 +1,6 @@
 # FTP server
 
-While a title runs, ghostldr serves FTP from inside SWRR on TCP 2121. It needs no jailbreak. The main use is the USB drive: copy titles onto it, or take files off it, over the network without unplugging it, even while a game is running from it.
+While a title runs, ghostldr serves FTP from inside SWRR on TCP 1212. It needs no jailbreak. The main use is the USB drive: copy titles onto it, or take files off it, over the network without unplugging it, even while a game is running from it.
 
 ## Connecting
 
@@ -9,7 +9,7 @@ Use any FTP client in passive mode, the usual default: FileZilla, WinSCP, Cyberd
 | Setting | Value |
 |---|---|
 | Host | the console's IP address (`run.py boot` prints it) |
-| Port | 2121 |
+| Port | 1212 |
 | User and password | anything: every login is accepted |
 | Mode | passive (on a PS5 at 8.00 or later, active mode isn't available) |
 | Encryption | none (plain FTP) |
@@ -17,14 +17,14 @@ Use any FTP client in passive mode, the usual default: FileZilla, WinSCP, Cyberd
 `run.py boot` prints the address once the boot is sent:
 
 ```
-FTP: ftp://192.168.1.50:2121/ once the title starts (any user and password)
+FTP: ftp://192.168.1.50:1212/ once the title starts (any user and password)
 ```
 
 The server starts as the title's main thread is created, so it's up shortly after the title begins to load, and it stays up until SWRR closes. The console's log shows it:
 
 ```
 ftp: listening socket buffers: send 2048 KiB (had 32), receive 2048 KiB (had 64)
-ftp: listening on TCP 2121 (10 clients at once, 128 KiB each)
+ftp: listening on TCP 1212 (10 clients at once, 128 KiB each)
 ftp 1: 192.168.1.20 connected; starting in /ghostldr_usb
 ftp 1: STOR /ghostldr_usb/ghostldr-ftp-test/d.bin: 67108864 bytes in 2466 ms (26575 KiB/s; the file took 497 ms)
 ```
@@ -44,8 +44,8 @@ The drive is read-write, through the PS5's own exFAT (or FAT32) driver: upload, 
 With a title running from anywhere (a USB drive or SWRR's save containers), from the computer:
 
 ```bash
-python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0 --usb ftp://CONSOLE:2121/ghostldr_usb
-python3 ghostldr/host/usb_drive.py list ftp://CONSOLE:2121/ghostldr_usb
+python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0 --usb ftp://CONSOLE:1212/ghostldr_usb
+python3 ghostldr/host/usb_drive.py list ftp://CONSOLE:1212/ghostldr_usb
 ```
 
 It sends 8 files at once over 8 connections (`--jobs`). Then restart SWRR and boot the new title from the drive ([usb.md](usb.md)):
@@ -70,7 +70,7 @@ Measured on a stock 13.60 PS5 with Ghost of Tsushima running from the drive (a U
 
 ## Options
 
-- `run.py boot --ftp-port PORT` serves on another port. On a jailbroken console whose own FTP server (ftpsrv) already has 2121, the log says the port is taken; pick another.
+- `run.py boot --ftp-port PORT` serves on another port (1–65535). The default, 1212, stays clear of the ports console tools usually take: a jailbroken console's ftpsrv has 2121. If the port is taken anyway, the log says so and the title runs without FTP; pick another.
 - `run.py boot --ftp-port 0` turns the server off. Then ghostldr doesn't open the USB storage session for it either, and a title's own `sceUsbStorageInit` and `Term` reach the library as before.
 
 ## Security
