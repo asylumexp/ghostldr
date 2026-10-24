@@ -318,6 +318,27 @@ class CoreProfileTests(unittest.TestCase):
         lines = self.run_host("plan", GHOST_FP, "CUSA11456", env={"GHOSTLDR_TEST_DMQ_GAP": "0x13e00000-0x50080000"})
         self.assertEqual([ln for ln in lines if ln.startswith("budget:")], ghost_lines())
 
+    def test_ps4_plans_with_what_the_kernel_hands_out(self) -> None:
+        """A PS4 refused Ghost's 584 MiB pool with 1.9 GiB free in one hole (the
+        fourth PS4 report): there the plan counts what the kernel hands out."""
+        lines = self.run_host("plan", GHOST_FP, "CUSA11456", env={"GHOSTLDR_TEST_PS4_CAP": "4400"})
+        self.assertIn("budget: PS4: the kernel hands out 4400 MiB of direct memory (type 0), 4400 MiB (type 3), "
+                      "of 4532 MiB in free holes", lines)
+        self.assertIn("budget: 4532 MiB free in 6 holes; streaming pool 1120 -> 456 MiB; reporting 4388 MiB direct "
+                      "memory", lines)
+        self.assertIn("ps4 cap: 0 MiB still taken after the plan", lines)
+
+    def test_ps4_too_little_for_the_plan_says_so(self) -> None:
+        lines = self.run_host("plan", GHOST_FP, "CUSA11456", env={"GHOSTLDR_TEST_PS4_CAP": "2600"})
+        self.assertIn("budget: only 2600 MiB free; streaming pool clamped to 128 MiB", lines)
+        self.assertIn("budget: PS4: the title's plan needs about 1472 MiB more direct memory than this console "
+                      "hands out; it will likely fail when it allocates the rest", lines)
+        self.assertIn("ps4 cap: 0 MiB still taken after the plan", lines)
+
+    def test_ps4_with_room_plans_as_a_ps5(self) -> None:
+        lines = self.run_host("plan", GHOST_FP, "CUSA11456", env={"GHOSTLDR_TEST_PS4_CAP": "9000"})
+        self.assertEqual([ln for ln in lines if ln.startswith("budget:") and "PS4" not in ln], ghost_lines())
+
     def test_ghost_is_found_by_fingerprint_without_ghostfs(self) -> None:
         lines = self.run_host("select", GHOST_FP)
         self.assertTrue(lines[0].startswith("profile: CUSA11456 own profile"))

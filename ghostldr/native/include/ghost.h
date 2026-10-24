@@ -389,6 +389,7 @@ int vfs_stat(const char *path, void *st);
 int vfs_getdents(int fd, void *buf, int size);
 void vdm_log_lazy(void);
 bool budget_lazy_site(u64 eboot_off);
+u64 budget_allocatable(int type); /* PS4: direct memory of a type the kernel hands out now (taken and released) */
 int hle_map_flex(void **addr, size_t len, int prot, int flags); /* flexible memory, backed by direct (hle.c) */
 int budget_flex_unmap(void *addr, size_t len); /* a whole flex-as-direct block back, budget included */
 

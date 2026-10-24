@@ -52,6 +52,10 @@ COLD static void diag_platform(void)
     K.avail_flex(&flex);
     logf("diag: direct memory %lu MiB (%lu MiB free), flexible free %lu MiB", (u64)K.direct_size() >> 20,
          (u64)avail >> 20, (u64)flex >> 20);
+    /* a PS4 hands out less than its free holes (budget.c); measured there only */
+    if (c->flags & CTX_FLAG_PS4)
+        logf("diag: the kernel hands out %lu MiB more direct memory (type 0), %lu MiB (type 3)",
+             budget_allocatable(0) >> 20, budget_allocatable(3) >> 20);
     logf("diag: eboot %lx, bridge %lx, IPU buffer %lx, core end %lx, staging %lx+%lx, scratch %lx", c->eboot_base,
          c->reserved[1], c->reserved[2], c->reserved[3], c->staging, c->staging_size, c->oob_scratch);
     /* the gadget's bytes are not read here: system code in a PS5's compiler

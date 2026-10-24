@@ -1,8 +1,8 @@
 # ghostldr on a PS4
 
-Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe). The third (v0.6.0) got one check further, then the compiler process died: ghostldr had sent every system call through getpid's libkernel stub, which a PS4 refuses. See [The third report](#the-third-report-the-compiler-died-at-its-first-clock_gettime).
+Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe). The third (v0.6.0) got one check further, then the compiler process died: ghostldr had sent every system call through getpid's libkernel stub, which a PS4 refuses. See [The third report](#the-third-report-the-compiler-died-at-its-first-clock_gettime). The fourth (v0.6.1) passed every check, placed Ghost and ran it for about 3 seconds, until the PS4 refused Ghost's texture streaming pool: see [The fourth report](#the-fourth-report-ghost-ran-until-its-streaming-pool-was-refused).
 
-**Status: experimental and unverified on a PS4.** Everything below was worked out from the logs, Luac0re's source and SWRR's executable. No PS4 has got past the compiler checks yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
+**Status: experimental.** Everything below was worked out from the logs, Luac0re's source and SWRR's executable. On a 12.02 PS4, Ghost's code has run, but no title has reached its title screen yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
 
 ## What differs on a PS4
 
@@ -220,6 +220,38 @@ A PS5 is unchanged: `jit_sysw` is 0 there, and the gadget takes every number as 
 
 **What to send back.** The diagnostic's log again (`run.py probe --diag`). Its first lines now list the stubs, and its `jit: PS4 check` lines go on to the buffer probes. If it stops again, also say whether SWRR closed with an error code.
 
+## The fourth report: Ghost ran until its streaming pool was refused
+
+A v0.6.1 boot of Ghost from saved data on a 12.02 PS4 got through everything before the title:
+- **The compiler checks:** all four passed. getpid, then clock_gettime, each through its own stub, the socket pair, and EFAULT from the first page.
+- **The buffer probes:** they found what a 13.60 PS5 has. The compiler writes the EE and IOP buffers past 16 KiB, and VU0 and VU1 past 32 KiB. The small area after the core is writable too.
+- **Placement:** libSceFios2, libc, NpToolkit2 and eboot.bin went to `0x914b30000`, `0x914cc0000`, `0x914de0000` and `0x914ea0000`.
+- **The extension:** its 384 KiB went into a new JIT block, mapped at `0x919038000`, and its self-test passed. 415 imports were bound to it.
+- **SWRR's memory:** the SystemServicesThread stopped 40 ms after it was asked, and 1236 MiB were released. The largest free block was then 3292 MiB.
+- **Ghost's start:** its main thread started, and module starts, video out, the GPU's queues, trophies and NP all went as on a PS5. Ghost began loading its first packs.
+
+Then, 1 s into the title:
+
+```
+AllocateDirectMemory(0-120000000, len 24800000, align 200000, type 3) -> 80020023 phys 0 from eboot+eee115
+```
+
+That is the texture streaming pool, sized 584 MiB by the plan. A PS5 boot allocates it at phys `a7200000`, right after the 1390 MiB that Ghost had just placed at `50400000`. Here the PS4 refused it with EAGAIN, although by the earlier numbers 1902 MiB were free from `a7200000` in one block. ghostldr's fallback, which takes the size in pieces wherever they fit, failed too. Two seconds later Ghost read through a null pointer (`eboot+1c880`, `mov eax, [rdi+4]` with rdi 0, from the frame chain `eboot+8ba2ad`, `89c145`, `893d12` and the title's entry), most likely where it expected the pool.
+
+**What that means.** A refusal with more than enough room in one free block isn't fragmentation. The PS4 caps how much direct memory the application may allocate, below the free physical range that SWRR's 4608 MiB spans, and the plan had counted only the free holes. The size of the cap, and whether it counts the memory ghostldr released from SWRR, isn't known yet. Ghost had about 2.1 GiB allocated when it was refused. Its whole plan needs about 3.9 GiB, part of it backed only as Ghost touches it. So if a PS4 hands out much less than that, Ghost can't run there, whatever the pool's size.
+
+The PS4's libSceUsbStorage also has no `RequestMap2`, so games can't be loaded from a USB drive there. Saved data (ghostfs) works.
+
+**What changed.**
+1. **On a PS4, the plan counts what the kernel hands out.** Before planning, the core takes the largest piece of direct memory the kernel grants, halving down to 2 MiB, again and again until even 2 MiB is refused. Then it releases them all. It does this for type 0 and for type 3 (the GPU's) and logs both: `budget: PS4: the kernel hands out N MiB of direct memory (type 0), M MiB (type 3), of F MiB in free holes`. The streaming pool is sized from the smaller of that and the free holes. A PS5 plans as before.
+2. **When the pool's minimum doesn't fit,** the log says by how much the plan is short and that the title will likely fail later.
+3. **A refused allocation logs the kernel's largest free block,** so the next refusal shows whether there was room.
+4. **The diagnostic measures the same on a PS4,** before anything is released.
+
+`tests/native_host/profile_host.c` runs the planner against a fake PS4 kernel that hands out less than its holes. With 4400 MiB, Ghost's pool comes out at 456 MiB (reporting 4388). With 2600 MiB, the pool is clamped to its minimum and the log says the plan is 1472 MiB short. With more than the holes, the plan is a PS5's. Nothing measured stays taken.
+
+**What to send back.** A boot log again, and a diagnostic (`run.py probe --diag`). The `budget: PS4:` line and the diagnostic's `the kernel hands out` line give the PS4's limit.
+
 ## What is verified
 
 - From the log and SWRR's executable:
@@ -237,6 +269,13 @@ A PS5 is unchanged: `jit_sysw` is 0 there, and the gadget takes every number as 
   - The real `jitrpc.c` against a fake compiler thread: the checks and probes end whether the compiler's bytes go astray, the descriptor is wrong, stale bytes wait, or the compiler never answers. A PS5 never reads the clock. Like a PS4, the fake runs a system call only from its own number's stub: every number gets its own, and a number without one isn't called.
   - `ghostldr.lua` under a fake Luac0re: the PS4 flag, the firmware, the gadget and the table of stubs at the offsets `ghost.h` has, and the PS5 values unchanged.
   - `run.py probe --diag`'s flags.
+- On a 12.02 PS4, with v0.6.1 (a boot of Ghost from saved data, the fourth report):
+  - the compiler checks, each system call through its own stub;
+  - the buffer probes: the EE and IOP buffers written past 16 KiB, VU0 and VU1 past 32 KiB, and the small area;
+  - Ghost's modules placed past the EE buffer's header and relocated, its TLS sites patched, and its hooks in place;
+  - a new JIT block for the extension (384 KiB), and the extension's self-test;
+  - the SystemServicesThread stopped when asked (40 ms), and SWRR's buffers released;
+  - Ghost's main thread, module starts and first second: video out, the GPU's queues, trophies, NP and its first packs.
 - On a 13.60 PS5, with these changes (2026-10-22):
   - `run.py probe --diag` ran to the end without crashing SWRR.
     - Buffers: as above.
@@ -254,11 +293,10 @@ A PS5 is unchanged: `jit_sysw` is 0 there, and the gadget takes every number as 
 
 ## What is not verified
 
-- That a PS4's compiler runs each of these system calls through its own stub. Only getpid has run there. That is what Luac0re does, and what the third report points to.
-- That the compiler writes the EE buffer past its first 16 KiB on a PS4.
-- That a new JIT block can be made on a PS4 at all, even the extension's 320 KiB. A 13.60 PS5 allows 768 KiB in all; a PS4's limit is unknown. The PS4 compiler process's flexible memory was 248.1 of 249.6 MiB. A 25 MiB fallback block is very unlikely to work.
-- That the SystemServicesThread stops when asked on a PS4, and that no other SWRR thread uses the released buffers there.
+- How much direct memory a PS4 hands out, why, and whether Ghost's plan (about 3.9 GiB) fits under it. v0.6.2 measures it.
+- How much new JIT memory a PS4 allows. The extension's 384 KiB block worked; a 13.60 PS5 allows 768 KiB in all. The PS4 compiler process's flexible memory was 248.1 of 249.6 MiB. A 25 MiB fallback block is very unlikely to work.
+- That no other SWRR thread uses the released buffers on a PS4. None did in the 3 s Ghost ran.
 - That Luac0re's thread cancels work on a PS4.
 - That a new JIT block maps at a fixed address on a PS4. On a 13.60 PS5, read-only views of the emulator's own JIT objects map with MAP_FIXED anywhere, but this hasn't been checked for new blocks. The fallback needs one over the EE buffer.
-- Everything after the code is written: TLS, the title's start, graphics, audio, saves and input on a PS4.
+- Everything past Ghost's first second on a PS4: graphics on screen, audio, saves and input.
 - A 14.10 or 14.20 PS5 with these changes. Only a 13.60 PS5 was booted.

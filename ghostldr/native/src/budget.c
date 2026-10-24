@@ -106,6 +106,50 @@ COLD static u32 free_holes(struct hole *h, u64 *total)
     return n;
 }
 
+/* PS4: how much direct memory of a type the kernel really hands out.  A
+ * 12.02 PS4 refused Ghost's 584 MiB streaming pool (EAGAIN) with 1.9 GiB
+ * free in one hole, so there the free holes overstate what an application
+ * may allocate (docs/ps4.md, the fourth report).  Takes the largest piece
+ * the kernel grants (halving down to 2 MiB) until it refuses even that,
+ * then releases them all.  0: nothing to measure with. */
+COLD u64 budget_allocatable(int type)
+{
+    int (*alloc)(off_t, off_t, size_t, size_t, int, off_t *) = host_real("sceKernelAllocateDirectMemory");
+    int (*rel)(off_t, size_t) = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelReleaseDirectMemory");
+    struct hole got[MAX_HOLES];
+    u64 real = K.direct_size(), sum = 0;
+    u32 n = 0;
+    while (alloc && rel && K.avail_direct && n < MAX_HOLES) {
+        off_t s = 0, phys = 0;
+        size_t avail = 0;
+        if (K.avail_direct(0, (off_t)real, 2 * MiB, &s, &avail) != 0)
+            break;
+        u64 len = ALIGN_DOWN((u64)avail, 2 * MiB);
+        while (len >= 2 * MiB && alloc(0, (off_t)real, len, 2 * MiB, type, &phys) != 0)
+            len = ALIGN_DOWN(len / 2, 2 * MiB);
+        if (len < 2 * MiB)
+            break;
+        got[n++] = (struct hole){(u64)phys, (u64)phys + len};
+        sum += len;
+    }
+    for (u32 i = 0; i < n; i++)
+        rel((off_t)got[i].s, got[i].e - got[i].s);
+    return sum;
+}
+
+/* what a plan may count on: the free holes, or on a PS4 what the kernel
+ * hands out of them (the smaller of type 0 and type 3, the GPU's) */
+COLD static u64 usable(u64 total)
+{
+    if (!is_ps4())
+        return total;
+    u64 a0 = budget_allocatable(0), a3 = budget_allocatable(3), a = MIN(a0, a3);
+    logf("budget: PS4: the kernel hands out %lu MiB of direct memory (type 0), %lu MiB (type 3), of %lu MiB in "
+         "free holes",
+         a0 / MiB, a3 / MiB, total / MiB);
+    return a && a < total ? a : total;
+}
+
 COLD static const char *table_name(const struct prof_table *t) { return (const char *)&t->expect[t->nexpect]; }
 
 /* a profile's plan: set tables, absorb the rest (see the top) */
@@ -152,11 +196,16 @@ COLD static void plan_tables(struct module *m, u8 *text, const struct prof_plan 
             logf("budget: free %lx-%lx (%lu MiB)", free[i].s, free[i].e, (free[i].e - free[i].s) / MiB);
     s64 video = h->video_reserve_mib >= 0 ? h->video_reserve_mib : VIDEO_MIB;
     s64 orig = (s64)(absorb->expect[mode] / MiB);
-    s64 pool_mib = (s64)(total / MiB) - (s64)fixed - (s64)reserve - delta_mib + (s64)overcommit - video;
+    u64 have = usable(total);
+    s64 pool_mib = (s64)(have / MiB) - (s64)fixed - (s64)reserve - delta_mib + (s64)overcommit - video;
     if (pool_mib > orig)
         pool_mib = orig;
     if (pool_mib < (s64)absorb->min_mib) {
-        logf("budget: only %lu MiB free; %s clamped to %u MiB", total / MiB, table_name(absorb), absorb->min_mib);
+        logf("budget: only %lu MiB free; %s clamped to %u MiB", have / MiB, table_name(absorb), absorb->min_mib);
+        if (is_ps4())
+            logf("budget: PS4: the title's plan needs about %ld MiB more direct memory than this console hands "
+                 "out; it will likely fail when it allocates the rest",
+                 (s64)absorb->min_mib - pool_mib);
         pool_mib = absorb->min_mib;
     }
     pool_mib &= ~1L;
@@ -213,7 +262,7 @@ COLD static int plan_free(struct module *m, const u8 *text)
     for (u32 i = 0; i < nfree; i++)
         if (free[i].e - free[i].s > free[largest].e - free[largest].s)
             largest = i;
-    s64 d = ((s64)(total / MiB) - (s64)reserve - video - (s64)(flex / MiB)) & ~1L;
+    s64 d = ((s64)(usable(total) / MiB) - (s64)reserve - video - (s64)(flex / MiB)) & ~1L;
     logf("budget: plan-free: %lu MiB free in %u holes (largest %lu) - %lu ghostldr - %ld video - %lu flex = "
          "%ld MiB direct memory, one run; Neo mode 0",
          total / MiB, nfree, nfree ? (free[largest].e - free[largest].s) / MiB : 0, reserve, video, flex / MiB, d);

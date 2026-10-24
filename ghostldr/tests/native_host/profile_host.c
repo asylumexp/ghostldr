@@ -82,12 +82,44 @@ static int fake_dmq(off_t off, int next, void *out, size_t size)
 
 static size_t fake_direct_size(void) { return 0x120000000; }
 
+/* GHOSTLDR_TEST_PS4_CAP=MIB: the PS4 flag, and a kernel that hands out at
+ * most MIB MiB of direct memory however large its holes (the fourth PS4
+ * report).  budget.c measures that by taking pieces and releasing them. */
+static u64 g_cap, g_taken, g_next_phys = 0x50400000;
+
+static int fake_alloc(off_t start, off_t end, size_t len, size_t align, int type, off_t *out)
+{
+    if (g_taken + len > g_cap)
+        return (int)0x80020023;
+    g_taken += len;
+    *out = (off_t)g_next_phys;
+    g_next_phys += len;
+    return 0;
+}
+
+static int fake_release(off_t phys, size_t len)
+{
+    g_taken -= len;
+    return 0;
+}
+
+static int fake_avail(off_t start, off_t end, size_t align, off_t *s, size_t *size)
+{
+    *s = 0x50400000, *size = 0xcdc00000; /* the largest hole, 2 MiB aligned (3292 MiB) */
+    return 0;
+}
+
 void *host_dlsym(u32 handle, const char *name)
 {
+    if (g_cap && strcmp(name, "sceKernelReleaseDirectMemory") == 0)
+        return (void *)fake_release;
     return strcmp(name, "sceKernelDirectMemoryQuery") == 0 ? (void *)fake_dmq : NULL;
 }
 
-void *host_real(const char *name) { return NULL; }
+void *host_real(const char *name)
+{
+    return g_cap && strcmp(name, "sceKernelAllocateDirectMemory") == 0 ? (void *)fake_alloc : NULL;
+}
 u64 stub_alloc_code(const u8 *code, u32 len) { return 0x5000 + code[1]; } /* mov eax, idx: index in byte 1 */
 int hle_alloc_direct(off_t start, off_t end, size_t len, size_t align, int type, off_t *out) { return 0; }
 int budget_flex_gate(u64 len);
@@ -185,6 +217,12 @@ int main(int argc, char **argv)
     g_ctx = (struct boot_ctx *)g_ctx_mem;
     g_ctx_mem[63] = (u64)g_bundle;
     K.direct_size = fake_direct_size;
+    const char *cap = getenv("GHOSTLDR_TEST_PS4_CAP");
+    if (cap) {
+        g_cap = strtoul(cap, NULL, 0) * MiB;
+        g_ctx->flags |= CTX_FLAG_PS4;
+        K.avail_direct = fake_avail;
+    }
     u8 fp[20];
     bool have_fp = argc > 3 && strlen(argv[3]) == 40;
     for (u32 i = 0; have_fp && i < 20; i++)
@@ -203,6 +241,8 @@ int main(int argc, char **argv)
         int rc = budget_patch_text(&g_main, g_text);
         logf("patch rc %d reported %lu MiB, stream table %lu MiB, cpu heap %lu MiB", rc, g_reported_dmem / MiB,
              *(u64 *)(g_text + 0x111cd50) / MiB, *(u64 *)(g_text + 0x111cd20) / MiB);
+        if (g_cap)
+            logf("ps4 cap: %lu MiB still taken after the plan", g_taken / MiB);
         logf("lazy site 0x896126 %d, gate %x, flex gate %x", budget_lazy_site(0x896126),
              budget_alloc_gate(g_reported_dmem + 0x10000), budget_flex_gate(449 * MiB));
         char nid[12];
