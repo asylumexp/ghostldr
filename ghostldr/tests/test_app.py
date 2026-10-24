@@ -136,7 +136,7 @@ class ServerTest(TempDirs):
         self.assertEqual(self.request("GET", "/api/state", token=self.server.token[:-1])[0], 401)
         status, data = self.request("GET", "/api/state")
         self.assertEqual(status, 200)
-        self.assertEqual(data["version"], "0.6.3")
+        self.assertEqual(data["version"], "0.6.4")
 
     def test_every_api_route_checks_the_token(self) -> None:
         from ghostapp.server import ROUTES
