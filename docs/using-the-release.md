@@ -47,7 +47,7 @@ You still need everything under What you need, including the firewall rules. [ap
 
 ## 1. Download and unpack
 
-From the release page, download `ghostldr-v0.6.1.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
+From the release page, download `ghostldr-v0.6.2.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
 
 ```bash
 shasum -a 256 --ignore-missing -c SHA256SUMS.txt
@@ -56,11 +56,11 @@ shasum -a 256 --ignore-missing -c SHA256SUMS.txt
 Unpack it and work from inside the folder; every command below runs there:
 
 ```bash
-unzip ghostldr-v0.6.1.zip
+unzip ghostldr-v0.6.2.zip
 ```
 
 ```bash
-cd ghostldr-v0.6.1
+cd ghostldr-v0.6.2
 ```
 
 ## 2. Put the game files in place
