@@ -96,6 +96,9 @@ u64 host_release_emulator_memory(u64 min_size)
     u64 freed = 0, addr = 0x200000000;
     u64 heap = is_ps4() && !is_jakx() ? *(volatile u64 *)(g_ctx->eboot_base + SWRR_HEAP_MSPACE) : 0;
     bool heap_idle = !heap || ps4_stop_system_services();
+    /* a PS4 caps what SWRR may allocate below its free memory (budget.c):
+     * whether releasing gives any of that back decides what a title can have */
+    u64 before = is_ps4() ? budget_allocatable(0) : 0;
     for (int i = 0; i < 400 && addr < 0x280000000; i++) {
         memset(info, 0, sizeof(*info));
         if (K.virtual_query((void *)addr, 1, info, 0x48) != 0)
@@ -155,6 +158,12 @@ u64 host_release_emulator_memory(u64 min_size)
     size_t avail = 0;
     K.avail_direct(0, (off_t)K.direct_size(), 0x10000, &s, &avail);
     logf("hostmem: freed %lu MiB, direct available now %lu MiB", freed >> 20, (u64)avail >> 20);
+    if (is_ps4()) {
+        u64 after = budget_allocatable(0);
+        logf("hostmem: PS4: the kernel hands out %lu MiB before the release, %lu MiB after: %lu of the %lu MiB "
+             "released count",
+             before >> 20, after >> 20, (after > before ? after - before : 0) >> 20, freed >> 20);
+    }
     return freed;
 }
 

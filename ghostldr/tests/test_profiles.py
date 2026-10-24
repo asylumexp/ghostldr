@@ -328,12 +328,21 @@ class CoreProfileTests(unittest.TestCase):
                       "memory", lines)
         self.assertIn("ps4 cap: 0 MiB still taken after the plan", lines)
 
-    def test_ps4_too_little_for_the_plan_says_so(self) -> None:
-        lines = self.run_host("plan", GHOST_FP, "CUSA11456", env={"GHOSTLDR_TEST_PS4_CAP": "2600"})
-        self.assertIn("budget: only 2600 MiB free; streaming pool clamped to 128 MiB", lines)
-        self.assertIn("budget: PS4: the title's plan needs about 1472 MiB more direct memory than this console "
-                      "hands out; it will likely fail when it allocates the rest", lines)
+    def test_ps4_far_too_little_stops_the_boot(self) -> None:
+        """The fifth PS4 report: 2480 MiB handed out, Ghost's plan ~1.6 GiB short,
+        and a black screen once its lazily backed heaps ran out.  Now it stops."""
+        lines = self.run_host("plan", GHOST_FP, "CUSA11456", env={"GHOSTLDR_TEST_PS4_CAP": "2480"})
+        self.assertIn("budget: only 2480 MiB free; streaming pool clamped to 128 MiB", lines)
+        self.assertIn("budget: PS4: CUSA11456 needs about 1592 MiB more direct memory than this PS4 lets SWRR "
+                      "allocate: not started (docs/ps4.md)", lines)
+        self.assertTrue(any(ln.startswith("patch rc -1 ") for ln in lines), lines)
         self.assertIn("ps4 cap: 0 MiB still taken after the plan", lines)
+
+    def test_ps4_a_little_short_still_starts(self) -> None:
+        lines = self.run_host("plan", GHOST_FP, "CUSA11456", env={"GHOSTLDR_TEST_PS4_CAP": "3900"})
+        self.assertIn("budget: PS4: the title's plan needs about 172 MiB more direct memory than this console "
+                      "hands out; it may fail when it allocates the rest", lines)
+        self.assertIn("patch rc 0 reported 4060 MiB, stream table 128 MiB, cpu heap 320 MiB", lines)
 
     def test_ps4_with_room_plans_as_a_ps5(self) -> None:
         lines = self.run_host("plan", GHOST_FP, "CUSA11456", env={"GHOSTLDR_TEST_PS4_CAP": "9000"})

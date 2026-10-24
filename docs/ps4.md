@@ -1,6 +1,6 @@
 # ghostldr on a PS4
 
-Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe). The third (v0.6.0) got one check further, then the compiler process died: ghostldr had sent every system call through getpid's libkernel stub, which a PS4 refuses. See [The third report](#the-third-report-the-compiler-died-at-its-first-clock_gettime). The fourth (v0.6.1) passed every check, placed Ghost and ran it for about 3 seconds, until the PS4 refused Ghost's texture streaming pool: see [The fourth report](#the-fourth-report-ghost-ran-until-its-streaming-pool-was-refused).
+Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe). The third (v0.6.0) got one check further, then the compiler process died: ghostldr had sent every system call through getpid's libkernel stub, which a PS4 refuses. See [The third report](#the-third-report-the-compiler-died-at-its-first-clock_gettime). The fourth (v0.6.1) passed every check, placed Ghost and ran it for about 3 seconds, until the PS4 refused Ghost's texture streaming pool: see [The fourth report](#the-fourth-report-ghost-ran-until-its-streaming-pool-was-refused). The fifth (v0.6.2) measured the PS4's limit: SWRR may allocate 2480 MiB more, about 1.6 GiB less than Ghost needs, and Ghost stopped at a black screen once that ran out: see [The fifth report](#the-fifth-report-a-black-screen-ghost-ran-out-of-the-ps4s-memory).
 
 **Status: experimental.** Everything below was worked out from the logs, Luac0re's source and SWRR's executable. On a 12.02 PS4, Ghost's code has run, but no title has reached its title screen yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
 
@@ -252,6 +252,43 @@ The PS4's libSceUsbStorage also has no `RequestMap2`, so games can't be loaded f
 
 **What to send back.** A boot log again, and a diagnostic (`run.py probe --diag`). The `budget: PS4:` line and the diagnostic's `the kernel hands out` line give the PS4's limit.
 
+## The fifth report: a black screen, Ghost ran out of the PS4's memory
+
+v0.6.2 on the same 12.02 PS4 measured the limit:
+
+```
+budget: PS4: the kernel hands out 2480 MiB of direct memory (type 0), 2480 MiB (type 3), of 4529 MiB in free holes
+budget: only 2480 MiB free; streaming pool clamped to 128 MiB
+budget: PS4: the title's plan needs about 1592 MiB more direct memory than this console hands out; it will likely fail when it allocates the rest
+```
+
+Ghost then went further than ever on a PS4:
+- its 128 MiB pool was allocated;
+- the GPU drew and flipped frames;
+- the boot flow went through its splash (the splash movie was skipped: no memory for the video decoder);
+- the level warp ran to `Done`;
+- Ghost asked for its first game pack.
+
+But its fixed heaps (2234 MiB) and 246 MiB of the heaps it fills as it goes used up the 2480 MiB exactly. From then on every new chunk was refused:
+
+```
+vdm: lazy commit of chunk 113 (type 0) failed 80020023 after 114 chunks: out of direct memory (246 MiB of lazy reservations committed, largest free block 1947648 KiB)
+```
+
+The sound and game packs couldn't be mapped. Reads into them failed with EFAULT, and Ghost waited for them for good: a black screen, no crash.
+
+**What it means.** On this PS4, SWRR may allocate 2480 MiB once ghostldr has released the emulator's memory. Ghost of Tsushima needs about 3.9 GiB in mode 0. Its fixed heaps alone (CPU 320 MiB, engine 332 MiB, GPU 1390 MiB) and what the first menus fill take about that much. So Ghost can't run in SWRR on a PS4, unless the release turns out not to count. Titles that need less may fit: a title without a memory plan is now told what the PS4 hands out.
+
+**What isn't known yet** is whether releasing SWRR's 1236 MiB raised the limit at all. If the PS4 doesn't count a release, SWRR's own allocations could be handed to the title instead of released: about 1.2 GiB more. That could be enough for Ghost's menus, though still not for all of its plan.
+
+**What changed.**
+1. **A PS4 boot measures the limit before and after it releases SWRR's memory,** and logs how much of the release counted: `hostmem: PS4: the kernel hands out B MiB before the release, A MiB after: C of the 1236 MiB released count`.
+2. **A plan short by more than 256 MiB on a PS4 stops the boot before the title starts** (`budget: PS4: CUSA11456 needs about N MiB more direct memory than this PS4 lets SWRR allocate: not started`). That replaces the black screen. Less than that, and the title starts with a warning: the heaps it fills as it goes can carry it a while.
+
+`profile_host.c` checks both: 2480 MiB stops Ghost's boot, 1592 MiB short; 3900 MiB starts it, 172 MiB short.
+
+**What to send back.** One boot log with v0.6.3. Its `hostmem: PS4:` line says whether the release counts.
+
 ## What is verified
 
 - From the log and SWRR's executable:
@@ -293,7 +330,7 @@ The PS4's libSceUsbStorage also has no `RequestMap2`, so games can't be loaded f
 
 ## What is not verified
 
-- How much direct memory a PS4 hands out, why, and whether Ghost's plan (about 3.9 GiB) fits under it. v0.6.2 measures it.
+- Whether a PS4 counts the memory ghostldr releases from SWRR against its limit (v0.6.3 logs it), and so whether SWRR's own allocations could be reused instead. On 12.02, SWRR may allocate 2480 MiB after the release, about 1.6 GiB less than Ghost needs.
 - How much new JIT memory a PS4 allows. The extension's 384 KiB block worked; a 13.60 PS5 allows 768 KiB in all. The PS4 compiler process's flexible memory was 248.1 of 249.6 MiB. A 25 MiB fallback block is very unlikely to work.
 - That no other SWRR thread uses the released buffers on a PS4. None did in the 3 s Ghost ran.
 - That Luac0re's thread cancels work on a PS4.

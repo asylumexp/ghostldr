@@ -16,7 +16,7 @@ You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your o
 - **OpenOrbis homebrew** runs ([details](docs/compatibility.md#homebrew)).
 - **An FTP server on the PS5** while a game runs, to put more games onto the drive in it ([docs/ftp.md](docs/ftp.md)).
 - **Other games** boot as far as their imports and memory allow.
-- **PS4 consoles** are experimental: Ghost's code runs on a 12.02 PS4, but no title has reached its title screen there yet. Games load from saved data there, not from a USB drive ([docs/ps4.md](docs/ps4.md)).
+- **PS4 consoles** are experimental: Ghost's code runs on a 12.02 PS4, but SWRR may allocate only about 2.4 GiB there, so Ghost doesn't fit and stops before it starts. Games load from saved data there, not from a USB drive ([docs/ps4.md](docs/ps4.md)).
 - **Jak X instead of SWRR** (EU CUSA07992 1.04, with [UltraC0re](https://github.com/matem6/UltraC0re)) is experimental: Ghost plays there, in its PS4 Pro mode, from its own install in Jak X's save data ([docs/jakx.md](docs/jakx.md)).
 
 ## Getting started

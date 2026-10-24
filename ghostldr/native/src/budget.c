@@ -153,7 +153,11 @@ COLD static u64 usable(u64 total)
 COLD static const char *table_name(const struct prof_table *t) { return (const char *)&t->expect[t->nexpect]; }
 
 /* a profile's plan: set tables, absorb the rest (see the top) */
-COLD static void plan_tables(struct module *m, u8 *text, const struct prof_plan *plan)
+/* PS4: a plan short by more than this stops the boot.  Less can still run a
+ * while: the lazily backed heaps (vdm.c) fill only as the title goes on. */
+#define PS4_SHORT_MIB 256
+
+COLD static int plan_tables(struct module *m, u8 *text, const struct prof_plan *plan)
 {
     const struct prof_hdr *h = profile_hdr();
     const struct prof_table *t, *absorb = NULL;
@@ -167,7 +171,7 @@ COLD static void plan_tables(struct module *m, u8 *text, const struct prof_plan 
     if (!absorb || mode >= absorb->nexpect || absorb->offset + 8UL * absorb->nexpect > m->text_size ||
         memcmp(pool, absorb->expect, 8UL * absorb->nexpect)) {
         logf("budget: %s table not found; leaving the plan alone", absorb ? table_name(absorb) : "absorbing");
-        return;
+        return 0;
     }
     if (neo)
         logf("budget: Pro-mode host: the title's memory mode %u, %u MiB fixed, %u overcommitted", mode, fixed,
@@ -202,10 +206,17 @@ COLD static void plan_tables(struct module *m, u8 *text, const struct prof_plan 
         pool_mib = orig;
     if (pool_mib < (s64)absorb->min_mib) {
         logf("budget: only %lu MiB free; %s clamped to %u MiB", have / MiB, table_name(absorb), absorb->min_mib);
+        s64 short_mib = (s64)absorb->min_mib - pool_mib;
+        if (is_ps4() && short_mib > PS4_SHORT_MIB) {
+            logf("budget: PS4: %s needs about %ld MiB more direct memory than this PS4 lets SWRR allocate: not "
+                 "started (docs/ps4.md)",
+                 profile_title(), short_mib);
+            return -1;
+        }
         if (is_ps4())
             logf("budget: PS4: the title's plan needs about %ld MiB more direct memory than this console hands "
-                 "out; it will likely fail when it allocates the rest",
-                 (s64)absorb->min_mib - pool_mib);
+                 "out; it may fail when it allocates the rest",
+                 short_mib);
         pool_mib = absorb->min_mib;
     }
     pool_mib &= ~1L;
@@ -214,6 +225,7 @@ COLD static void plan_tables(struct module *m, u8 *text, const struct prof_plan 
     g_flex_cap = h->flex_mib * MiB;
     logf("budget: %lu MiB free in %u holes; %s %ld -> %ld MiB; reporting %lu MiB direct memory", total / MiB, nfree,
          table_name(absorb), orig, pool_mib, g_reported_dmem / MiB);
+    return 0;
 }
 
 /* what an address of the executable holds at plan time: text is still in
@@ -280,10 +292,8 @@ COLD static int plan_free(struct module *m, const u8 *text)
 COLD int budget_patch_text(struct module *m, u8 *text)
 {
     const struct prof_plan *plan = profile_record(REC_PLAN, 0);
-    if (plan) {
-        plan_tables(m, text, plan);
-        return 0;
-    }
+    if (plan)
+        return plan_tables(m, text, plan);
     return plan_free(m, text);
 }
 
