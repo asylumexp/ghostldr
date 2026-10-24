@@ -106,6 +106,14 @@ int arena_code_region(u64 *lo, u64 *hi)
     return 0;
 }
 
+/* the buffer is written where it is executed here (arena.c's PS4 alias is
+ * a console concern) */
+u64 arena_wr(u64 dst, u64 size)
+{
+    (void)size;
+    return dst;
+}
+
 u64 jit_call(u64 fn, u64 rax, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 a6)
 {
     if (fn != JIT_MEMCPY || a1 < (u64)g_region || a1 + a3 > (u64)g_region + REGION_SIZE) {

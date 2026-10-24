@@ -31,6 +31,19 @@ long sys_lseek(int fd, long off, int whence);
 u64 sys_strtoul(const char *s);
 void abort(void);
 
+/* np_sys.c: the console's libkernel file calls (the title store's host) */
+int sys_kernel_open(const char *path, int flags, int mode);
+int sys_kernel_close(int fd);
+long sys_kernel_pread(int fd, void *b, unsigned long n, long off);
+long sys_kernel_pwrite(int fd, const void *b, unsigned long n, long off);
+int sys_kernel_stat(const char *path, void *st);
+int sys_kernel_mkdir(const char *path);
+int sys_kernel_unlink(const char *path);
+int sys_kernel_rmdir(const char *path);
+int sys_kernel_rename(const char *from, const char *to);
+int sys_kernel_getdents(int fd, void *buf, int size);
+int sys_kernel_gettimeofday(void *tv);
+
 #define USER1 0x10000001
 #define USER2 0x10000002
 #define USER3 0x10000003
@@ -108,6 +121,30 @@ static s32 c_rtc_tick(u64 *t)
 }
 static s64 c_igm_initialize(u64 a, u64 b, u64 c, u64 d, u64 e, u64 f) { return (s64)(a + b + f); }
 
+/* libkernel's own file calls, which the save data family's title store
+ * reaches through host_real: backed by this process's files (np_sys.c),
+ * rooted where the store derives its root from the title's app0 */
+static void *host_real_(const char *name)
+{
+    static const struct {
+        const char *name;
+        void *fn;
+    } k[] = {
+        {"sceKernelOpen", sys_kernel_open},     {"sceKernelClose", sys_kernel_close},
+        {"sceKernelPread", sys_kernel_pread},   {"sceKernelPwrite", sys_kernel_pwrite},
+        {"sceKernelStat", sys_kernel_stat},     {"sceKernelMkdir", sys_kernel_mkdir},
+        {"sceKernelUnlink", sys_kernel_unlink}, {"sceKernelRmdir", sys_kernel_rmdir},
+        {"sceKernelRename", sys_kernel_rename}, {"sceKernelGetdents", sys_kernel_getdents},
+        {"sceKernelGettimeofday", sys_kernel_gettimeofday},
+    };
+    for (u32 i = 0; i < ARRAY_SIZE(k); i++)
+        if (!strcmp(k[i].name, name))
+            return k[i].fn;
+    return NULL;
+}
+
+static bool gfs_none(void) { return false; } /* no ghostfs here: the store uses its save root */
+
 static void *host_real_in_(const char *mod, const char *name)
 {
     static const struct {
@@ -160,7 +197,9 @@ const struct ghost_api g_ghost_api = {
     .compute_nid = compute_nid,
     .spin_lock = lock,
     .spin_unlock = unlock,
+    .host_real = host_real_,
     .host_real_in = host_real_in_,
+    .gfs_active = gfs_none,
     .remap_path = remap,
     .vfs_open = v_open,
     .vfs_read = v_read,
@@ -400,6 +439,9 @@ static void request_tests(void)
     EQ(get(res_buf), 0x80B80005, "result before it ran: NOT_FINISHED");
     u8 cdp[0x80] = {0};
     const char *targets[1] = {"EP0000-CUSA00000_00-TEST"};
+    *(u64 *)cdp = 0x30; /* the SceCommonDialogBaseParam every dialog param starts with */
+    *(u32 *)(cdp + 0x2c) = 0xC0D1A109u + (u32)(u64)cdp;
+    *(s32 *)(cdp + 0x30) = 0x80; /* the param's own size field */
     *(s32 *)(cdp + 0x38) = 1;
     *(const char *const **)(cdp + 0x40) = targets;
     *(u32 *)(cdp + 0x48) = 1;
@@ -707,6 +749,7 @@ int main(int argc, char **argv)
         return 1;
     }
     g_root = argv[3];
+    g_ctx->app_root = (u64)argv[3]; /* the title store derives its save root from the app0 */
     g_base = sys_strtoul(argv[5]); /* the entry's offset: trophy_tests turns it into the image base */
     g_read_off = sys_strtoul(argv[6]), g_write_off = sys_strtoul(argv[7]);
     const char *scenario = argv[4];

@@ -118,6 +118,12 @@ static u64 g_gfs_pos[10];
 static bool g_gfs_open[10];
 bool gfs_active(void) { return false; }
 const char *gfs_title(void) { return "CUSA99999"; }
+/* ghostfs.c and bigexec.c are not linked here: ghostfs is inactive (above)
+ * and no module in this harness is a big executable */
+int gfs_find_file(const char *name, char *dir, size_t size) { (void)name, (void)dir, (void)size; return -1; }
+int bx_place(struct module *m) { (void)m; return -1; }
+int bx_write_text(struct module *m, const u8 *text) { (void)m, (void)text; return -1; }
+u32 bx_code(const struct module *m, const struct bx_range **runs) { (void)m, (void)runs; return 0; }
 static int k_getpid(void) { return 77; }
 static s32 real_app_info(s32 pid, u8 *info)
 {
@@ -504,7 +510,13 @@ static void load_start_tests(void)
 }
 
 /* ---- goal 3: module queries and thread-exit hooks ---- */
-static void dtor_hook(void) { g_tls_slot ^= 0x10000; }
+/* the title libc's thread-exit hook, faked: count the runs.  (It used to
+ * flip a bit in g_tls_slot as its marker, but the core's thread trampoline
+ * runs the hook too -- before its own TLS teardown -- so the marker
+ * corrupted the ending thread's slot and its blocks were never recycled:
+ * the goal-4 reuse check below could not pass with it.) */
+static u32 g_dtors_ran;
+static void dtor_hook(void) { g_dtors_ran++; }
 
 static void query_tests(void)
 {
@@ -572,11 +584,10 @@ static void query_tests(void)
     expect(inc(libc->base + 0x4100) == 0 && inc((u64)&stack_var) == 1,
            "rtld thread atexit: the title's modules register thread_local destructors");
     g_thread_dtors = dtor_hook;
-    u64 slot = g_tls_slot;
+    u32 dtors = g_dtors_ran;
     u32 exits = g_real_exits;
     pexit(NULL);
-    expect(g_tls_slot == (slot ^ 0x10000) && g_real_exits == exits + 1, "pthread exit runs libc's thread-exit hook");
-    g_tls_slot = slot;
+    expect(g_dtors_ran == dtors + 1 && g_real_exits == exits + 1, "pthread exit runs libc's thread-exit hook");
 }
 
 /* ---- goal 4: TLS ---- */

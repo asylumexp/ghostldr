@@ -14,7 +14,19 @@
 
 int os_open(const char *p, int flags, int mode)
 {
-    int f = flags & (O_ACCMODE | O_CREAT | O_TRUNC | O_EXCL | O_APPEND);
+    /* the flags arrive in Orbis (FreeBSD) numbering, which the BSD hosts
+     * share but Linux does not: translate each bit instead of masking with
+     * the host's constants (on Linux the mask dropped O_CREAT 0x200 and
+     * picked up O_TRUNC/O_APPEND in its place) */
+    int f = flags & (O_RDONLY | O_WRONLY | O_RDWR); /* the access mode agrees */
+    if (flags & 0x200) /* Orbis O_CREAT */
+        f |= O_CREAT;
+    if (flags & 0x400) /* Orbis O_TRUNC */
+        f |= O_TRUNC;
+    if (flags & 0x800) /* Orbis O_EXCL */
+        f |= O_EXCL;
+    if (flags & 0x8) /* Orbis O_APPEND */
+        f |= O_APPEND;
     if (flags & PS4_O_DIRECTORY)
         f |= O_DIRECTORY;
     int fd = open(p, f, mode);

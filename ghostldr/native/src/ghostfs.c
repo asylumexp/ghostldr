@@ -21,9 +21,11 @@
  * sceSaveDataMount comes from SWRR's import table (eboot+0x3893F0; resolved
  * through dlsym it refuses every mount), params: userId u32 @0, dirName*
  * @0x10, blocks u64 @0x20, mode u32 @0x28 (RO 1, RW 2, CREATE 4); result:
- * mountPoint char[16] @0.  File calls go to libkernel's own exports.
+ * mountPoint char[16] @0.  Jak X imports sceSaveDataMount2 instead (host.c):
+ * userId @0, dirName* @0x8, blocks @0x10, mode @0x18, the same result.  File
+ * calls go to libkernel's own exports.
  */
-#include "ghost.h"
+#include "ghost_api.h"
 
 void *host_real(const char *name);
 void *host_real_in(const char *modname, const char *name);
@@ -33,7 +35,6 @@ void *host_real_in(const char *modname, const char *name);
 #define GFS_MAX_CONT 96
 #define GFS_SLOTS 12          /* of /savedata1..15: leave room for <prefix>SAVE and a spare */
 #define GFS_FILES 512
-#define SWRR_SAVEDATA_MOUNT 0x3893F0  /* sceSaveDataMount import slot (SWRR US and EU: same executable) */
 /* signed, so they stay negative in the s64 results */
 #define E_NOENT ((s32)0x80020002)
 #define E_BADF ((s32)0x80020009)
@@ -41,7 +42,7 @@ void *host_real_in(const char *modname, const char *name);
 #define E_INVAL ((s32)0x80020016)
 #define E_ROFS ((s32)0x8002001e)
 #define E_NOMEM ((s32)0x8002000c)
-#define COLD __attribute__((minsize, cold)) /* boot-time code: small beats fast */
+#define COLD GHOST_COLD /* boot-time code: small beats fast */
 
 /* gfs_pack.py: version 2 has a 128-byte header (title, layout id, flags);
  * version 1 (GHOSTIDX until 2026-10-21) stops at prefix, 64 bytes */
@@ -67,6 +68,12 @@ static const char *g_names;
 static u8 *g_opened;          /* bitmap: first open of each entry is logged */
 static bool g_active;
 static u32 g_user;
+/* A title from a USB drive (approot.c): another provider may serve /app0
+ * (route B: the extension's usbfs), and its progress goes to <prefix>SAVE
+ * as a ghostfs title's does */
+static const struct appfs_ops *g_fs;
+static bool g_saves;
+static char g_save_title[16], g_save_prefix[16];
 
 static int (*sd_mount)(void *params, void *result);
 static int (*sd_umount)(const char *mount_point);
@@ -75,7 +82,18 @@ static int (*k_close)(int);
 static s64 (*k_pread)(int, void *, u64, s64);
 static int (*k_stat)(const char *, void *);
 
-bool gfs_active(void) { return g_active; }
+/* the title runs from SWRR's save data or a USB drive: no host directory, saves in containers */
+bool gfs_active(void) { return g_active || g_fs || g_saves; }
+bool gfs_app0_virtual(void) { return g_active || g_fs; }
+
+int appfs_register(const struct appfs_ops *ops)
+{
+    if (!ops || ops->size < sizeof(*ops) || g_active)
+        return -1;
+    g_fs = ops;
+    logf("ghostfs: %s serves the title's files", ops->name);
+    return 0;
+}
 
 /* the first few of each kind of unusual request are logged (diagnosis) */
 static u32 g_diag[4];
@@ -108,10 +126,11 @@ int gfs_mount_user(s32 user, const char *dirname, int mode, u64 blocks, char mou
     memset(result, 0, sizeof(result));
     memset(dir, 0, sizeof(dir));
     strlcpy(dir, dirname, sizeof(dir));
+    bool m2 = g_hostgame->save_mount2;
     *(u32 *)(params + 0x00) = user < 0 ? g_user : (u32)user;
-    *(u64 *)(params + 0x10) = (u64)dir;
-    *(u64 *)(params + 0x20) = blocks;
-    *(u32 *)(params + 0x28) = (u32)mode;
+    *(u64 *)(params + (m2 ? 0x08 : 0x10)) = (u64)dir;
+    *(u64 *)(params + (m2 ? 0x10 : 0x20)) = blocks;
+    *(u32 *)(params + (m2 ? 0x18 : 0x28)) = (u32)mode;
     int rc = sd_mount(params, result);
     if (rc == 0) {
         memcpy(mount_point, result, 16);
@@ -144,7 +163,7 @@ static bool sd_ready(void)
 {
     if (sd_mount)
         return true;
-    u64 p = *(u64 *)(g_ctx->eboot_base + SWRR_SAVEDATA_MOUNT);
+    u64 p = *(u64 *)(g_ctx->eboot_base + g_hostgame->save_mount);
     sd_umount = host_real_in("libSceSaveData", "sceSaveDataUmount");
     int (*get_user)(u32 *) = host_real_in("libSceUserService", "sceUserServiceGetInitialUser");
     k_open = host_real("sceKernelOpen");
@@ -157,6 +176,14 @@ static bool sd_ready(void)
     }
     sd_mount = (int (*)(void *, void *))p;
     return true;
+}
+
+COLD void gfs_use_saves(const char *title, const char *prefix)
+{
+    g_saves = sd_ready();
+    strlcpy(g_save_title, title, sizeof(g_save_title));
+    strlcpy(g_save_prefix, prefix, 13);
+    logf("ghostfs: %s keeps its progress in %sSAVE%s", title, prefix, g_saves ? "" : " (no save data service)");
 }
 
 struct cont {
@@ -349,7 +376,9 @@ static s64 find(const char *rel)
 int gfs_find_file(const char *name, char *dir, size_t size)
 {
     size_t len = strlen(name);
-    for (u32 i = 0; g_active && i < g_hdr->entries; i++) {
+    if (!g_active)
+        return 1; /* no index to look in */
+    for (u32 i = 0; i < g_hdr->entries; i++) {
         const char *e = ename(i);
         size_t el = strlen(e);
         if ((g_ent[i].flags & 1) || el <= len || e[el - len - 1] != '/' || strcmp(e + el - len, name) != 0 ||
@@ -564,15 +593,23 @@ const char *gfs_save_name(void)
     static char name[32];
     if (!name[0] && g_hdr)
         fmt(name, sizeof(name), "%.16sSAVE", g_hdr->prefix);
+    if (!name[0] && g_saves)
+        fmt(name, sizeof(name), "%sSAVE", g_save_prefix);
     return name;
 }
 
-/* the title ID gfs_pack.py wrote in the index (version 2), "" when unknown */
+/* the title ID gfs_pack.py wrote in the index (version 2); a dump outside
+ * ghostfs (run.py --app-root): the profile's, bound by the executable's
+ * fingerprint; "" when unknown */
 const char *title_id(void)
 {
     static char id[17];
     if (!id[0] && g_hdr && g_hdr->version >= 2)
         memcpy(id, g_hdr->title, sizeof(g_hdr->title));
+    if (!id[0] && g_saves)
+        strlcpy(id, g_save_title, sizeof(id));
+    if (!id[0] && !g_hdr)
+        strlcpy(id, profile_title(), sizeof(id));
     return id;
 }
 
@@ -596,7 +633,7 @@ static struct gfile *gf_of(int fd)
     return NULL;
 }
 
-bool gfs_owns(int fd) { return gf_of(fd) != NULL; }
+bool gfs_owns(int fd) { return g_fs ? g_fs->owns(fd) : gf_of(fd) != NULL; }
 
 static void fill_stat(void *st, u32 i)
 {
@@ -620,6 +657,8 @@ static void fill_stat(void *st, u32 i)
 int gfs_open(const char *path, int flags, int *fd_out)
 {
     char rel[512];
+    if (g_fs)
+        return g_fs->open(path, flags, fd_out);
     if (!app0_rel(path, rel, sizeof(rel)))
         return 1;
     if (flags & 3) {                                   /* O_WRONLY / O_RDWR */
@@ -644,7 +683,8 @@ int gfs_open(const char *path, int flags, int *fd_out)
     int fd = k_open(placeholder, 0, 0);
     if (dir_ok == -1) {
         dir_ok = fd >= 0;
-        logf("ghostfs: placeholder fds are %s (%x)", dir_ok ? "SWRR's /app0 directory" : "SWRR's eboot.bin", fd);
+        logf("ghostfs: placeholder fds are %s (%x)", dir_ok ? "the host's /app0 directory" : "the host's eboot.bin",
+             fd);
         if (!dir_ok) {
             strlcpy(placeholder, "/app0/eboot.bin", sizeof(placeholder));
             fd = k_open(placeholder, 0, 0);
@@ -677,6 +717,8 @@ int gfs_open(const char *path, int flags, int *fd_out)
 
 int gfs_close(int fd)
 {
+    if (g_fs)
+        return g_fs->close(fd);
     struct gfile *f = gf_of(fd);
     if (!f)
         return 1;
@@ -689,6 +731,8 @@ int gfs_close(int fd)
 
 s64 gfs_pread(int fd, void *buf, u64 n, s64 off)
 {
+    if (g_fs)
+        return g_fs->pread(fd, buf, n, off);
     struct gfile *f = gf_of(fd);
     const struct gfs_entry *e = &g_ent[f->entry];
     if (e->flags & GFS_DIR)
@@ -703,6 +747,8 @@ s64 gfs_pread(int fd, void *buf, u64 n, s64 off)
 
 s64 gfs_read(int fd, void *buf, u64 n)
 {
+    if (g_fs)
+        return g_fs->read(fd, buf, n);
     struct gfile *f = gf_of(fd);
     s64 r = gfs_pread(fd, buf, n, (s64)f->pos);
     if (r > 0)
@@ -712,6 +758,8 @@ s64 gfs_read(int fd, void *buf, u64 n)
 
 s64 gfs_lseek(int fd, s64 off, int whence)
 {
+    if (g_fs)
+        return g_fs->lseek(fd, off, whence);
     struct gfile *f = gf_of(fd);
     s64 base = whence == 0 ? 0 : whence == 1 ? (s64)f->pos : whence == 2 ? (s64)g_ent[f->entry].size : -1;
     if (base < 0 || base + off < 0)
@@ -722,6 +770,8 @@ s64 gfs_lseek(int fd, s64 off, int whence)
 
 int gfs_fstat(int fd, void *st)
 {
+    if (g_fs)
+        return g_fs->fstat(fd, st);
     DIAG(DIAG_STAT, "gfs fstat /app0/%s", ename(gf_of(fd)->entry));
     fill_stat(st, gf_of(fd)->entry);
     return 0;
@@ -731,6 +781,8 @@ int gfs_fstat(int fd, void *st)
 int gfs_stat(const char *path, void *st, int *rc)
 {
     char rel[512];
+    if (g_fs)
+        return g_fs->stat(path, st, rc);
     if (!app0_rel(path, rel, sizeof(rel)))
         return 1;
     s64 i = find(rel);
@@ -749,6 +801,8 @@ int gfs_stat(const char *path, void *st, int *rc)
  * next entry index to look at */
 int gfs_getdents(int fd, void *buf, int size)
 {
+    if (g_fs)
+        return g_fs->getdents(fd, buf, size);
     struct gfile *f = gf_of(fd);
     if (!(g_ent[f->entry].flags & GFS_DIR))
         return (int)E_INVAL;

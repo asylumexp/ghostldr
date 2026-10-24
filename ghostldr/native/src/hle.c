@@ -51,7 +51,7 @@ const char *remap_path(const char *path, char *buf, size_t size)
     }
     if (!g_app_root[0] && g_ctx && g_ctx->app_root)
         strlcpy(g_app_root, (const char *)g_ctx->app_root, sizeof(g_app_root));
-    if (!gfs_active() && strncmp(path, "/app0", 5) == 0 && (path[5] == '/' || path[5] == 0)) {
+    if (!gfs_app0_virtual() && strncmp(path, "/app0", 5) == 0 && (path[5] == '/' || path[5] == 0)) {
         fmt(buf, size, "%s%s", g_app_root, path + 5);
         return buf;
     }

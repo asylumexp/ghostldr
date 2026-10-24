@@ -11,7 +11,10 @@
  *
  * Everything read goes into the selector's heap and is released after use;
  * no mount outlives a call.  Outside ghostfs (an app root on /data, dev
- * setups) there is one title, read through the core's file calls.
+ * setups) there is one title, read through the core's file calls; or, when
+ * the core says the app root is a library (CTX_FLAG_LIBRARY: a USB drive's
+ * ghostldr folder, docs/usb.md), one title per folder <ID>/app0, with its
+ * name and art in <ID>/meta.bin when gfs_pack.py --usb wrote one.
  */
 #include "plat.h"
 
@@ -94,6 +97,69 @@ static int legacy_header(struct plat *P, u8 h[128])
     return -1;
 }
 
+/* ---- a library: a folder of title folders ---- */
+static int title_name(const char *s)
+{
+    int n = 0;
+    for (; s[n]; n++)
+        if (!((s[n] >= 'A' && s[n] <= 'Z') || (s[n] >= '0' && s[n] <= '9') || s[n] == '_' || s[n] == '-'))
+            return 0;
+    return n >= 1 && n <= 15;
+}
+
+/* the library's titles, by ID: their count; ids (when given) gets them sorted */
+static int lib_list(struct plat *P, char (*ids)[16], int max)
+{
+    const struct ghost_api *a = P->api;
+    int fd = a->vfs_open(P->root, O_RDONLY, 0), n = 0, got;
+    if (fd < 0)
+        return 0;
+    u8 buf[2048];
+    while ((got = a->vfs_getdents(fd, buf, sizeof(buf))) > 0)
+        for (int off = 0; off + 8 < got && n < max;) {
+            const u8 *d = buf + off;
+            u16 reclen = (u16)(d[4] | d[5] << 8);
+            if (!reclen)
+                break;
+            const char *name = (const char *)d + 8;
+            char path[320];
+            u8 st[0x80];
+            fmt(path, sizeof(path), "%s/%s/app0/eboot.bin", P->root, name);
+            if ((d[6] == 4 || d[6] == 0) && title_name(name) && a->vfs_stat(path, st) == 0) {
+                if (ids) {
+                    int at = n;
+                    while (at && strcmp(ids[at - 1], name) > 0) {
+                        memcpy(ids[at], ids[at - 1], 16);
+                        at--;
+                    }
+                    strlcpy(ids[at], name, 16);
+                }
+                n++;
+            }
+            off += reclen;
+        }
+    a->vfs_close(fd);
+    return n;
+}
+
+/* up to cap bytes at off of a file under the app root: bytes read, or < 0 */
+static s64 root_read(struct plat *P, const char *path, u64 off, void *buf, u64 cap)
+{
+    const struct ghost_api *a = P->api;
+    int fd = a->vfs_open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+    s64 got = a->vfs_lseek(fd, (s64)off, 0) == (s64)off ? 0 : -1;
+    while (got >= 0 && (u64)got < cap) {
+        s64 r = a->vfs_read(fd, (u8 *)buf + got, cap - (u64)got);
+        if (r <= 0)
+            break;
+        got += r;
+    }
+    a->vfs_close(fd);
+    return got;
+}
+
 /* How many titles are installed (before the heap exists). */
 int cat_count(struct plat *P)
 {
@@ -101,6 +167,10 @@ int cat_count(struct plat *P)
      * not loaded any index yet when it asks the selector */
     if (strcmp((const char *)P->ctx->app_root, "ghostfs") != 0) {
         strlcpy(P->root, (const char *)P->ctx->app_root, sizeof(P->root));
+        if (P->ctx->flags & CTX_FLAG_LIBRARY) {
+            P->library = 1;
+            return lib_list(P, NULL, SEL_MAX_TITLES);
+        }
         return 1;
     }
     P->ghostfs = 1;
@@ -206,7 +276,11 @@ static void read_sfo(struct sel *S, struct plat *P, int t)
 /* ---- <prefix>META (host/gfs_meta.py): the name and art stored with the install ---- */
 s64 cat_meta_read(struct plat *P, int t, u64 off, void *buf, u64 cap)
 {
-    char dir[32];
+    char dir[320];
+    if (P->library) { /* <ID>/meta.bin beside its app0 */
+        fmt(dir, sizeof(dir), "%s/%s/meta.bin", P->root, P->cat[t].id);
+        return root_read(P, dir, off, buf, cap);
+    }
     fmt(dir, sizeof(dir), "%sMETA", P->cat[t].prefix);
     return read_in(P, dir, "meta.bin", off, buf, cap);
 }
@@ -230,6 +304,21 @@ int cat_load(struct sel *S, struct plat *P, int n)
     if (!P->cat)
         return -1;
     P->ncat = n;
+    if (P->library) { /* one title per folder */
+        char (*ids)[16] = sel_alloc(S, 16 * (u64)n);
+        if (!ids)
+            return -1;
+        P->ncat = n = lib_list(P, ids, n);
+        for (int i = 0; i < n; i++) {
+            struct cat_title *c = &P->cat[i];
+            strlcpy(c->id, ids[i], sizeof(c->id));
+            c->indexed = 1;
+            read_sfo(S, P, i);
+            profile_name(P, c);
+            cat_pick_name(c);
+        }
+        return n ? 0 : -1;
+    }
     if (!P->ghostfs) { /* one title at the app root */
         P->cat[0].indexed = 1;
         read_sfo(S, P, 0);
@@ -359,7 +448,10 @@ s64 cat_file(struct sel *S, struct plat *P, int t, int which, void *buf, u64 cap
     if (!P->ghostfs) {
         char full[512];
         u8 st[0x80];
-        fmt(full, sizeof(full), "%s/%s", P->root, FILES[which]);
+        if (P->library)
+            fmt(full, sizeof(full), "%s/%s/app0/%s", P->root, P->cat[t].id, FILES[which]);
+        else
+            fmt(full, sizeof(full), "%s/%s", P->root, FILES[which]);
         if (a->vfs_stat(full, st) != 0)
             return -1;
         s64 size = *(s64 *)(st + 0x48);

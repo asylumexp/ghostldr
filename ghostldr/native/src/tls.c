@@ -20,7 +20,7 @@
  */
 #include "ghost.h"
 
-#define COLD __attribute__((minsize, cold)) /* boot-time or rare: small beats fast */
+#define COLD GHOST_COLD /* boot-time or rare: small beats fast */
 
 #define MIN_U32(a, b) ((a) < (b) ? (a) : (b))
 

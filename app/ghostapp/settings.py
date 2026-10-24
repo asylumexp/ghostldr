@@ -24,6 +24,10 @@ DEFAULTS: dict = {
     "console": {"ip": "", "host_id": "", "name": "", "kind": ""},
     "title": "",                # last packed / chosen title ID
     "fetch_art": False,         # also ask the PlayStation Store for name and art when preparing
+    "mode": "",                 # how games reach the PS5: "saves" (installed into SWRR's saved data) or "usb"
+    "usb_where": "computer",    # the USB drive is plugged into this "computer" or the "console"
+    "usb_drive": "",            # its mount point on this computer
+    "usb_url": "",              # in the PS5: an FTP address other than ghostldr's own (a jailbroken PS5's ftpsrv)
 }
 
 

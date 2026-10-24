@@ -156,6 +156,63 @@ def parse_pack(text: str) -> dict:
     return out
 
 
+# ---- gfs_pack.py --usb and usb_drive.py ----
+
+USB_START = re.compile(r"^(?P<title>\S+): copying (?P<todo>\d+) of (?P<files>\d+) files, (?P<gib>[\d.]+) GiB$")
+USB_PROGRESS = re.compile(r"^(?P<title>\S+): (?P<done>[\d.]+) of (?P<need>[\d.]+) GiB, (?P<count>\d+) of "
+                          r"(?P<todo>\d+) files, (?P<rate>\d+) MiB/s$")
+USB_SUMMARY = re.compile(r"^(?P<title>\S+): (?P<files>\d+) files, (?P<gib>[\d.]+) GiB in (?P<folder>.+) "
+                         r"\((?P<fs>[^)]*)\): (?P<copied>\d+) copied, (?P<kept>\d+) already there, "
+                         r"(?P<removed>\d+) removed; progress goes to (?P<prefix>\S+)SAVE on the console$")
+USB_CONNECTIONS = re.compile(r"^\S+: copying over (\d+) connection\(s\)")
+USB_NAME = re.compile(r"^selector: (\S+): name '(.*?)' \(")
+USB_LIST_HEAD = re.compile(r"^(?P<label>\S.*) \((?P<fs>[^()]*)\): (?P<n>\d+) title\(s\)$")
+
+
+def parse_usb_line(line: str) -> dict | None:
+    """One line of gfs_pack.py --usb (usb_drive.put_title) as an event."""
+    line = line.rstrip()
+    if m := USB_START.match(line):
+        return {"event": "start", "title": m["title"], "todo": int(m["todo"]), "files": int(m["files"]),
+                "gib": float(m["gib"])}
+    if m := USB_PROGRESS.match(line):
+        return {"event": "progress", "title": m["title"], "done_gib": float(m["done"]), "need_gib": float(m["need"]),
+                "count": int(m["count"]), "todo": int(m["todo"]), "rate": int(m["rate"])}
+    if m := USB_SUMMARY.match(line):
+        return {"event": "summary", "title": m["title"], "files": int(m["files"]), "gib": float(m["gib"]),
+                "folder": m["folder"], "fs": m["fs"], "copied": int(m["copied"]), "kept": int(m["kept"]),
+                "removed": int(m["removed"]), "prefix": m["prefix"]}
+    if m := USB_CONNECTIONS.match(line):
+        return {"event": "connections", "count": int(m[1])}
+    if m := USB_NAME.match(line):
+        return {"event": "name", "title": m[1], "name": m[2]}
+    if line.startswith("selector: "):
+        return {"event": "selector", "text": line[len("selector: "):]}
+    if "aren't known over FTP" in line:
+        return {"event": "ftp"}
+    fit = parse_fit(line)
+    if fit:
+        return {"event": "fit", "fit": fit}
+    return None
+
+
+def parse_usb_list(text: str) -> dict:
+    """usb_drive.py list DRIVE: the drive's file system and titles ({title, name, version})."""
+    out: dict = {"ok": False, "label": "", "fs": "", "entries": []}
+    for line in text.splitlines():
+        if m := USB_LIST_HEAD.match(line):
+            out.update(ok=True, label=m["label"], fs=m["fs"])
+        elif out["ok"] and line.startswith("  ") and line.strip():
+            parts = line[2:].split("  ")
+            title = parts[0].strip()
+            if not re.fullmatch(r"[A-Z0-9_][A-Z0-9_-]{0,14}", title):
+                continue
+            rest = [p.strip() for p in parts[1:] if p.strip()]
+            version = rest.pop() if rest and re.fullmatch(r"\d{2}\.\d{2}", rest[-1]) else ""
+            out["entries"].append({"title": title, "name": " ".join(rest), "version": version})
+    return out
+
+
 # ---- gfs_install.py ----
 
 PROGRESS = re.compile(r"^\[(\d+)/(\d+)\] (\S+): (\d+) MiB in (\d+) s \(console (\d+) s\); avg ([\d.]+) MB/s, "

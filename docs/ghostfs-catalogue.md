@@ -120,6 +120,8 @@ Written by `gfs_pack.py` (the authoritative description is its docstring). Littl
 
 PUT, DELETE and WRITE refuse names that end in `SAVE` and SWRR's own saves (status -3), so only DELSAVE, sent on explicit request, ever deletes progress.
 
+PUT's bytes go through the pump (`ghostldr/native/pump/pump.c`) when the installer sends it (`GFS_PUMP_HEX`, from `ghostldr/data/gfs_pump.bin`): native code in the IPU JIT buffer, where the core goes at boot. The receiver's thread receives into four 4 MiB buffers while a second thread writes them, so a container goes in at the slower of the network and the save writes rather than at their combined time. On a 13.60 PS5 the save writes top out at about 25 MB/s, the same with larger writes, `O_DIRECT`, a pre-sized file, more writer threads or two containers at once; the Lua loop managed about 14. Without the pump (`gfs_install.py --no-pump`, under UltraC0re, or if it can't be set up) PUT runs the Lua loop. `make pump` in `ghostldr/native` rebuilds the checked-in blob.
+
 ## The core
 
 - At boot ghostfs reads the catalogue and picks the title: the one `run.py boot --title T` asked for; else the only bootable title. With several, the game selector picks (docs/selector.md): `gfs_init` returns 1 without mounting anything, and `boot.c` runs the selector once SWRR's memory is free, then `gfs_pick(title)`. Without the selector it stops and logs the list (`ghostfs: several titles: pick one with run.py boot --title TITLE`). `run.py --select` leaves the choice to the selector even with one title or `--title`. Without a catalogue it boots the legacy `GFSINDEX`/`GHOSTIDX` title.

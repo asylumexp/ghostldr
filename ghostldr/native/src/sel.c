@@ -16,7 +16,7 @@
 #include "sel_api.h"
 
 extern const struct ghost_api g_ghost_api;
-#define COLD __attribute__((minsize, cold)) /* boot-time code: small beats fast */
+#define COLD GHOST_COLD /* boot-time code: small beats fast */
 
 COLD static u32 crc32(const u8 *p, u64 n)
 {

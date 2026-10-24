@@ -19,6 +19,12 @@ the boot group first, then the traced files, then the rest by its groups.
     python3 ghostldr/host/gfs_pack.py                     # the dump in build/ghost/app0
     python3 ghostldr/host/gfs_pack.py --src DIR [--title CUSA12345] [--prefix NAME] [--order FILE]
                                       [--name NAME] [--icon FILE] [--backdrop FILE] [--fetch-art]
+    python3 ghostldr/host/gfs_pack.py --src DIR --usb /Volumes/DRIVE   # onto a USB drive instead (docs/usb.md)
+    python3 ghostldr/host/gfs_pack.py --src DIR --usb ftp://PS5:2121/mnt/usb0   # one plugged into a jailbroken PS5
+
+With --usb the title is not packed into containers: its app0 is copied to
+<DRIVE>/ghostldr/<TITLE>/app0 with its prefix file and meta.bin beside it
+(usb_drive.py), for run.py boot --app-root usb:/ghostldr.
 
 The title comes from --title, else sce_sys/param.sfo, else the profile whose
 eboot fingerprint matches, else (OpenOrbis homebrew) the eboot's module name.
@@ -40,6 +46,7 @@ container's pieces, so an unchanged order gives an unchanged id.
 from __future__ import annotations
 
 import argparse
+import ftplib
 import hashlib
 import json
 import re
@@ -49,6 +56,7 @@ from pathlib import Path
 import gfs_catalog as gc
 import gfs_meta as gm
 import profiles as titles
+import usb_drive
 import exec_fit  # noqa: E402 (ghostldr/tools, on the path through profiles)
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -246,6 +254,26 @@ def index_header(count: int, entries: int, total: int, names_off: int, names_siz
     return header + b"\0" * (HEADER_SIZE - len(header))
 
 
+def to_usb(args, src: Path, title: str, prefix: str, prof: dict) -> int:
+    """--usb: the title's folder on the drive (usb_drive.py)."""
+    name = args.name
+    if not name and not prof.get("name") and not titles.param_sfo(src).get("TITLE") and titles.homebrew_toolchain(src):
+        name = titles.eboot_module_name(src)
+    try:
+        info = usb_drive.put_title(src, args.usb, title, prefix, prof, name, args.icon, args.backdrop, args.fetch_art,
+                                   args.art_dir, args.refetch, jobs=args.jobs, progress=args.progress)
+    except (usb_drive.DriveError, gm.ArtError) + ftplib.all_errors as e:
+        raise SystemExit(str(e))
+    print(f"selector: {info['summary']}")
+    print(f"{title}: {info['files']} files, {info['total'] / 2**30:.2f} GiB in {info['folder']} ({info['fs']}): "
+          f"{info['copied']} copied, {info['kept']} already there, {info['removed']} removed; progress goes to "
+          f"{prefix}SAVE on the console")
+    fit, line = exec_fit.check(src, title)
+    print(line)
+    print(f"boot it with: python3 ghostldr/host/run.py boot --app-root {usb_drive.APP_ROOT} --title {title}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", type=Path, default=titles.DEFAULT_SRC,
@@ -254,6 +282,13 @@ def main() -> int:
     ap.add_argument("--prefix", help="container name prefix, unique per title (default: the profile's, else G + "
                     "the ID's digits)")
     ap.add_argument("--order", type=Path, help="open-order file to use instead of the profile's (capture_order.py)")
+    ap.add_argument("--usb", metavar="DRIVE",
+                    help="copy the title onto a USB drive instead of packing it (docs/usb.md): where this computer "
+                    "has it mounted, or ftp://HOST[:PORT]/mnt/usbN for one plugged into a jailbroken PS5")
+    ap.add_argument("--jobs", type=int, default=usb_drive.FTP_JOBS,
+                    help=f"with --usb ftp://...: files sent at once (default {usb_drive.FTP_JOBS})")
+    ap.add_argument("--progress", type=float, default=30, metavar="SECONDS",
+                    help="with --usb: seconds between progress lines (default 30)")
     gm.add_args(ap)
     args = ap.parse_args()
     src = args.src
@@ -274,6 +309,8 @@ def main() -> int:
     why = gc.prefix_problem(prefix)
     if why:
         raise SystemExit(f"prefix {prefix}: {why} (--prefix picks another)")
+    if args.usb:
+        return to_usb(args, src, title, prefix, prof)
     info = pack(src, title, prefix, OUT_ROOT / title, prof, args.order)
     name = args.name
     if not name and not prof.get("name") and not titles.param_sfo(src).get("TITLE") and titles.homebrew_toolchain(src):

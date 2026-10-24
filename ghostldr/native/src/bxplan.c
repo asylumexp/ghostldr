@@ -28,7 +28,7 @@
  */
 #include "bxplan.h"
 
-#define COLD __attribute__((minsize, cold))
+#define COLD GHOST_COLD
 
 static u32 ld32(const u8 *p) { return p[0] | p[1] << 8 | p[2] << 16 | (u32)p[3] << 24; }
 static u64 ld64(const u8 *p) { return ld32(p) | (u64)ld32(p + 4) << 32; }

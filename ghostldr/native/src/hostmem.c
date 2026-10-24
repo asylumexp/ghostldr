@@ -1,5 +1,5 @@
 /*
- * Give the title SWRR's direct memory back.
+ * Give the title the host's direct memory back.
  *
  * SWRR's process has the normal 4.5 GiB direct-memory budget, but the PS2
  * emulator holds ~1.3 GiB of it in large CPU/GPU buffers (EE/GS caches,
@@ -7,6 +7,10 @@
  * the EE thread never returns from Lua, so those buffers are dead weight.
  * Unmap and release every large direct-memory mapping in the emulator's heap
  * range that the loader did not allocate itself.
+ *
+ * Jak X (Pro mode, 5 GiB) holds ~2 GiB, 1.5 GiB of it the GS emulation's.
+ * UltraC0re leaves the GS and IOP threads running: they are stopped here
+ * first, as Luac0re does in SWRR.
  */
 #include "ghost.h"
 
@@ -36,7 +40,7 @@ bool direct_is_ours(u64 addr);
  * thread writes into its buffer, so the heap cannot go while it runs: on a
  * PS4 v0.1.1 boot it faulted at once (docs/ps4.md).  Stop it the way SWRR's
  * own exit path would; true when nothing of it uses the heap any more. */
-__attribute__((minsize, cold)) static bool ps4_stop_system_services(void)
+GHOST_COLD static bool ps4_stop_system_services(void)
 {
     u64 eb = g_ctx->eboot_base, thr = *(volatile u64 *)(eb + SWRR_SYSSVC_THREAD);
     volatile u64 *buf = (volatile u64 *)(eb + SWRR_SYSSVC_BUFFER);
@@ -53,12 +57,44 @@ __attribute__((minsize, cold)) static bool ps4_stop_system_services(void)
     return idle;
 }
 
+/* the host's emulator threads its loader did not stop (host.c): cancelled
+ * the way the loaders do it; one still running after 200 ms (blocked where
+ * a cancel does not reach, waiting for the stopped EE) is suspended, so it
+ * never wakes up in the buffers the title gets */
+__attribute__((minsize, cold)) void host_stop_emulator_threads(void)
+{
+    u32 lk = (u32)g_ctx->libkernel_handle;
+    int (*cancel)(u64) = host_dlsym(lk, "scePthreadCancel");
+    int (*suspend)(u64) = host_dlsym(lk, "scePthreadSuspend");
+    int (*kill)(u64, int) = host_dlsym(lk, "pthread_kill");
+    int (*getname)(u64, char *) = host_dlsym(lk, "scePthreadGetname");
+    for (u32 i = 0; i < ARRAY_SIZE(g_hostgame->stop) && g_hostgame->stop[i].name; i++) {
+        u64 thr = *(volatile u64 *)(g_ctx->eboot_base + g_hostgame->stop[i].handle);
+        char name[40] = "";
+        if (!thr || !cancel || !kill || kill(thr, 0) != 0) {
+            logf("hostmem: %s thread %s (%lx): not running", g_hostgame->name, g_hostgame->stop[i].name, thr);
+            continue;
+        }
+        if (getname)
+            getname(thr, name);
+        name[39] = 0;
+        int rc = cancel(thr);
+        u32 ms = 0;
+        for (; ms < 200 && kill(thr, 0) == 0; ms += 10)
+            K.usleep(10000);
+        bool alive = kill(thr, 0) == 0;
+        int src = alive && suspend ? suspend(thr) : -1;
+        logf("hostmem: %s thread %s (%lx, '%s'): cancel %x, %s", g_hostgame->name, g_hostgame->stop[i].name, thr,
+             name, rc, !alive ? "gone" : src == 0 ? "still there after 200 ms: suspended" : "STILL RUNNING");
+    }
+}
+
 u64 host_release_emulator_memory(u64 min_size)
 {
     int (*rel)(off_t, size_t) = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelReleaseDirectMemory");
     struct vq_info2 *info = arena_alloc(sizeof(*info) + 16);
     u64 freed = 0, addr = 0x200000000;
-    u64 heap = is_ps4() ? *(volatile u64 *)(g_ctx->eboot_base + SWRR_HEAP_MSPACE) : 0;
+    u64 heap = is_ps4() && !is_jakx() ? *(volatile u64 *)(g_ctx->eboot_base + SWRR_HEAP_MSPACE) : 0;
     bool heap_idle = !heap || ps4_stop_system_services();
     for (int i = 0; i < 400 && addr < 0x280000000; i++) {
         memset(info, 0, sizeof(*info));
@@ -82,19 +118,19 @@ u64 host_release_emulator_memory(u64 min_size)
         if (rrc == 0)
             freed += size;
     }
-    /* SWRR's display buffers: close its video output first (the title opens
-     * its own in sceVideoOutOpen), then release them too */
-    s32 swrr_vo = *(volatile s32 *)(g_ctx->eboot_base + 0x2d695d0);
+    /* the host's display buffers: close its video output first (the title
+     * opens its own in sceVideoOutOpen), then release them too */
+    s32 host_vo = *(volatile s32 *)(g_ctx->eboot_base + g_hostgame->video_handle);
     int (*vo_close)(s32) = NULL;
     {
         void *host_real_in(const char *modname, const char *name);
         vo_close = (int (*)(s32))host_real_in("libSceVideoOut", "sceVideoOutClose");
     }
-    if (swrr_vo > 0 && vo_close) {
-        int c = vo_close(swrr_vo);
-        logf("hostmem: closed SWRR video output %d -> %x", swrr_vo, c);
+    if (host_vo > 0 && vo_close) {
+        int c = vo_close(host_vo);
+        logf("hostmem: closed %s video output %d -> %x", g_hostgame->name, host_vo, c);
         if (c == 0) {
-            *(volatile s32 *)(g_ctx->eboot_base + 0x2d695d0) = 0;
+            *(volatile s32 *)(g_ctx->eboot_base + g_hostgame->video_handle) = 0;
             addr = 0x200000000;
             for (int i = 0; i < 400 && addr < 0x280000000; i++) {
                 memset(info, 0, sizeof(*info));
@@ -131,11 +167,13 @@ void host_dmem_census(void)
         int type;
     } q;
     int (*dmq)(off_t, int, void *, size_t) = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelDirectMemoryQuery");
-    u64 total = 0, off = 0;
-    for (int i = 0; dmq && i < 256; i++) {
+    u64 total = 0, off = 0, real = K.direct_size();
+    for (int i = 0; dmq && i < 16384 && off < real; i++) {
         memset(&q, 0, sizeof(q));
-        if (dmq((off_t)off, 1 /* find next */, &q, sizeof(q)) != 0)
-            break;
+        if (dmq((off_t)off, 1 /* find next */, &q, sizeof(q)) != 0) {
+            off = ALIGN_DOWN(off, 1UL << 20) + (1UL << 20); /* see budget.c free_holes */
+            continue;
+        }
         u64 size = (u64)(q.end - q.start);
         total += size;
         if (size >= 0x100000)

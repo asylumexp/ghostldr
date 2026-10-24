@@ -35,8 +35,9 @@ int sys_unused_fd(void);
 int sys_vfmt(char *buf, u64 size, const char *fmt, __builtin_va_list ap);
 
 #ifdef __APPLE__
-/* resolve.c's assembly calls the unprefixed C name */
+/* resolve.c's assembly calls the unprefixed C names */
 __asm__(".globl c_unresolved\nc_unresolved:\n    jmp _c_unresolved\n");
+__asm__(".globl c_late_target\nc_late_target:\n    jmp _c_late_target\n");
 #endif
 
 struct kfuncs K;
@@ -44,7 +45,10 @@ struct boot_ctx *g_ctx;
 /* the small RX area after the core (arena.c) */
 static u8 *g_small;
 static u64 g_small_cur, g_small_end;
-struct module *g_modules, *g_main_mod;
+#ifndef ENV_REAL_LOADER /* kernel.c links loader.c, which defines g_modules itself */
+struct module *g_modules;
+#endif
+struct module *g_main_mod;
 u64 g_reported_dmem;
 
 void logf(const char *f, ...)
@@ -100,7 +104,13 @@ const struct ghost_api g_ghost_api = {
 #define CORE_OPEN 0xc0de0000ULL
 u64 hle_lookup(const char *lib, const char *name)
 {
-    return strcmp(name, "sceKernelOpen") == 0 && (!lib || strcmp(lib, "libkernel") == 0) ? CORE_OPEN : 0;
+    /* the core's own overrides: sceKernelOpen was one until the file
+     * family claimed it for the extension (it supersedes the core now),
+     * so the binding-order check below uses GetProcessTime instead */
+    return (strcmp(name, "sceKernelOpen") == 0 || strcmp(name, "sceKernelGetProcessTime") == 0) &&
+                   (!lib || strcmp(lib, "libkernel") == 0)
+               ? CORE_OPEN
+               : 0;
 }
 #ifndef ENV_REAL_LOADER /* kernel.c links loader.c and calls through call_gadget6 */
 u64 module_export(struct module *m, const char *nid) { return 0; }
@@ -159,6 +169,8 @@ int arena_punch_rw(u64 addr, u64 size)
 
 static u32 g_jit_blocks;
 
+/* ext.c's ext_abandon (a USB app root that stops the boot): not reached here */
+void jit_block_destroy(struct jit_block *b) {}
 int jit_block_create(struct jit_block *b, u64 size, u64 want_rx)
 {
     memset(b, 0, sizeof(*b));
@@ -230,7 +242,7 @@ static void resolve_tests(void)
     fmt(sym, sizeof(sym), "%s#C#A", EXT_SELFTEST_NID);
     expect(resolve_import(&m, sym, false, true) == fn, "by NID alone (no known name)");
     expect(resolve_import(&m, "1jfXLRVzisc#B#A", false, true) == HOST_USLEEP, "host by name");
-    expect(resolve_import(&m, "1G3lF1Gg1k8#B#A", false, true) == CORE_OPEN, "the core's override first");
+    expect(resolve_import(&m, "4J2sUJmuHZQ#B#A", false, true) == CORE_OPEN, "the core's override first");
     fmt(sym, sizeof(sym), "%s#C#A", missing);
     u64 denied = resolve_import(&m, sym, false, true);
     u64 unresolved = resolve_import(&m, "AAAAAAAAAAA#D#A", false, true);
@@ -338,7 +350,7 @@ int main(int argc, char **argv)
     expect(ext_hle_lookup("libkernel", self, NULL) == 0, "other libraries do not match");
     expect(ext_hle_lookup(EXT_SELFTEST_LIB, "1jfXLRVzisc", NULL) == 0, "other NIDs do not match");
     const struct ext_lib *pol = ext_lib_policy(EXT_SELFTEST_ALIAS);
-    expect(pol && (pol->flags & EXT_LIB_NO_HOST) && !ext_lib_policy("libkernel"), "library policy by alias");
+    expect(pol && (pol->flags & EXT_LIB_NO_HOST) && !ext_lib_policy("libSceFake"), "library policy by alias");
     if (strcmp(mode, "resolve") == 0)
         resolve_tests();
     if (argc > 5)

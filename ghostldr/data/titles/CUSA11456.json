@@ -3,7 +3,7 @@
  "name": "Ghost of Tsushima",
  "version": "02.18",
  "status": "playable",
- "notes": "Needs a memory plan: its mode-0 plan wants ~5.07 GiB, SWRR has 4.5. The texture streaming pool absorbs the shortfall (~590 MiB); the planner heaps and the 64 KiB-page pool are backed lazily.",
+ "notes": "Needs a memory plan: its mode-0 plan wants ~5.07 GiB, SWRR has 4.5. The texture streaming pool absorbs the shortfall (~590 MiB); the planner heaps and the 64 KiB-page pool are backed lazily. In Jak X (a Pro-mode host, 5 GiB) it runs in its Pro mode 2: ~5.7 GiB wanted, streaming pool ~400 MiB.",
  "eboot": {"fingerprint": "3afb932d5171d24cc9f3d536dedfaf6900000000"},
  "pack": {
   "prefix": "GHOST",
@@ -36,6 +36,8 @@
   "plan": {
    "title_fixed_mib": 3996,
    "overcommit_mib": 120,
+   "neo": {"mode": 2, "title_fixed_mib": 4636, "overcommit_mib": 74, "knobs": {"gpu_heap": 1680},
+           "note": "Pro mode (Jak X): the planner's totals table (0x111ccf0) is 5824 MiB in mode 2, 640 more than mode 0's 5184; most of it the GPU heap (1908 vs 1390). VideoOut in a Pro-mode process refuses mode 0's 1080p buffers (not 64 KiB aligned). Jak X leaves ~4980 MiB, and Continue (the title world, then the main world) commits nearly all of the lazily backed heaps (1748 of their 1946 MiB when it ran out), so the plan has to fit for real: 4924 MiB. The GPU heap peaked at 1585 MiB (menu, prologue, Continue), so it gets 1680. The streaming pool holds the streamed packs too: at 400 MiB the main world's mission packs (game_missions_*.sprig) never loaded (SpawnMissionWorld waits for good), at 134 MiB LoadWorld stalls; it gets 580."},
    "lazy_sites": ["0x896126", "0x89614a", "0xeee2cf"],
    "tables": [
     {"table": "0x111cd50", "role": "absorb", "what": "streaming pool", "min_mib": 128,

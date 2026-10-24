@@ -2,7 +2,9 @@
 #include "np_async.h"
 
 /* none of this is hot: optimize for size (the extension shares a 48 KiB area) */
+#if defined(__clang__)
 #pragma clang attribute push(__attribute__((minsize)), apply_to = function)
+#endif
 
 enum { REQ_FREE, REQ_CREATED, REQ_DONE, REQ_ABORTED };
 
@@ -137,4 +139,6 @@ u32 npreq_delete_owned(struct npreq_table *t, s32 owner)
     return n;
 }
 
+#if defined(__clang__)
 #pragma clang attribute pop
+#endif

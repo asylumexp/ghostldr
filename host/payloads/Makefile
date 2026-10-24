@@ -9,7 +9,8 @@ include $(PS5_PAYLOAD_SDK)/toolchain/prospero.mk
 CFLAGS := -Wall -Wextra -Werror -O2
 OUT := ../../build/payloads
 
-ELF := $(OUT)/launch_cusa03492.elf $(OUT)/launch_cusa03474.elf $(OUT)/df.elf $(OUT)/unjail_swrr.elf $(OUT)/dumpmod.elf $(OUT)/kill_cusa03474.elf $(OUT)/kill_cusa03492.elf $(OUT)/savewatch_backup.elf $(OUT)/savewatch_install.elf $(OUT)/ps.elf
+ELF := $(OUT)/launch_cusa03492.elf $(OUT)/launch_cusa03474.elf $(OUT)/df.elf $(OUT)/unjail_swrr.elf $(OUT)/dumpmod.elf $(OUT)/kill_cusa03474.elf $(OUT)/kill_cusa03492.elf $(OUT)/savewatch_backup.elf $(OUT)/savewatch_install.elf $(OUT)/ps.elf \
+	$(OUT)/launch_cusa07992.elf $(OUT)/kill_cusa07992.elf
 
 all: $(ELF)
 
@@ -57,3 +58,12 @@ $(OUT)/ps.elf: ps.c
 $(OUT)/kill_cusa03492.elf: launch_title.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -DKILL_ONLY -DTITLE_ID='"CUSA03492"' -o $@ $^ -lSceSystemService -lSceUserService
+
+# Jak X EU (UltraC0re's host)
+$(OUT)/launch_cusa07992.elf: launch_title.c
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DTITLE_ID='"CUSA07992"' -o $@ $^ -lSceSystemService -lSceUserService
+
+$(OUT)/kill_cusa07992.elf: launch_title.c
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -DKILL_ONLY -DTITLE_ID='"CUSA07992"' -o $@ $^ -lSceSystemService -lSceUserService

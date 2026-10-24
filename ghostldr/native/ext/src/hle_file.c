@@ -2,7 +2,8 @@
  * File calls on the title's paths and fds (kernel-modules.md §9).
  *
  * /app0 paths are ghostfs's (or the app root's) and /savedataN paths the
- * title's own saves (remap_path).  A ghostfs fd is a real placeholder fd in
+ * title's own saves (remap_path).  /app0 on a USB drive is a read-write
+ * mount of the drive (approot.c) and is left writable.  A ghostfs fd is a real placeholder fd in
  * SWRR's process, so every fd call the title can make is routed here first:
  * one this file did not handle would act on the placeholder instead of the
  * title's file.  SCE functions return SCE errors; POSIX ones -1 with errno.

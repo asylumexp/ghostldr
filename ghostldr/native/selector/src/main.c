@@ -182,7 +182,7 @@ static const u8 *meta_head(struct sel *S, struct plat *P, int i, u64 *n)
 {
     struct cat_title *c = &P->cat[i];
     *n = 0;
-    if (c->meta_state || !P->ghostfs || !c->prefix[0]) {
+    if (c->meta_state || (P->ghostfs ? !c->prefix[0] : !P->library)) {
         if (!c->meta_state)
             c->meta_state = 2;
         return NULL;
@@ -192,8 +192,8 @@ static const u8 *meta_head(struct sel *S, struct plat *P, int i, u64 *n)
     if (got >= META_HEADER && meta_parse(buf, (u64)got, &c->meta) == 0) {
         c->meta_state = 1;
         cat_meta_names(P, i, buf, (u64)got);
-        LOG(P, "title %d (%s): %sMETA: '%s' (%s), icon %ux%u, backdrop %ux%u, param.sfo %u bytes%s", i, c->id,
-            c->prefix, c->meta.name, c->meta.version, c->meta.s[META_ICON].w, c->meta.s[META_ICON].h,
+        LOG(P, "title %d (%s): %s%s: '%s' (%s), icon %ux%u, backdrop %ux%u, param.sfo %u bytes%s", i, c->id,
+            c->prefix, P->library ? "meta.bin" : "META", c->meta.name, c->meta.version, c->meta.s[META_ICON].w, c->meta.s[META_ICON].h,
             c->meta.s[META_BACKDROP].w, c->meta.s[META_BACKDROP].h, c->meta.s[META_SFO].size,
             c->meta.flags & META_SCANNED ? "" : ", not scanned");
         *n = (u64)got;
@@ -454,7 +454,7 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     /* 1. what is installed */
     int n = cat_count(&P);
     LOG(&P, "module at %p: %d title(s) installed (%s)%s", (void *)sel_main, n,
-        !P.ghostfs ? "app root" : P.catalogue ? "GFSCATALOG" : P.legacy[0] ? P.legacy : "nothing",
+        P.library ? P.root : !P.ghostfs ? "app root" : P.catalogue ? "GFSCATALOG" : P.legacy[0] ? P.legacy : "nothing",
         force ? ", shown on request" : "");
     if (n <= 0 || (n == 1 && !force))
         return -1;

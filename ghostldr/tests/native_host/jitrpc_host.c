@@ -21,6 +21,9 @@
  * Prints "check N", "peek N", "clock reads N" and the core's log lines.
  */
 #include "ghost.h"
+#if defined(__linux__)
+#include <sys/socket.h> /* the native struct msghdr for k_recvmsg */
+#endif
 
 int printf(const char *f, ...);
 int vsnprintf(char *buf, unsigned long size, const char *f, __builtin_va_list ap);
@@ -31,8 +34,67 @@ int getpid(void);
 int socketpair(int domain, int type, int proto, int sv[2]);
 int pipe(int fd[2]);
 ssize_t write(int fd, const void *buf, size_t n);
+#if !defined(__linux__) /* <sys/socket.h> declares it there */
 ssize_t recvmsg(int fd, void *msg, int flags);
+#endif
+#if defined(__linux__)
+/* glibc's per-thread errno lives behind __errno_location; macOS and the
+ * BSDs name the same accessor __error */
+int *__errno_location(void);
+#define HOST_ERRNO_PTR() __errno_location()
+#define HOST_MSG_DONTWAIT 0x40
+#else
 int *__error(void);
+#define HOST_ERRNO_PTR() __error()
+#define HOST_MSG_DONTWAIT 0x80
+#endif
+
+/* jitrpc.c speaks the console's (FreeBSD) numbers: its MSG_DONTWAIT is
+ * 0x80 and its EAGAIN is 35.  BSD hosts share those numbers; Linux calls
+ * them 0x40 and 11, and its recvmsg would block instead of returning
+ * EAGAIN.  Translate both at this boundary. */
+static ssize_t k_recvmsg(int fd, void *msg, int flags)
+{
+    int host_flags = flags & ~0x80;
+    if (flags & 0x80)
+        host_flags |= HOST_MSG_DONTWAIT;
+#if defined(__linux__)
+    /* jitrpc.c also builds its msghdr in the BSD layout (0x30 bytes: iov
+     * at +0x10, control at +0x20, u32 lengths at +0x18/+0x28).  Linux's
+     * struct msghdr is 0x38 bytes and recvmsg writes msg_flags at +0x30,
+     * past the caller's buffer and into its frame (in jit_peek it zeroes
+     * the low half of the spilled address argument after a drain).
+     * Receive through a native header and copy the results back. */
+    struct msghdr h;
+    memset(&h, 0, sizeof(h));
+    u8 *m = msg;
+    h.msg_name = *(void **)(m + 0x00);
+    h.msg_namelen = *(u32 *)(m + 0x08);
+    h.msg_iov = *(void **)(m + 0x10);
+    h.msg_iovlen = *(u32 *)(m + 0x18);
+    h.msg_control = *(void **)(m + 0x20);
+    h.msg_controllen = *(u32 *)(m + 0x28);
+    ssize_t r = recvmsg(fd, &h, host_flags);
+    if (r >= 0) {
+        *(u32 *)(m + 0x28) = (u32)h.msg_controllen;
+        *(u32 *)(m + 0x2c) = (u32)h.msg_flags; /* the BSD flags offset */
+    }
+    return r;
+#else
+    return recvmsg(fd, msg, host_flags);
+#endif
+}
+
+static int *k_errno(void)
+{
+    static int e;
+    e = *HOST_ERRNO_PTR();
+#if defined(__linux__)
+    if (e == 11) /* Linux EAGAIN */
+        e = 35;  /* the console's */
+#endif
+    return &e;
+}
 struct timespec_ {
     long sec, nsec;
 };
@@ -68,7 +130,24 @@ void *host_dlsym(u32 handle, const char *name)
     return strcmp(name, "sceKernelGetProcessTime") == 0 ? (void *)fast_process_time : NULL;
 }
 
-static int k_usleep(u32 us) { return usleep(us); }
+/* jit_call waits with 50 us sleeps while its process clock runs 1000x
+ * fast, so a sleep that returns milliseconds late (a loaded Linux host)
+ * moves its give-up warnings by whole fake seconds and the "after 2 s"
+ * line the tests assert is never printed; wait short sleeps out against
+ * the clock instead of trusting the scheduler's granularity */
+static int k_usleep(u32 us)
+{
+    if (us > 200)
+        return usleep(us);
+    struct timespec_ ts;
+    clock_gettime(0, &ts);
+    u64 end = (u64)ts.sec * 1000000 + (u64)ts.nsec / 1000 + us;
+    for (;;) {
+        clock_gettime(0, &ts);
+        if ((u64)ts.sec * 1000000 + (u64)ts.nsec / 1000 >= end)
+            return 0;
+    }
+}
 
 /* ---- the fake compiler ---- */
 #define FN_SYSCALL 0x5150000UL
@@ -137,8 +216,8 @@ int main(int argc, char **argv)
     ctx.flags = strncmp(g_mode, "ps5", 3) ? CTX_FLAG_PS4 : 0;
     K.usleep = k_usleep;
     K.getpid = getpid;
-    K.recvmsg = recvmsg;
-    K.errno_fn = __error;
+    K.recvmsg = k_recvmsg;
+    K.errno_fn = k_errno;
 
     /* the shared bridge memory */
     u8 *bridge = calloc(1, 0x200000);

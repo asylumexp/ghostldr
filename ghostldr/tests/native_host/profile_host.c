@@ -53,12 +53,25 @@ static const struct {
 } k_used[] = {{0, 0x298000},         {0x1bdc000, 0x30a4000},     {0x10010000, 0x12800000},
               {0x13c40000, 0x13e00000}, {0x50080000, 0x503b8000}, {0x11e000000, 0x11e74c000}};
 
+char *getenv(const char *name);
+unsigned long strtoul(const char *s, char **end, int base);
+
 static int fake_dmq(off_t off, int next, void *out, size_t size)
 {
     struct {
         off_t start, end;
         int type;
     } *q = out;
+    /* GHOSTLDR_TEST_DMQ_GAP=LO-HI: find-next fails from inside [LO, HI)
+     * although allocations follow (what a console did after GPU memory was
+     * released); the walk must step over it */
+    const char *gap = getenv("GHOSTLDR_TEST_DMQ_GAP");
+    if (gap) {
+        char *dash;
+        u64 lo = strtoul(gap, &dash, 0), hi = strtoul(dash + 1, NULL, 0);
+        if ((u64)off >= lo && (u64)off < hi)
+            return (int)0x80020016;
+    }
     for (u32 i = 0; i < ARRAY_SIZE(k_used); i++)
         if (k_used[i].e > (u64)off) {
             q->start = (off_t)k_used[i].s, q->end = (off_t)k_used[i].e, q->type = 0;
