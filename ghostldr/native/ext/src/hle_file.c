@@ -2,7 +2,9 @@
  * File calls on the title's paths and fds (kernel-modules.md §9).
  *
  * /app0 paths are ghostfs's (or the app root's) and /savedataN paths the
- * title's own saves (remap_path).  A ghostfs fd is a real placeholder fd in
+ * title's own saves (remap_path).  /app0 on a USB drive is a read-write
+ * mount of the drive (approot.c), so writes to it are refused here with
+ * EROFS, as a PS4 refuses them to its read-only /app0.  A ghostfs fd is a real placeholder fd in
  * SWRR's process, so every fd call the title can make is routed here first:
  * one this file did not handle would act on the placeholder instead of the
  * title's file.  SCE functions return SCE errors; POSIX ones -1 with errno.
@@ -96,11 +98,18 @@ static bool watched(s32 fd)
 
 /* ---- paths ---- */
 
+bool usb_app0_ro(const char *path) HIDDEN; /* approot.c: /app0 is on a USB drive */
+#define O_APPEND_ 0x8
+
+static bool writes(u64 flags) { return (flags & 3) || (flags & (O_CREAT | O_TRUNC | O_APPEND_)); }
+
 static NOINLINE u64 h_open(u64 path, u64 flags, u64 mode, u64 d, u64 e, u32 i)
 {
     int gfd;
     if (gfs_open((const char *)path, (int)flags, &gfd) == 0)
         return ret(i, gfd);
+    if (writes(flags) && usb_app0_ro((const char *)path))
+        return ret(i, E_ROFS);
     char buf[512];
     const char *p = remap_path((const char *)path, buf, sizeof(buf));
     s32 fd = (s32)pass(i, (u64)p, flags, mode, 0, 0);
@@ -132,19 +141,26 @@ static NOINLINE u64 h_access(u64 path, u64 mode, u64 c, u64 d, u64 e, u32 i)
     int grc;
     if (gfs_stat((const char *)path, st, &grc) == 0)
         return ret(i, grc ? grc : ((i & PX) && (mode & 2)) ? E_ROFS : 0);
+    if ((i & PX) && (mode & 2) && usb_app0_ro((const char *)path))
+        return ret(i, E_ROFS);
     char buf[512];
     return pass(i, (u64)remap_path((const char *)path, buf, sizeof(buf)), mode, 0, 0, 0);
 }
 
-/* calls that only need the /app0 and /savedata remapping */
+/* calls that only need the /app0 and /savedata remapping (all but chdir
+ * change the file system) */
 static NOINLINE u64 h_path(u64 path, u64 b, u64 c, u64 d, u64 e, u32 i)
 {
+    if ((i & 0xFF) != R_chdir && usb_app0_ro((const char *)path))
+        return ret(i, E_ROFS);
     char buf[512];
     return pass(i, (u64)remap_path((const char *)path, buf, sizeof(buf)), b, c, 0, 0);
 }
 
 static NOINLINE u64 h_rename(u64 from, u64 to, u64 c, u64 d, u64 e, u32 i)
 {
+    if (usb_app0_ro((const char *)from) || usb_app0_ro((const char *)to))
+        return ret(i, E_ROFS);
     char a[512], b[512];
     return pass(i, (u64)remap_path((const char *)from, a, sizeof(a)), (u64)remap_path((const char *)to, b, sizeof(b)),
                 0, 0, 0);

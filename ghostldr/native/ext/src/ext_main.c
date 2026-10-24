@@ -126,6 +126,19 @@ static void add_functions(const struct ext_family *fam)
     }
 }
 
+/* Before the title's modules load (ext.c ext_approot_init): app roots on
+ * USB drives and folders of titles (approot.c).  ext_init runs later as
+ * always. */
+extern const struct ext_early g_approot_early HIDDEN;
+
+const struct ext_early *ext_early(const struct ghost_api *api)
+{
+    if (!api || api->version != GHOST_API_VERSION || api->size < sizeof(struct ghost_api))
+        return NULL;
+    G = api;
+    return &g_approot_early;
+}
+
 const struct ext_exports *ext_init(const struct ghost_api *api)
 {
     if (!api || api->version != GHOST_API_VERSION || api->size < sizeof(struct ghost_api))

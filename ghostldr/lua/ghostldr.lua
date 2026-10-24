@@ -8,7 +8,8 @@
 --   GHOSTLDR_FLAGS      1 = probe only (ctx flags in native/include/ghost.h);
 --                       this script adds 8192 on a PS4 (Luac0re's PLATFORM)
 --                       and 32768 under UltraC0re
---   GHOSTLDR_APP_ROOT   path of the title's app0 directory
+--   GHOSTLDR_APP_ROOT   where the title's app0 is: "ghostfs", a directory, or
+--                       "usb:/path" on a USB drive (docs/usb.md)
 --   GHOSTLDR_EXT_PORT / GHOSTLDR_EXT_SIZE / GHOSTLDR_EXT_CRC
 --                       the runtime extension (build/ghostldr/ext.bin, with the
 --                       NID table): run.py serves it over TCP on the log IP;

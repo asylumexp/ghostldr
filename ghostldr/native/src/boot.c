@@ -35,12 +35,26 @@ int ghost_boot(void)
      * stop before anything touches the title or the host's state */
     if (ext_fetch() != 0)
         return -7;
-    int choose = 0; /* game selector: 1 when ghostfs left the choice to it */
+    int choose = 0; /* game selector: 1 when ghostfs or a library left the choice to it */
+    bool library = false;
     if (strcmp(root, "ghostfs") == 0) {
         /* the title's files live in the host's save containers (no kernel exploit) */
         if ((choose = gfs_init()) < 0)
             return -6;
         root = "/app0";
+    } else {
+        /* a title's directory, as before; a USB drive or a folder of titles:
+         * the extension decides (ext/src/approot.c) */
+        char eboot[288];
+        u8 st[0x78];
+        fmt(eboot, sizeof(eboot), "%s/eboot.bin", root);
+        if (strncmp(root, "usb:", 4) == 0 || vfs_stat(eboot, st) != 0) {
+            if ((choose = ext_approot_init(&root)) < 0) {
+                ext_abandon();
+                return -6;
+            }
+            library = choose > 0;
+        }
     }
     /* Jak X: the emulator threads UltraC0re leaves running (Luac0re stops SWRR's) */
     void host_stop_emulator_threads(void);
@@ -69,7 +83,11 @@ int ghost_boot(void)
      * loaded and its memory planned, and frees all it used first ---- */
     char title[16];
     int picked = sel_run(choose || (g_ctx->flags & CTX_FLAG_SELECT), title);
-    if (choose && gfs_pick(picked >= 0 ? title : NULL) != 0)
+    if (choose && library && ext_approot_pick(picked >= 0 ? title : NULL, &root) != 0) {
+        ext_abandon();
+        return -6;
+    }
+    if (choose && !library && gfs_pick(picked >= 0 ? title : NULL) != 0)
         return -6;
 
     int rc = modules_load_boot(root, &g_main_mod);

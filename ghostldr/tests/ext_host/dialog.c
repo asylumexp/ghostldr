@@ -127,6 +127,8 @@ int arena_punch_rw(u64 addr, u64 size)
     memset((void *)addr, 0, size);
     return 0;
 }
+/* ext.c's ext_abandon (a USB app root that stops the boot): not reached here */
+void jit_block_destroy(struct jit_block *b) {}
 int jit_block_create(struct jit_block *b, u64 size, u64 want_rx)
 {
     memset(b, 0, sizeof(*b));

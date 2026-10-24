@@ -13,6 +13,8 @@ Homebrew built with the OpenOrbis toolchain has its own section: [Homebrew](#hom
 
 ## 1. Pack
 
+(To boot titles from a USB drive instead of installing them, see [usb.md](usb.md): `gfs_pack.py --usb` copies a dump onto a drive.)
+
 ```bash
 python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0
 ```

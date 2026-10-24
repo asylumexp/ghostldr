@@ -312,9 +312,18 @@ static int ext_selftest(void)
     return ok ? 0 : -1;
 }
 
-int ext_start(void)
+/* Put the code in executable memory and relocate it, once: at ext_start, or
+ * earlier for an app root the extension decides (before arena_init, so in a
+ * new JIT block). */
+static u64 g_base;
+static struct jit_block g_jb; /* that JIT block, when the code is in one */
+static bool g_in_jit;
+
+static int ext_place(void)
 {
     const struct ext_blob *h = g_hdr;
+    if (g_base)
+        return 0;
     if (!h)
         return -1;
     u64 total = h->image_memsz, data_size = total - h->text_size;
@@ -351,6 +360,61 @@ int ext_start(void)
          h->text_size, data_size, rc);
     if (rc != 0)
         return -1;
+    g_base = base;
+    if (jit)
+        g_jb = jb, g_in_jit = true;
+    return 0;
+}
+
+/* App roots on USB drives and folders of titles (ext/src/approot.c,
+ * docs/usb.md), before the title's modules load: the image is placed now
+ * (a new JIT block: the arena is not set up yet); ext_init still runs at
+ * ext_start. */
+static const struct ext_early *g_early;
+
+int ext_approot_init(const char **root)
+{
+    const struct ext_blob *h = g_hdr;
+    if (!h || !(h->flags & EXT_BLOB_EARLY) || h->early_entry >= h->text_size) {
+        logf("ext: the extension has no early entry: app root %s needs one", *root);
+        return -1;
+    }
+    if (ext_place() != 0)
+        return -1;
+    g_early = ((ext_early_fn)(g_base + h->early_entry))(&g_ghost_api);
+    if (!g_early || g_early->magic != EXT_EARLY_MAGIC || g_early->size < sizeof(*g_early)) {
+        logf("ext: ext_early failed (%p)", g_early);
+        return -1;
+    }
+    return g_early->approot_init(root);
+}
+
+int ext_approot_pick(const char *title, const char **root)
+{
+    return g_early ? g_early->approot_pick(title, root) : -1;
+}
+
+/* A boot that stops before the title loads (an app root that failed): the
+ * code's JIT block goes back, since a 13.60 PS5 has only about 768 KiB of
+ * new JIT memory for a whole SWRR session and the next boot needs it, and
+ * the blob with it. */
+void ext_abandon(void)
+{
+    if (g_in_jit)
+        jit_block_destroy(&g_jb);
+    logf("ext: released%s", g_in_jit ? " (and its JIT block)" : "");
+    g_in_jit = false;
+    g_base = 0;
+    g_early = NULL;
+    ext_release();
+}
+
+int ext_start(void)
+{
+    const struct ext_blob *h = g_hdr;
+    if (ext_place() != 0)
+        return -1;
+    u64 base = g_base;
     const struct ext_exports *ex = ((ext_init_fn)(base + h->entry))(&g_ghost_api);
     if (!ex || ex->magic != EXT_EXPORTS_MAGIC || ex->size < sizeof(*ex) || !ex->lookup || !ex->lib_policy) {
         logf("ext: ext_init failed (%p)", ex);

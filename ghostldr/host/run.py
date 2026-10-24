@@ -16,6 +16,12 @@ and stops before touching the title when it cannot.  The game selector
 core runs it before the title when more than one title is installed, or with
 --select.
 
+--app-root usb:/ghostldr boots from a USB drive's folder of titles
+(docs/usb.md): gfs_pack.py --usb puts titles there, and the console mounts
+the drive into SWRR's sandbox.  When this computer sees the drive too
+(--usb-drive, else the only mounted one with a ghostldr folder), its titles'
+profiles and dumps are used as installed ones' are.
+
 A boot first runs a preflight coverage check when a local app0 and the
 NID name table are staged: if imports would bind to stubs (which return
 0 and look like success to the title), it asks before booting, unless
@@ -46,6 +52,7 @@ BOOT_LUA = ROOT / "ghostldr/lua/ghostldr.lua"
 NOTIFY_HOOK = ROOT / "ghostldr/lua/notify_hook.lua"
 from console import LOADERS, console_ip, loader_port
 import profiles
+import usb_drive
 LOG_PORT = 18194
 EXT_PORT = LOG_PORT + 1   # TCP
 SEL_PORT = LOG_PORT + 2   # TCP
@@ -229,15 +236,25 @@ def send_lua(host: str, payload: bytes, port: int) -> None:
         s.shutdown(socket.SHUT_WR)
 
 
-def title_dump(title: str | None, select: bool) -> tuple[Path | None, str]:
+def title_dump(title: str | None, select: bool,
+               drive_titles: dict[str, Path] | None = None) -> tuple[Path | None, str]:
     """The local dump of the title this boot starts, and why that one (or why
     none): --title's, else the only title with a dump here (packed ones and
-    build/ghost/app0).  A packed title's dump is where gfs_pack.py read it
-    (its layout.json).  Without --title the console boots its only installed
-    title, which needn't be one of these, so several candidates check none."""
+    build/ghost/app0; with a USB app root, the drive's titles instead).  A
+    packed title's dump is where gfs_pack.py read it (its layout.json).
+    Without --title the console boots its only installed title, which needn't
+    be one of these, so several candidates check none."""
     if select:
         return None, "the selector picks the title on the console"
     t = profiles.normalize_title(title) if title else None
+    if drive_titles is not None:
+        if not t and len(drive_titles) == 1:
+            t = next(iter(drive_titles))
+        if t in drive_titles:
+            return drive_titles[t], t
+        return None, (f"{t} is not on the USB drive here" if t else
+                      f"{len(drive_titles)} titles on the USB drive here; pass --title to check one"
+                      if drive_titles else "the USB drive is not mounted here")
     if not t:
         here = {f.parent.name for f in profiles.TITLES_OUT.glob("*/layout.json")}
         default = profiles.detect_title(profiles.DEFAULT_SRC) if (profiles.DEFAULT_SRC / "eboot.bin").exists() else None
@@ -255,7 +272,24 @@ def title_dump(title: str | None, select: bool) -> tuple[Path | None, str]:
     return None, f"no local dump of {t} (not packed here, and build/ghost/app0 is another title)"
 
 
-def preflight(force: bool, title: str | None, select: bool) -> None:
+def usb_titles(app_root: str, drive: Path | None) -> dict[str, Path] | None:
+    """With a USB app root: the titles on the drive as this computer sees it
+    ({} when it does not), else None."""
+    if not app_root.startswith("usb:"):
+        return None
+    d = usb_drive.find_drive(drive)
+    if not d:
+        return {}
+    rel = app_root[4:].strip("/")
+    lib = d / rel if rel else d
+    if (lib / "eboot.bin").is_file():           # one title
+        t = profiles.detect_title(lib) or (lib.parent.name if profiles.normalize_title(lib.parent.name) else None)
+        return {t: lib} if t else {}
+    return {p.name: p / "app0" for p in sorted(lib.glob("*")) if profiles.TITLE_RE.fullmatch(p.name)
+            and (p / "app0/eboot.bin").is_file()}
+
+
+def preflight(force: bool, title: str | None, select: bool, drive_titles: dict[str, Path] | None = None) -> None:
     """Coverage-gate a boot against the booted title's local dump.
 
     Skips cleanly when there is nothing to check against (no local
@@ -263,7 +297,7 @@ def preflight(force: bool, title: str | None, select: bool) -> None:
     must never be the reason a boot fails on a tree that cannot run
     the checker.
     """
-    app0, which = title_dump(title, select)
+    app0, which = title_dump(title, select, drive_titles)
     if app0 is None:
         print(f"preflight: {which}; skipped", flush=True)
         return
@@ -375,7 +409,13 @@ def doctor(args) -> int:
                     f"nothing at {args.host}:{'/'.join(map(str, ports))} ({e}); SWRR up with "
                     "Luac0re's loader, or Jak X with UltraC0re's?")
 
-    app0, which = title_dump(args.title, args.select)
+    drive_titles = usb_titles(args.app_root, args.usb_drive)
+    if drive_titles is not None:
+        d = usb_drive.find_drive(args.usb_drive)
+        add("PASS" if drive_titles else "WARN", "USB drive",
+            f"{d}: {', '.join(drive_titles) or 'no titles'}" if d else
+            "not mounted here (only needed for the preflight and profiles; the console reads the drive)")
+    app0, which = title_dump(args.title, args.select, drive_titles)
     if app0 is None:
         add("WARN", "title dump", which)
     elif not (app0 / "eboot.bin").exists():
@@ -459,8 +499,12 @@ def main() -> int:
                         help="seconds to keep printing the console's log (default: boot keeps listening until "
                              "Ctrl+C; probe and logs stop after 20 s)")
     parser.add_argument("--app-root", default="ghostfs",
-                        help="where the title's app0 is: ghostfs (the installed titles, the default) or a "
-                        "directory on a dev console, e.g. /data/ghost/app0")
+                        help="where the title's app0 is: ghostfs (the installed titles, the default), "
+                        f"{usb_drive.APP_ROOT} (the titles on a USB drive, docs/usb.md), or a directory on a dev "
+                        "console, e.g. /data/ghost/app0 (a folder of <TITLE>/app0 folders works too)")
+    parser.add_argument("--usb-drive", type=Path,
+                        help="where this computer has the USB drive mounted, for the preflight check and the "
+                        "titles' profiles (default: the only mounted drive with a ghostldr folder)")
     parser.add_argument("--file", type=Path, help="raw Lua file for mode=lua")
     parser.add_argument("--loader-port", type=int, default=0,
                         help="the console's Lua loader: 9026 Luac0re (SWRR), 8888 UltraC0re (Jak X); "
@@ -469,6 +513,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.diag and args.mode != "probe":
         raise SystemExit("--diag goes with probe: run.py probe --diag")
+    if args.app_root.startswith("usb:") and not args.app_root.startswith("usb:/"):
+        raise SystemExit(f"--app-root {args.app_root}: a USB path starts at the drive's root, e.g. "
+                         f"{usb_drive.APP_ROOT}")
     args.host = args.host or console_ip()
     if args.mode == "doctor":
         return doctor(args)
@@ -479,9 +526,10 @@ def main() -> int:
         listener.start()
     else:
         print(f"recorder (pid {recorder}) is logging to build/ghostldr/run.log", flush=True)
+    drive_titles = usb_titles(args.app_root, args.usb_drive)
     if args.mode in ("probe", "boot"):
         if args.mode == "boot":
-            preflight(args.force_preflight, args.title, args.select)
+            preflight(args.force_preflight, args.title, args.select, drive_titles)
         if args.no_build:
             needed = (CORE, LAYOUT, EXT) if args.mode == "boot" else (CORE, LAYOUT)
             missing = [p.relative_to(ROOT) for p in needed if not p.exists()]
@@ -515,7 +563,7 @@ def main() -> int:
             print(f"--select: the selector picks the title (--title {args.title} is not used)", flush=True)
         try:   # the title profiles (host/profiles.py; read by native/src/profile.c)
             bundle = profiles.boot_bundle(None if args.select else args.title,
-                                          ("trace_opens",) if args.trace_opens else ())
+                                          ("trace_opens",) if args.trace_opens else (), drive_titles)
         except profiles.ProfileError as e:
             raise SystemExit(str(e))
         payload = f'GHOSTLDR_PROFILE_HEX = "{bundle.hex()}"\n'.encode() + payload

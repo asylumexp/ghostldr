@@ -388,6 +388,11 @@ u32 gfs_titles(void);                             /* read the catalogue: number 
 const struct gfs_cat_entry *gfs_title_at(u32 i);
 int gfs_mount_title(const char *title);           /* its index: its containers become /app0 */
 int gfs_pick(const char *title); /* mount title; NULL: the requested one, else the only complete one */
+/* another provider of /app0 (the extension's usbfs: struct appfs_ops in ghost_api.h) */
+struct appfs_ops;
+int appfs_register(const struct appfs_ops *ops);
+bool gfs_app0_virtual(void);                      /* /app0 is ghostfs's or a provider's, not a directory */
+void gfs_use_saves(const char *title, const char *prefix); /* a title from a USB drive: progress in <prefix>SAVE */
 
 /* ---- title profiles (profile.c; host/profiles.py writes them) ---- */
 struct prof_hdr {
@@ -558,7 +563,8 @@ bool bx_in_view(const struct module *m, u64 addr);                 /* executable
  * 32 force title ready, 64 ext in a JIT block, 128 dialog cancel, 256 IME fixed name,
  * 512 keep Remote Play, 1024 start game modules at boot, 2048 show the game selector,
  * 4096 selector: built-in font only (sel_api.h), 8192 the console is a PS4,
- * 16384 PS4 diagnostic (diag.c), 32768 the host is Jak X under UltraC0re */
+ * 16384 PS4 diagnostic (diag.c), 32768 the host is Jak X under UltraC0re,
+ * 262144 the app root is a library (65536 and 131072 are free) */
 #define CTX_FLAG_KEEP_REMOTE_PLAY 512 /* the title's sceRemoteplayProhibit is a no-op (run.py --keep-remote-play) */
 #define CTX_FLAG_BOOT_START_ALL 1024 /* start IsGame modules at boot too (run.py --boot-start-modules) */
 #define CTX_FLAG_SELECT 2048           /* game selector: show it even when the title is known (run.py --select) */
@@ -566,6 +572,7 @@ bool bx_in_view(const struct module *m, u64 addr);                 /* executable
 #define CTX_FLAG_PS4 8192              /* Luac0re's PLATFORM is "PS4" (ghostldr.lua; docs/ps4.md) */
 #define CTX_FLAG_DIAG 16384            /* run the PS4 diagnostic instead of booting (run.py probe --diag) */
 #define CTX_FLAG_JAKX 32768            /* UltraC0re in Jak X, not Luac0re in SWRR (ghostldr.lua) */
+#define CTX_FLAG_LIBRARY 262144        /* set by the core: app_root is a folder of title folders (the selector reads it) */
 static inline bool is_ps4(void) { return (g_ctx->flags & CTX_FLAG_PS4) != 0; }
 static inline bool is_jakx(void) { return (g_ctx->flags & CTX_FLAG_JAKX) != 0; }
 
@@ -598,6 +605,13 @@ u64 jv_code_need(const struct module *mods);
 bool ps4_keep_heap(u64 start, u64 end, u64 heap, bool heap_idle);
 int ext_fetch(void);     /* receive and verify ext.bin (the NID table lives there) */
 int ext_start(void);     /* place, relocate and initialize its code */
+/* app roots other than ghostfs and a title's own directory: USB drives and
+ * folders of titles, decided by the extension before the title's modules
+ * load (ext/src/approot.c, docs/usb.md).  init: 0 when *root is the title's
+ * app0, 1 when the game selector picks (then pick), < 0 on errors */
+int ext_approot_init(const char **root);
+int ext_approot_pick(const char *title, const char **root);
+void ext_abandon(void);  /* a boot stopped before the title loaded: free the code's JIT block and the blob */
 void ext_boot_done(void); /* imports resolved: free the blob */
 u64 ext_hle_lookup(const char *lib, const char *nid, const char *name);
 const struct ext_lib *ext_lib_policy(const char *lib);

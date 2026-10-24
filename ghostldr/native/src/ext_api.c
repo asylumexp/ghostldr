@@ -72,4 +72,9 @@ const struct ghost_api g_ghost_api = {
     .tls_thunk = tls_thunk,
     .flex_map = hle_map_flex,
     .flex_unmap = budget_flex_unmap,
+    .vfs_getdents = vfs_getdents,
+    .profile_requested = profile_requested,
+    .profile_select = profile_select,
+    .appfs_register = appfs_register,
+    .gfs_use_saves = gfs_use_saves,
 };

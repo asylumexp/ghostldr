@@ -612,12 +612,15 @@ def packed(title: str) -> dict:
         return {}
 
 
-def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = ()) -> bytes:
+def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = (),
+                drive_titles: dict[str, Path] | None = None) -> bytes:
     """What run.py sends as GHOSTLDR_PROFILE_HEX: with a title, its blob
     (marked requested) and the generic default; without, one blob per title
-    this computer knows (profiles and packs: the core picks the installed
-    one, or the one whose eboot fingerprint matches) and the default.  Ends
-    with 8 zero bytes."""
+    this computer knows (profiles, packs and the titles on a USB drive it
+    sees, drive_titles {ID: app0}: the core picks the installed one, or the
+    one whose eboot fingerprint matches) and the default.  Ends with 8 zero
+    bytes."""
+    drive_titles = drive_titles or {}
     if title:
         t = normalize_title(title)
         if not t:
@@ -625,11 +628,13 @@ def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = ()) 
         titles, flags = [t], PF_REQUESTED
     else:
         packs = [f.parent.name for f in TITLES_OUT.glob("*/layout.json")]
-        titles, flags = sorted(set(known_titles()) | {t for t in packs if normalize_title(t)}), 0
+        titles, flags = sorted(set(known_titles()) | {t for t in packs if normalize_title(t)} | set(drive_titles)), 0
     blobs = []
     for t in titles:
         info = packed(t)
         src = Path(info["src"]) if info.get("src") else (DEFAULT_SRC if detect_title(DEFAULT_SRC) == t else None)
+        if t in drive_titles and not (src and src.is_dir()):
+            src = drive_titles[t]
         params = info.get("app_params") if not (src and src.is_dir()) else None
         blobs.append(compile_blob(load(t), src if src and src.is_dir() else None, flags, extra_features, params))
     blobs.append(compile_blob(load(None), None, 0, extra_features))

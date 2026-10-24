@@ -71,7 +71,7 @@ class Blob:
 
     FIELDS = ("magic format header_size api_version abi blob_size image_off image_filesz image_memsz text_size "
               "entry reloc_off reloc_count families_off families_count nid_count nid_keys_off nid_names_off "
-              "str_off str_size reserved0 reserved1").split()
+              "str_off str_size early_entry flags").split()
 
     def __init__(self, data: bytes) -> None:
         self.data = data

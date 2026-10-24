@@ -25,7 +25,7 @@
  * userId @0, dirName* @0x8, blocks @0x10, mode @0x18, the same result.  File
  * calls go to libkernel's own exports.
  */
-#include "ghost.h"
+#include "ghost_api.h"
 
 void *host_real(const char *name);
 void *host_real_in(const char *modname, const char *name);
@@ -68,6 +68,12 @@ static const char *g_names;
 static u8 *g_opened;          /* bitmap: first open of each entry is logged */
 static bool g_active;
 static u32 g_user;
+/* A title from a USB drive (approot.c): another provider may serve /app0
+ * (route B: the extension's usbfs), and its progress goes to <prefix>SAVE
+ * as a ghostfs title's does */
+static const struct appfs_ops *g_fs;
+static bool g_saves;
+static char g_save_title[16], g_save_prefix[16];
 
 static int (*sd_mount)(void *params, void *result);
 static int (*sd_umount)(const char *mount_point);
@@ -76,7 +82,18 @@ static int (*k_close)(int);
 static s64 (*k_pread)(int, void *, u64, s64);
 static int (*k_stat)(const char *, void *);
 
-bool gfs_active(void) { return g_active; }
+/* the title runs from SWRR's save data or a USB drive: no host directory, saves in containers */
+bool gfs_active(void) { return g_active || g_fs || g_saves; }
+bool gfs_app0_virtual(void) { return g_active || g_fs; }
+
+int appfs_register(const struct appfs_ops *ops)
+{
+    if (!ops || ops->size < sizeof(*ops) || g_active)
+        return -1;
+    g_fs = ops;
+    logf("ghostfs: %s serves the title's files", ops->name);
+    return 0;
+}
 
 /* the first few of each kind of unusual request are logged (diagnosis) */
 static u32 g_diag[4];
@@ -159,6 +176,14 @@ static bool sd_ready(void)
     }
     sd_mount = (int (*)(void *, void *))p;
     return true;
+}
+
+COLD void gfs_use_saves(const char *title, const char *prefix)
+{
+    g_saves = sd_ready();
+    strlcpy(g_save_title, title, sizeof(g_save_title));
+    strlcpy(g_save_prefix, prefix, 13);
+    logf("ghostfs: %s keeps its progress in %sSAVE%s", title, prefix, g_saves ? "" : " (no save data service)");
 }
 
 struct cont {
@@ -351,7 +376,9 @@ static s64 find(const char *rel)
 int gfs_find_file(const char *name, char *dir, size_t size)
 {
     size_t len = strlen(name);
-    for (u32 i = 0; g_active && i < g_hdr->entries; i++) {
+    if (!g_active)
+        return 1; /* no index to look in */
+    for (u32 i = 0; i < g_hdr->entries; i++) {
         const char *e = ename(i);
         size_t el = strlen(e);
         if ((g_ent[i].flags & 1) || el <= len || e[el - len - 1] != '/' || strcmp(e + el - len, name) != 0 ||
@@ -566,6 +593,8 @@ const char *gfs_save_name(void)
     static char name[32];
     if (!name[0] && g_hdr)
         fmt(name, sizeof(name), "%.16sSAVE", g_hdr->prefix);
+    if (!name[0] && g_saves)
+        fmt(name, sizeof(name), "%sSAVE", g_save_prefix);
     return name;
 }
 
@@ -577,6 +606,8 @@ const char *title_id(void)
     static char id[17];
     if (!id[0] && g_hdr && g_hdr->version >= 2)
         memcpy(id, g_hdr->title, sizeof(g_hdr->title));
+    if (!id[0] && g_saves)
+        strlcpy(id, g_save_title, sizeof(id));
     if (!id[0] && !g_hdr)
         strlcpy(id, profile_title(), sizeof(id));
     return id;
@@ -602,7 +633,7 @@ static struct gfile *gf_of(int fd)
     return NULL;
 }
 
-bool gfs_owns(int fd) { return gf_of(fd) != NULL; }
+bool gfs_owns(int fd) { return g_fs ? g_fs->owns(fd) : gf_of(fd) != NULL; }
 
 static void fill_stat(void *st, u32 i)
 {
@@ -626,6 +657,8 @@ static void fill_stat(void *st, u32 i)
 int gfs_open(const char *path, int flags, int *fd_out)
 {
     char rel[512];
+    if (g_fs)
+        return g_fs->open(path, flags, fd_out);
     if (!app0_rel(path, rel, sizeof(rel)))
         return 1;
     if (flags & 3) {                                   /* O_WRONLY / O_RDWR */
@@ -684,6 +717,8 @@ int gfs_open(const char *path, int flags, int *fd_out)
 
 int gfs_close(int fd)
 {
+    if (g_fs)
+        return g_fs->close(fd);
     struct gfile *f = gf_of(fd);
     if (!f)
         return 1;
@@ -696,6 +731,8 @@ int gfs_close(int fd)
 
 s64 gfs_pread(int fd, void *buf, u64 n, s64 off)
 {
+    if (g_fs)
+        return g_fs->pread(fd, buf, n, off);
     struct gfile *f = gf_of(fd);
     const struct gfs_entry *e = &g_ent[f->entry];
     if (e->flags & GFS_DIR)
@@ -710,6 +747,8 @@ s64 gfs_pread(int fd, void *buf, u64 n, s64 off)
 
 s64 gfs_read(int fd, void *buf, u64 n)
 {
+    if (g_fs)
+        return g_fs->read(fd, buf, n);
     struct gfile *f = gf_of(fd);
     s64 r = gfs_pread(fd, buf, n, (s64)f->pos);
     if (r > 0)
@@ -719,6 +758,8 @@ s64 gfs_read(int fd, void *buf, u64 n)
 
 s64 gfs_lseek(int fd, s64 off, int whence)
 {
+    if (g_fs)
+        return g_fs->lseek(fd, off, whence);
     struct gfile *f = gf_of(fd);
     s64 base = whence == 0 ? 0 : whence == 1 ? (s64)f->pos : whence == 2 ? (s64)g_ent[f->entry].size : -1;
     if (base < 0 || base + off < 0)
@@ -729,6 +770,8 @@ s64 gfs_lseek(int fd, s64 off, int whence)
 
 int gfs_fstat(int fd, void *st)
 {
+    if (g_fs)
+        return g_fs->fstat(fd, st);
     DIAG(DIAG_STAT, "gfs fstat /app0/%s", ename(gf_of(fd)->entry));
     fill_stat(st, gf_of(fd)->entry);
     return 0;
@@ -738,6 +781,8 @@ int gfs_fstat(int fd, void *st)
 int gfs_stat(const char *path, void *st, int *rc)
 {
     char rel[512];
+    if (g_fs)
+        return g_fs->stat(path, st, rc);
     if (!app0_rel(path, rel, sizeof(rel)))
         return 1;
     s64 i = find(rel);
@@ -756,6 +801,8 @@ int gfs_stat(const char *path, void *st, int *rc)
  * next entry index to look at */
 int gfs_getdents(int fd, void *buf, int size)
 {
+    if (g_fs)
+        return g_fs->getdents(fd, buf, size);
     struct gfile *f = gf_of(fd);
     if (!(g_ent[f->entry].flags & GFS_DIR))
         return (int)E_INVAL;

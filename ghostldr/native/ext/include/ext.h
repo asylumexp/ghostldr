@@ -106,6 +106,11 @@ extern const struct ghost_api *G HIDDEN;
 #define tls_thunk G->tls_thunk
 #define flex_map G->flex_map
 #define flex_unmap G->flex_unmap
+#define vfs_getdents G->vfs_getdents
+#define profile_requested G->profile_requested
+#define profile_select G->profile_select
+#define appfs_register G->appfs_register
+#define gfs_use_saves G->gfs_use_saves
 
 /* the extension's own tables (ext_main.c): the function registered for an
  * import of nid from lib (NULL: any library), and a library's policy */

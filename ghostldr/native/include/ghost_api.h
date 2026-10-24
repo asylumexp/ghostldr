@@ -128,7 +128,48 @@ struct ghost_api {
      * back (its budget too) */
     int (*flex_map)(void **addr, size_t len, int prot, int flags);
     int (*flex_unmap)(void *addr, size_t len);
+    /* app roots other than ghostfs (ext/src/approot.c, docs/usb.md):
+     * directory listings through ghostfs, another provider or the kernel
+     * (the game selector lists a library's title folders with it); the
+     * title's profile; a provider of /app0; saves in SWRR's containers */
+    int (*vfs_getdents)(int fd, void *buf, int size);
+    const char *(*profile_requested)(void);
+    void (*profile_select)(const char *title);
+    int (*appfs_register)(const struct appfs_ops *ops);
+    void (*gfs_use_saves)(const char *title, const char *prefix);
 };
+
+/* A provider of the title's files other than ghostfs: the extension's usbfs
+ * (route B, docs/usb.md).  Registered with ghostfs.c (appfs_register), it
+ * answers every gfs_* call with ghostfs's contracts: open and stat return 1
+ * for paths that are not its own, fds are real placeholder fds, errors are
+ * SCE kernel errors. */
+struct appfs_ops {
+    u32 size;              /* sizeof(struct appfs_ops) */
+    const char *name;
+    int (*open)(const char *path, int flags, int *fd_out);
+    int (*stat)(const char *path, void *st, int *rc);
+    bool (*owns)(int fd);
+    int (*close)(int fd);
+    s64 (*read)(int fd, void *buf, u64 n);
+    s64 (*pread)(int fd, void *buf, u64 n, s64 off);
+    s64 (*lseek)(int fd, s64 off, int whence);
+    int (*fstat)(int fd, void *st);
+    int (*getdents)(int fd, void *buf, int size);
+    /* the title's app0 on the provider's volume ("/ghostldr/CUSA12345/app0"): 0, or an SCE error */
+    int (*set_root)(const char *path);
+};
+
+/* The extension's entry before the title's modules load (ext.c
+ * ext_approot_init): app roots on USB drives and folders of titles
+ * (ext/src/approot.c).  ext_init still runs at its usual place. */
+#define EXT_EARLY_MAGIC 0x594c5245u /* "ERLY" */
+struct ext_early {
+    u32 magic, size;
+    int (*approot_init)(const char **root);
+    int (*approot_pick)(const char *title, const char **root);
+};
+typedef const struct ext_early *(*ext_early_fn)(const struct ghost_api *api);
 
 /* ---- what the extension registers and returns ---- */
 
@@ -222,8 +263,10 @@ struct ext_blob {
     u32 nid_keys_off;  /* u64[nid_count]: a NID's 64-bit value (its 11 base64 digits) */
     u32 nid_names_off; /* u32[nid_count]: offset of the name in the string pool */
     u32 str_off, str_size;
-    u32 reserved[2];
+    u32 early_entry; /* ext_early (struct ext_early), valid with EXT_BLOB_EARLY */
+    u32 flags;       /* EXT_BLOB_* */
 };
+#define EXT_BLOB_EARLY 1u
 
 /* R_X86_64_RELATIVE: *(u64 *)(base + offset) = base + addend */
 struct ext_reloc {
