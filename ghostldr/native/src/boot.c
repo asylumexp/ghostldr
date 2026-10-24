@@ -147,6 +147,7 @@ int ghost_boot(void)
     }
     logf("boot: main thread %s, stack %x, priority %d", name, stack && *stack ? *stack : 8 << 20,
          prio ? (int)*prio : -1);
+    ext_title_starting();
     rc = ghost_thread_create(&tid, attr, ghost_main_thread, NULL, name);
     K.pthread_attr_destroy(attr);
     logf("boot: main thread created rc=%x", rc);

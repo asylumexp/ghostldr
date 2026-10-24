@@ -22,6 +22,11 @@ the drive into SWRR's sandbox.  When this computer sees the drive too
 (--usb-drive, else the only mounted one with a ghostldr folder), its titles'
 profiles and dumps are used as installed ones' are.
 
+While the title runs, the console serves FTP on TCP 2121 (--ftp-port; 0:
+none; docs/ftp.md): any FTP client, any user and password.  Clients start on
+the USB drive when one is plugged in, so titles can go onto it over the
+network while a game is running.
+
 A boot first runs a preflight coverage check when a local app0 and the
 NID name table are staged: if imports would bind to stubs (which return
 0 and look like success to the title), it asks before booting, unless
@@ -56,6 +61,7 @@ import usb_drive
 LOG_PORT = 18194
 EXT_PORT = LOG_PORT + 1   # TCP
 SEL_PORT = LOG_PORT + 2   # TCP
+FTP_PORT = 2121           # the console's FTP server (TCP; docs/ftp.md)
 LUA_MAX = 500 * 1024      # Luac0re's and UltraC0re's remote Lua loaders read at most this much
 NAMES = ROOT / "build/nid/known_names.txt"
 
@@ -505,12 +511,17 @@ def main() -> int:
     parser.add_argument("--usb-drive", type=Path,
                         help="where this computer has the USB drive mounted, for the preflight check and the "
                         "titles' profiles (default: the only mounted drive with a ghostldr folder)")
+    parser.add_argument("--ftp-port", type=int, default=FTP_PORT,
+                        help=f"the console's FTP server while the title runs (default {FTP_PORT}; 0: none; "
+                             "docs/ftp.md)")
     parser.add_argument("--file", type=Path, help="raw Lua file for mode=lua")
     parser.add_argument("--loader-port", type=int, default=0,
                         help="the console's Lua loader: 9026 Luac0re (SWRR), 8888 UltraC0re (Jak X); "
                              "default: whichever answers")
     parser.add_argument("--log", type=Path, default=ROOT / "build/ghostldr/run.log")
     args = parser.parse_args()
+    if not 0 <= args.ftp_port <= 65535:
+        raise SystemExit(f"--ftp-port {args.ftp_port}: a TCP port, or 0 for no FTP server")
     if args.diag and args.mode != "probe":
         raise SystemExit("--diag goes with probe: run.py probe --diag")
     if args.app_root.startswith("usb:") and not args.app_root.startswith("usb:/"):
@@ -544,7 +555,7 @@ def main() -> int:
             | (64 if args.ext_jit else 0) | (128 if args.dialog_cancel else 0) | (256 if args.ime_fixed_name else 0) \
             | (512 if args.keep_remote_play else 0) | (1024 if args.boot_start_modules else 0) \
             | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0) \
-            | (16384 if args.diag else 0)
+            | (16384 if args.diag else 0) | (args.ftp_port << 48 if args.mode == "boot" else 0)
         knobs = {"gpu_heap": args.gpu_heap_mib, "slack": args.slack_mib, "pool1": args.pool1_mib,
                  "cpu_heap": args.cpu_heap_mib}
         ext = EXT.read_bytes() if args.mode == "boot" else b""
@@ -570,6 +581,9 @@ def main() -> int:
         port = args.loader_port or loader_port(args.host)
         print(f"sending {len(payload)} bytes of Lua to {args.host}:{port}", flush=True)
         send_lua(args.host, payload, port)
+        if args.mode == "boot" and args.ftp_port:
+            print(f"FTP: ftp://{args.host}:{args.ftp_port}/ once the title starts (any user and password)",
+                  flush=True)
         if ext and not ext_server.sent.wait(60):
             print(f"extension: the console did not fetch it (is TCP {EXT_PORT} open in this computer's firewall?)",
                   flush=True)

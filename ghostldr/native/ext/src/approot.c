@@ -7,8 +7,8 @@
  *
  *   usb:/path    a path on a USB drive.  ShellCore's AutoMounter mounts the
  *     drive into SWRR's sandbox (usb_map, below) and the path is a
- *     directory under the mount, read with the kernel's own file calls like
- *     a dev setup's.  /app0 is kept read-only (usb_app0_ro, hle_file.c).
+ *     directory under the mount, read and written with the kernel's own file
+ *     calls like a dev setup's: the mount is read-write, /app0 included.
  *     A build with USB_RAW=1 adds route B as a fallback: the extension
  *     drives the drive itself and reads its exFAT or FAT32 volume
  *     (usb_sce.c, usbfs.c), served like ghostfs's.  It is off by default:
@@ -23,8 +23,12 @@
  * library; boot.c then calls approot_pick).
  *
  * A title from a USB drive keeps its progress in SWRR's save containers as
- * a ghostfs title does (<prefix>SAVE, gfs_use_saves): the drive is only
- * read.  A dev library's title keeps its saves beside it, as before.
+ * a ghostfs title does (<prefix>SAVE, gfs_use_saves).  A dev library's
+ * title keeps its saves beside it, as before.
+ *
+ * The FTP server (ftp_sys.c) serves the drive too, and mounts one for any
+ * boot: usb_ftp_prepare as the title is about to start, usb_ftp_home when a
+ * client logs in (a drive plugged in since).
  */
 #include "ext.h"
 #include "usbstore.h"
@@ -69,6 +73,7 @@ static struct {
     s32 (*map2)(u32 id, const char *dir, const char *mount_point);
     s32 (*unmap)(u32 id, const char *dir);
     u32 id;      /* the mounted drive's */
+    bool inited; /* the session is open: kept for the whole SWRR session */
     bool mounted;
 } U;
 
@@ -160,6 +165,7 @@ static int usb_mount(const char *rel)
         if (rc == 0)
             rc = U.list(ids, &n);
     }
+    U.inited |= rc == 0;
     logf("approot: sceUsbStorageGetDeviceList -> %x, %d drive(s)", rc, n);
     if (rc != 0 || n <= 0) {
         logf("approot: no USB drive%s", rc ? " (libSceUsbStorage refused)" : ": plug one in");
@@ -185,20 +191,34 @@ static int usb_mount(const char *rel)
     return -1;
 }
 
-/* hle_file.c: a write to the title's files on a USB drive is refused, as
- * the PS4 refuses one to /app0 */
-HIDDEN bool usb_app0_ro(const char *path)
+/* hle_usbstorage.c: the session this file opened, which the title must not end */
+HIDDEN bool usb_session_open(void) { return U.inited; }
+
+/* ftp_sys.c, as the title is about to start: a drive mounted for FTP
+ * clients when one is plugged in.  The session opens now, before the
+ * title's code runs, so the title's own Init and Term stay off it. */
+HIDDEN void usb_ftp_prepare(void)
 {
-    if (!U.mounted || !path)
-        return false;
-    if (strncmp(path, "/app0", 5) == 0 && (path[5] == '/' || path[5] == 0))
-        return true;
-    size_t n = sizeof(USB_MOUNT) - 1;
-    return strncmp(path, USB_MOUNT, n) == 0 && (path[n] == '/' || path[n] == 0);
+    if (!U.mounted)
+        usb_mount("");
 }
 
-/* hle_usbstorage.c: the session this file opened, which the title must not end */
-HIDDEN bool usb_session_open(void) { return U.mounted; }
+/* ftp_sys.c, as a client logs in: where it starts.  A drive that went away
+ * is forgotten, and one plugged in since is mounted. */
+HIDDEN const char *usb_ftp_home(void)
+{
+    static volatile int lock;
+    spin_lock(&lock);
+    if (U.mounted && !is_dir(USB_MOUNT)) {
+        logf("approot: the USB drive at %s is gone", USB_MOUNT);
+        U.mounted = false;
+    }
+    if (!U.mounted && U.inited)
+        usb_mount("");
+    bool m = U.mounted;
+    spin_unlock(&lock);
+    return m ? USB_MOUNT : "/";
+}
 
 /* the drive's directory for path ("/ghostldr" -> "/ghostldr_usb/ghostldr", or route B's "/usb0/ghostldr") */
 static int usb_open(const char *path, char *out, size_t size)

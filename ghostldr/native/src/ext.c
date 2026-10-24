@@ -293,6 +293,15 @@ void ext_note_sysmodule(u32 id, s32 rc)
         g_exp->sysmodule_failed(id, rc);
 }
 
+/* The title's main thread is next (boot.c): what the extension starts only
+ * once the boot can no longer stop short, its FTP server (ftp_sys.c). */
+void ext_title_starting(void)
+{
+    if (g_exp && g_exp->size >= __builtin_offsetof(struct ext_exports, title_starting) + sizeof(void *) &&
+        g_exp->title_starting)
+        g_exp->title_starting();
+}
+
 static int ext_selftest(void)
 {
     char nid[12];

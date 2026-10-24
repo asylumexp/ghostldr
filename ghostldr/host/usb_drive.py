@@ -473,7 +473,12 @@ def _copy(d, src: Path, app0: str, todo: list[str], files: dict[str, int], title
     drives = [d]
     try:
         for _ in range(jobs - 1):
-            drives.append(d.clone())
+            try:
+                drives.append(d.clone())
+            except DriveError as e:     # a server that takes fewer clients (421): copy with what it gave
+                log(f"{title}: copying over {len(drives)} connection(s); the server refused more ({e})")
+                break
+        jobs = len(drives)
         for x in drives:
             free.put(x)
 

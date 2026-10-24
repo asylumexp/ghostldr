@@ -46,10 +46,19 @@ python3 ghostldr/host/usb_drive.py list ftp://PS5:2121/mnt/usb0
 
 `/mnt/usb0` is the console's path of the first USB drive (`/mnt/usb1` the second, and so on).
 
+Or, with no jailbreak, through ghostldr's own FTP server while any title runs ([ftp.md](ftp.md)). It has the drive at `/ghostldr_usb`:
+
+```bash
+python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0 --usb ftp://CONSOLE:2121/ghostldr_usb
+```
+
+Through it, PS4-Xplorer's 79 files went on in 4 s, and large files at 25 MiB/s over one connection or 52 MiB/s over eight.
+
 - Most of a dump is small files, and each costs a few round trips, so it sends several at once, each over its own connection: `--jobs N` (default 8).
 - ftpsrv shows SELF files (`eboot.bin`, `*.prx`) decrypted unless told not to, with other sizes and contents than what was stored. The tools switch that off (ftpsrv's `SELF` command) when the server offers it.
 - **How fast:** through ftpsrv 0.21 on a 13.60 console to a USB 3 NVMe drive (exFAT), Bloodborne (28,752 files, 29.3 GiB) took 13 minutes, about 38 MiB/s, and Ghost of Tsushima (40,105 files, 62.7 GiB) a little over an hour. Small files in small folders go at about 120 a second over 8 connections and large ones at 35–40 MiB/s. Ghost is slow because one of its folders holds 27,674 files: the console's exFAT gets slower to add files to a folder as it fills, down to about 10 a second past 20,000 entries, however many connections there are. Copying from a computer with the drive plugged in avoids that.
 - A copy can be stopped at any time and run again: it carries on from the files already there.
+- A server that takes fewer connections than `--jobs` (it answers 421) gets as many as it takes.
 
 - `gfs_pack.py --usb` picks the title ID, prefix, name and art the same way as for an install (`--title`, `--prefix`, `--name`, `--icon`, `--backdrop`, `--fetch-art`; [compatibility.md](compatibility.md#1-pack)).
   - It copies `app0` without macOS metadata, then writes `prefix`, and `meta.bin` when there's a name or art to show.
@@ -90,7 +99,7 @@ SWRR's sandbox has no `/mnt` and sees no USB drive by itself. The PS5's USB stor
 1. **Find the call.** It sits 0xA0 bytes before `sceUsbStorageRequestMap` (0x90 in later PS4 builds of the library). The library's code is execute-only, so it can't be read: the module's unwind table (`.eh_frame_hdr`, in a readable segment) must list a function that starts exactly there and ends before `RequestMap`. Otherwise the boot stops and says so; nothing is called on a guess.
 2. **Open the session once.** `sceUsbStorageGetDeviceList` comes first: until `sceUsbStorageInit` it answers 0x80F40009, and only then does ghostldr call Init. A second Init answers 0x80F40002 and leaves the library uninitialized, with every mount gone.
 3. **Mount the drive.** For each drive in the list (device IDs change with every boot and plug), it mounts the drive's root at `/ghostldr_usb` and keeps the first whose root has the boot's top folder (`ghostldr` for `usb:/ghostldr`). The others are unmounted again.
-4. **Serve `/app0`.** The title's folder under `/ghostldr_usb` becomes the app root, and the kernel's own file calls read it, as on a dev setup. Because the mount is read-write, `hle_file.c` refuses the title's writes there (opens for writing, mkdir, unlink, rename, truncate, chmod) with EROFS, as a PS4 refuses them to its own `/app0`.
+4. **Serve `/app0`.** The title's folder under `/ghostldr_usb` becomes the app root, and the kernel's own file calls read and write it, as on a dev setup. The mount is read-write, and so is the title's `/app0` on it: a title that writes there (homebrew file managers do) writes to the drive.
 5. **Keep it.** The session stays open for the whole run: `sceUsbStorageTerm`, or the session ending, would unmount the title's files. If the title calls `sceUsbStorageInit` or `Term` itself, `hle_usbstorage.c` answers them without reaching the library.
 
 If the boot stops before the title loads (no drive, no folder, no title), the drive is unmounted and the extension's code gives back its JIT block, so the next boot finds both free.
@@ -135,8 +144,8 @@ Stock 13.60, no jailbreak (no payloads on the console), each boot in a freshly s
 ### What it costs
 
 - **Core:** 1.6 KiB more code: the dispatch to a provider of `/app0`, the early call and its clean-up, the save prefix. The image is 213 KiB of 240.
-- **Extension:** 16 KiB more code than without USB support. The whole image is 368 KiB.
-- **New JIT memory:** placing the extension early takes a JIT block of 368 KiB, out of the roughly 768 KiB a 13.60 PS5 has for a whole SWRR session. It's freed if the boot stops before the title loads.
+- **Extension:** 16 KiB more code for USB support and 16 KiB for the FTP server ([ftp.md](ftp.md)). The whole image is 384 KiB.
+- **New JIT memory:** placing the extension early takes a JIT block of 384 KiB, out of the roughly 768 KiB a 13.60 PS5 has for a whole SWRR session. It's freed if the boot stops before the title loads.
 
 ## Limits
 
@@ -167,7 +176,7 @@ Built in, it adds 48 KiB of code, and 4.5 MiB of direct memory for its cache, 12
 
 `ghostldr/tests/test_usb.py` runs offline:
 
-- **App roots** (`approot.c` against a fake core and a fake libSceUsbStorage, `ext_native/approot_host.c`): RequestMap2 found through an unwind table and refused without one; Init only when the list says so; the drive that holds the folder chosen out of two; the mount kept for the title and released when the boot stops; `/app0` read-only; libraries, single titles, the selector's turn and save prefixes; a missing or empty folder.
+- **App roots** (`approot.c` against a fake core and a fake libSceUsbStorage, `ext_native/approot_host.c`): RequestMap2 found through an unwind table and refused without one; Init only when the list says so; the drive that holds the folder chosen out of two; the mount kept for the title and released when the boot stops; the FTP server's mount on a boot from anywhere, a drive plugged in later and one pulled out; libraries, single titles, the selector's turn and save prefixes; a missing or empty folder.
 - **The drive tools:** `gfs_pack.py --usb` and `usb_drive.py` on a folder and through a fake FTP server (`fake_ftp.py`, which answers like ftpsrv: SELF mode on, DELE's 226), including one that won't rename over a file; resuming, updating and removing; several hundred files over eight connections.
 - **`run.py`** finding a mounted drive's titles and their profiles.
 - **The selector:** its catalogue reading a library.

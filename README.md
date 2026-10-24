@@ -13,6 +13,7 @@ You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your o
 - **Ghost of Tsushima v2.18** (CUSA11456) plays. It is the most tested title.
 - **Bloodborne 1.09** (CUSA00900) reaches gameplay, with its large executable spread over several JIT buffers and no memory plan yet.
 - **OpenOrbis homebrew** runs ([details](docs/compatibility.md#homebrew)).
+- **Titles on a USB drive** boot without installing, and load faster than installed ones ([docs/usb.md](docs/usb.md)). While a title runs, an FTP server on the console puts more onto the drive ([docs/ftp.md](docs/ftp.md)).
 - **Other games** boot as far as their imports and memory allow.
 - **PS4 consoles** are experimental: no title has booted on one yet ([docs/ps4.md](docs/ps4.md)).
 - **Jak X instead of SWRR** (EU CUSA07992 1.04, with [UltraC0re](https://github.com/matem6/UltraC0re)) is experimental: Ghost plays there, in its PS4 Pro mode, from its own install in Jak X's save data ([docs/jakx.md](docs/jakx.md)).
@@ -53,6 +54,8 @@ The computer's firewall must let Python receive on UDP 18194 and TCP 18195–181
 - [Ghost on a stock PS5](docs/ghost-on-stock-ps5.md): the same from source, with more troubleshooting.
 - [Compatibility](docs/compatibility.md): other games, homebrew, profiles, reading the log.
 - [Game selector](docs/selector.md): the picker for several installed titles.
+- [USB drives](docs/usb.md): booting titles from a USB drive.
+- [FTP server](docs/ftp.md): the console's files over FTP while a title runs.
 - [Web manager](docs/manager.md): save backup and restore from a browser.
 - [Host tooling](docs/host-tooling.md): `run.py doctor`, the boot preflight, the stub report.
 - [ghostfs](docs/ghostfs-catalogue.md): container names and the title catalogue.

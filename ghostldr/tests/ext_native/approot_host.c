@@ -11,11 +11,15 @@
  * usbfs stack (--drive).  test_usb.py drives it:
  *
  *     approot_host FSROOT APP_ROOT [--title T] [--select] [--map PATH] [--other PATH2]
- *                  [--map-fail] [--no-fde] [--inited] [--drive IMAGE] [--pick T] [--ro PATH...]
+ *                  [--map-fail] [--no-fde] [--inited] [--drive IMAGE] [--pick T] [--ftp [--late|--unplug]]
  *
  * Prints what approot_init (and approot_pick) decided, the profile picked,
- * where saves go, whether the title's eboot.bin is reachable, the mount's
- * state at the end, and usb_app0_ro's answer for each --ro path.
+ * where saves go, whether the title's eboot.bin is reachable and the
+ * mount's state at the end.  --ftp then does what the FTP server does
+ * (ftp_sys.c): usb_ftp_prepare as the title starts, usb_ftp_home as a
+ * client logs in; --late plugs the drive in between the two, --unplug
+ * pulls it out.  It prints whether the title's own Init and Term are kept
+ * off the session (usb_session_open) and where a client starts.
  */
 #include "ghost_api.h"
 #include "usbstore.h"
@@ -116,6 +120,7 @@ static void f_page_free(void *p, size_t n) { free(p); }
 /* libSceUsbStorage, as approot.c finds it on the console */
 static const char *g_other;              /* a second drive, listed first, without the library */
 static int g_no_fde, g_inited, g_mounted_id;
+static int g_hidden;                     /* --late: the drive is not plugged in yet */
 static char g_mount_at[64];              /* the sandbox path the drive is mounted at */
 static const char *g_mount_src;          /* FSROOT-relative folder that is the mounted drive */
 static s32 us_init(void *p)
@@ -136,7 +141,7 @@ static s32 us_list(u32 *ids, s32 *n)
     int k = 0;
     if (g_other)
         ids[k++] = 0x1000;
-    if (g_map)
+    if (g_map && !g_hidden)
         ids[k++] = 0x1001;
     *n = k;
     return 0;
@@ -293,7 +298,10 @@ const struct appfs_ops *usb_attach(u32 flags)
 #endif
 
 extern const struct ext_early g_approot_early;
-bool usb_app0_ro(const char *path);
+bool usb_session_open(void);
+void usb_ftp_prepare(void);
+const char *usb_ftp_home(void);
+static void f_spin(volatile int *l) {}
 
 int main(int argc, char **argv)
 {
@@ -302,8 +310,8 @@ int main(int argc, char **argv)
         return 2;
     }
     hfs_set_root(argv[1]);
-    const char *root = argv[2], *pick = NULL, *ros[8];
-    int nro = 0;
+    const char *root = argv[2], *pick = NULL;
+    int ftp = 0, late = 0, unplug = 0;
     u64 flags = 0;
     for (int i = 3; i < argc; i++) {
         const char *o = argv[i];
@@ -318,8 +326,12 @@ int main(int argc, char **argv)
             g_no_fde = 1;
         else if (!strcmp(o, "--inited"))
             g_inited = 1;
-        else if (!strcmp(o, "--ro") && v)
-            ros[nro++] = v, i++;
+        else if (!strcmp(o, "--ftp"))
+            ftp = 1;
+        else if (!strcmp(o, "--late"))
+            late = g_hidden = 1;
+        else if (!strcmp(o, "--unplug"))
+            unplug = 1;
         else if (!strcmp(o, "--map") && v)
             g_map = v, i++;
         else if (!strcmp(o, "--map-fail"))
@@ -358,6 +370,8 @@ int main(int argc, char **argv)
     g_api.profile_select = f_select;
     g_api.appfs_register = f_register;
     g_api.gfs_use_saves = f_saves;
+    g_api.spin_lock = f_spin;
+    g_api.spin_unlock = f_spin;
     G = &g_api;
     const struct ext_early *e = &g_approot_early;
     if (e->magic != EXT_EARLY_MAGIC || e->size != sizeof(*e))
@@ -380,7 +394,16 @@ int main(int argc, char **argv)
         say("eboot %s %ld", s == 0 ? "found" : "missing", s == 0 ? *(s64 *)(st + 0x48) : -1L);
     }
     say("mount %s", g_mounted_id ? g_mount_at : "none");
-    for (int k = 0; k < nro && nro <= 8; k++)
-        say("ro %s %d", ros[k], usb_app0_ro(ros[k]));
+    if (ftp) {
+        usb_ftp_prepare();
+        say("prepared %s", g_mounted_id ? g_mount_at : "none");
+        if (late)
+            g_hidden = 0;
+        if (unplug)
+            g_mounted_id = 0;
+        say("home %s", usb_ftp_home());
+        say("mount-after %s", g_mounted_id ? g_mount_at : "none");
+    }
+    say("session %d", usb_session_open());
     return 0;
 }

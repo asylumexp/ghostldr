@@ -564,7 +564,8 @@ bool bx_in_view(const struct module *m, u64 addr);                 /* executable
  * 512 keep Remote Play, 1024 start game modules at boot, 2048 show the game selector,
  * 4096 selector: built-in font only (sel_api.h), 8192 the console is a PS4,
  * 16384 PS4 diagnostic (diag.c), 32768 the host is Jak X under UltraC0re,
- * 262144 the app root is a library (65536 and 131072 are free) */
+ * 262144 the app root is a library (65536 and 131072 are free); bits 48-63
+ * hold the FTP server's port (CTX_FTP_PORT) */
 #define CTX_FLAG_KEEP_REMOTE_PLAY 512 /* the title's sceRemoteplayProhibit is a no-op (run.py --keep-remote-play) */
 #define CTX_FLAG_BOOT_START_ALL 1024 /* start IsGame modules at boot too (run.py --boot-start-modules) */
 #define CTX_FLAG_SELECT 2048           /* game selector: show it even when the title is known (run.py --select) */
@@ -573,6 +574,7 @@ bool bx_in_view(const struct module *m, u64 addr);                 /* executable
 #define CTX_FLAG_DIAG 16384            /* run the PS4 diagnostic instead of booting (run.py probe --diag) */
 #define CTX_FLAG_JAKX 32768            /* UltraC0re in Jak X, not Luac0re in SWRR (ghostldr.lua) */
 #define CTX_FLAG_LIBRARY 262144        /* set by the core: app_root is a folder of title folders (the selector reads it) */
+#define CTX_FTP_PORT(flags) ((u32)((flags) >> 48)) /* the FTP server's TCP port (run.py --ftp-port; 0: none) */
 static inline bool is_ps4(void) { return (g_ctx->flags & CTX_FLAG_PS4) != 0; }
 static inline bool is_jakx(void) { return (g_ctx->flags & CTX_FLAG_JAKX) != 0; }
 
@@ -616,6 +618,7 @@ void ext_boot_done(void); /* imports resolved: free the blob */
 u64 ext_hle_lookup(const char *lib, const char *nid, const char *name);
 const struct ext_lib *ext_lib_policy(const char *lib);
 void ext_note_sysmodule(u32 id, s32 rc); /* a failed sysmodule load, for the extension's families */
+void ext_title_starting(void); /* the title's main thread is next: the extension's last boot step (its FTP server) */
 
 /* ---- game selector (sel.c; module interface in sel_api.h) ---- */
 int sel_run(bool show, char title[16]); /* the chosen title's catalogue index and ID, or -1 */

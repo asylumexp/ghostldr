@@ -77,4 +77,5 @@ const struct ghost_api g_ghost_api = {
     .profile_select = profile_select,
     .appfs_register = appfs_register,
     .gfs_use_saves = gfs_use_saves,
+    .jit_recv_fd = jit_recv_fd,
 };

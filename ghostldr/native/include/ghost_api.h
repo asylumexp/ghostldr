@@ -137,6 +137,10 @@ struct ghost_api {
     void (*profile_select)(const char *title);
     int (*appfs_register)(const struct appfs_ops *ops);
     void (*gfs_use_saves)(const char *title, const char *prefix);
+    /* a descriptor of the JIT compiler process moved into this one
+     * (jitrpc.c; < 0 on errors).  The compiler keeps its own copy.  Like
+     * jit_call, only from the boot thread: the calls share one channel. */
+    int (*jit_recv_fd)(int compiler_fd);
 };
 
 /* A provider of the title's files other than ghostfs: the extension's usbfs
@@ -222,6 +226,10 @@ struct ext_exports {
     /* Tells the families that a sysmodule load the title asked for failed
      * (hle.c; the core checks size before calling it). */
     void (*sysmodule_failed)(u32 id, s32 rc);
+    /* The title's main thread is about to be created: the boot can no longer
+     * stop short (the FTP server starts here: ftp_sys.c).  The core checks
+     * size before calling it. */
+    void (*title_starting)(void);
 };
 
 typedef const struct ext_exports *(*ext_init_fn)(const struct ghost_api *api);

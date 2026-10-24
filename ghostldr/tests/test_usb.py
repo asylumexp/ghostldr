@@ -24,7 +24,7 @@ The extension's app roots (native/ext/src/approot.c), built natively
 against a fake core (ext_native/approot_host.c): the drive mounted through
 libSceUsbStorage's RequestMap2 (found through the module's unwind table,
 Init once, the drive that holds the library, unmounted when the boot stops,
-/app0 read-only), route B's raw stack in a -DGHOST_USB_RAW build, libraries
+the FTP server's drive), route B's raw stack in a -DGHOST_USB_RAW build, libraries
 of titles and single titles, the selector's turn, save prefixes.
 The game selector's catalogue reading such a library (selector/cat_host.c).
 The computer's side: usb_drive.py, gfs_pack.py --usb, run.py and profiles.py
@@ -644,17 +644,15 @@ class AppRootTests(unittest.TestCase):
         out = subprocess.run([str(self.exe), str(fs or self.fs), root, *opts], capture_output=True, text=True,
                              timeout=60)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        r = {"log": out.stdout, "ro": {}}
+        r = {"log": out.stdout}
         for line in out.stdout.splitlines():
             kind, _, rest = line.partition(" ")
             if kind in ("init", "pick"):
                 f = dict(x.split("=", 1) for x in rest.split()[1:])
                 r[kind] = (int(rest.split()[0]), f["root"], f["app_root"], f["library"] == "1")
-            elif kind in ("profile", "saves", "eboot", "registered", "mount"):
+            elif kind in ("profile", "saves", "eboot", "registered", "mount", "prepared", "home", "mount-after",
+                          "session"):
                 r[kind] = rest
-            elif kind == "ro":
-                path, _, v = rest.rpartition(" ")
-                r["ro"][path] = v == "1"
         return r
 
     MAP = ("--map", "/mnt/usb0")
@@ -695,14 +693,29 @@ class AppRootTests(unittest.TestCase):
         self.assertEqual(r["saves"], "CUSA11111 G11111SAVE")             # gfs_pack.py's default prefix
         self.assertEqual(r["eboot"], "found 11")
 
-    def test_app0_is_read_only(self) -> None:
-        r = self.run_root("usb:/ghostldr", *self.MAP, "--title", "CUSA11111", "--ro", "/app0/eboot.bin",
-                          "--ro", "/app0", "--ro", "/app0x", "--ro", "/ghostldr_usb/ghostldr/x", "--ro", "/savedata0/a",
-                          "--ro", "/temp0/b")
-        self.assertEqual(r["ro"], {"/app0/eboot.bin": True, "/app0": True, "/app0x": False,
-                                   "/ghostldr_usb/ghostldr/x": True, "/savedata0/a": False, "/temp0/b": False})
-        r = self.run_root("/data/lib", "--title", "CUSA55555", "--ro", "/app0/eboot.bin")
-        self.assertEqual(r["ro"], {"/app0/eboot.bin": False})            # a dev library is the title's own
+    def test_the_ftp_server_s_drive(self) -> None:
+        # a title from the drive: the FTP server keeps its mount and session
+        r = self.run_root("usb:/ghostldr", *self.MAP, "--title", "CUSA11111", "--ftp")
+        self.assertEqual(r["log"].count("fake: mounted"), 1)
+        self.assertEqual((r["prepared"], r["home"], r["session"]), ("/ghostldr_usb", "/ghostldr_usb", "1"))
+        # a title from elsewhere: the drive is mounted for the FTP server before the title runs
+        r = self.run_root("/data/lib", *self.MAP, "--title", "CUSA55555", "--ftp")
+        self.assertEqual(r["mount"], "none")
+        self.assertIn("sceUsbStorageInit -> 0", r["log"])
+        self.assertIn("USB drive 1001 mounted at /ghostldr_usb: 0; /ghostldr_usb/ found", r["log"])
+        self.assertEqual((r["prepared"], r["home"], r["session"]), ("/ghostldr_usb", "/ghostldr_usb", "1"))
+        # no FTP server: the title's own Init and Term reach the library
+        r = self.run_root("/data/lib", *self.MAP, "--title", "CUSA55555")
+        self.assertEqual(r["session"], "0")
+        self.assertNotIn("sceUsbStorageInit", r["log"])
+        # no drive as the title starts, one plugged in before a client logs in
+        r = self.run_root("/data/lib", *self.MAP, "--title", "CUSA55555", "--ftp", "--late")
+        self.assertEqual((r["prepared"], r["home"], r["mount-after"], r["session"]),
+                         ("none", "/ghostldr_usb", "/ghostldr_usb", "1"))
+        self.assertEqual(r["log"].count("sceUsbStorageInit"), 1)        # the session is opened once
+        # the drive pulled out: a client starts in /, and the session stays open
+        r = self.run_root("/data/lib", *self.MAP, "--title", "CUSA55555", "--ftp", "--unplug")
+        self.assertIn("the USB drive at /ghostldr_usb is gone", r["log"])
 
     def test_a_reserved_prefix_is_not_used(self) -> None:
         r = self.run_root("usb:/ghostldr", *self.MAP, "--title", "HOMEBREW_1")
