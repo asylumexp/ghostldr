@@ -1,8 +1,13 @@
 # The ghostldr app
 
-A desktop app for everything in [using-the-release.md](../docs/using-the-release.md), without a terminal. It is a wizard (**Console → Game → Install → Play**) with a status and one main button per step, plus:
+A desktop app for everything in [using-the-release.md](../docs/using-the-release.md), without a terminal. It is a wizard with a status and one main button per step, along one of two paths you choose at the top:
 
-- a **Library** of the games installed on the PS5 and prepared on this computer;
+- **Saved data:** **Console → Game → Install → Play**. Each game is installed into SWRR's saved data on the PS5 ([ghostfs-catalogue.md](../docs/ghostfs-catalogue.md)).
+- **USB drive:** **Console → Game → USB drive → Play**. The game is copied to an exFAT USB drive, which the PS5 reads it from ([usb.md](../docs/usb.md)). The drive can be plugged into this computer, or into the PS5 while a game started by ghostldr runs, through its FTP server ([ftp.md](../docs/ftp.md)).
+
+The app remembers the path, and you can switch any time. Besides the wizard there is:
+
+- a **Library** of the games installed on the PS5, on the USB drive and prepared on this computer;
 - the **save manager**;
 - **Logs & Help**: the game's log, everything the app ran, firewall help and troubleshooting.
 
@@ -45,11 +50,12 @@ It needs Python 3.11 or newer and nothing else.
   - `run.py doctor`
   - `gfs_pack.py`
   - `gfs_install.py`, including `--list`, `--remove` and `--update-meta`
-  - `run.py boot --app-root ghostfs --no-build`
+  - `gfs_pack.py --usb DRIVE` and `usb_drive.py list` and `remove`, where DRIVE is the drive's mount point here or `ftp://PS5:1212/ghostldr_usb`
+  - `run.py boot --app-root ghostfs --no-build`, or `--app-root usb:/ghostldr` on the USB path
   - `manager.py --detach` and `--exit`
   - `import_report.py` and `stub_report.py`
 - **Raw output:** each script's full output is under **Details**, and saved in the logs folder.
-- **One at a time:** only one job uses the console at once. **Pause** and **Stop** send the script Ctrl+C.
+- **One at a time:** only one job uses the console's loader at once, and one the USB drive. A copy to a drive in the PS5 runs alongside a game, which keeps the FTP server up. **Pause** and **Stop** send the script Ctrl+C.
 - **The code:**
   - `launch.py` starts the server;
   - `ghostapp/server.py` serves the page and a small JSON API;
@@ -73,7 +79,7 @@ It needs Python 3.11 or newer and nothing else.
 
 ## What it stores
 
-The last game folder, the chosen console and the logs of each run. They are kept in your user folder, never in the app folder:
+The last game folder, the chosen console, the path and the USB drive, the games it copied to a drive, and the logs of each run. They are kept in your user folder, never in the app folder:
 
 | System | Folder |
 |---|---|

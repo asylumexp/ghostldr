@@ -28,6 +28,8 @@ Layout:
 
 ## Putting titles on a drive
 
+The desktop app does this on its **USB drive** path ([app/README.md](../app/README.md)): choose the drive, plugged into the computer or into the PS5, and it copies the game and boots it from there.
+
 From a computer with the drive plugged in:
 
 ```bash

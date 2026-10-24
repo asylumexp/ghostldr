@@ -10,8 +10,8 @@ on it from this computer, and finding what one holds.
 <TITLE> is the title ID (1-15 of A-Z 0-9 _ -); the console boots the drive
 with run.py boot --app-root usb:/ghostldr (the selector picks, or --title).
 The drive is formatted exFAT (FAT32 holds no file of 4 GiB or more), with an
-MBR or GPT partition table or none.  The console only reads it: progress goes
-to SWRR's save containers, <prefix>SAVE, as for installed titles.
+MBR or GPT partition table or none.  Progress goes to SWRR's save
+containers, <prefix>SAVE, as for installed titles.
 
     python3 ghostldr/host/gfs_pack.py --src DUMP --usb /Volumes/DRIVE   # put a title on a drive
     python3 ghostldr/host/usb_drive.py list [DRIVE]                    # what drives hold
@@ -19,8 +19,9 @@ to SWRR's save containers, <prefix>SAVE, as for installed titles.
     python3 ghostldr/host/usb_drive.py remove DRIVE CUSA12345
 
 DRIVE is where this computer has the drive mounted, or, for a drive plugged
-into a jailbroken PS5 with an FTP server, ftp://HOST[:PORT]/mnt/usbN (the
-console's path of the drive): the same layout is written through FTP.  Over
+into the PS5, an FTP address: ghostldr's own server while a title runs,
+ftp://PS5:1212/ghostldr_usb (docs/ftp.md), or a jailbroken PS5's ftpsrv,
+ftp://PS5:2121/mnt/usbN.  The same layout is written through FTP.  Over
 FTP the drive's file system and free space aren't known, so the FAT32 size
 limit and the space check are skipped (the PS5 mounts exFAT and FAT32
 drives at /mnt/usbN).
@@ -431,22 +432,27 @@ def open_drive(drive) -> LocalDrive | FtpDrive:
 
 def put_title(src: Path, drive, title: str, prefix: str, prof: dict, name: str | None = None,
               icon: Path | None = None, backdrop: Path | None = None, fetch: bool = False,
-              art_dir: Path | None = None, refetch: bool = False, log=print, jobs: int = FTP_JOBS) -> dict:
+              art_dir: Path | None = None, refetch: bool = False, log=print, jobs: int = FTP_JOBS,
+              progress: float = 30) -> dict:
     """Copy a dump onto the drive as <drive>/ghostldr/<title>: its app0 (files
     already there with the same size, and on a mounted drive a newer time,
     are kept, so a broken copy resumes), the prefix file and the selector's
     meta.bin.  drive: a mount point, or ftp://HOST[:PORT]/PATH (open_drive).
     jobs: files sent at once over FTP, each on its own connection (most of
-    a dump is small files, and each costs a few round trips)."""
+    a dump is small files, and each costs a few round trips).  progress: seconds
+    between progress lines (the app asks for them often)."""
     d = open_drive(drive)
     try:
-        return _put_title(d, src, title, prefix, prof, name, icon, backdrop, fetch, art_dir, refetch, log, jobs)
+        return _put_title(d, src, title, prefix, prof, name, icon, backdrop, fetch, art_dir, refetch, log, jobs,
+                          progress)
     finally:
         d.close()
 
 
-def _copy(d, src: Path, app0: str, todo: list[str], files: dict[str, int], title: str, log, jobs: int) -> None:
+def _copy(d, src: Path, app0: str, todo: list[str], files: dict[str, int], title: str, log, jobs: int,
+          progress: float = 30) -> None:
     need = sum(files[f] for f in todo)
+    log(f"{title}: copying {len(todo)} of {len(files)} files, {need / 2**30:.2f} GiB")
     done, count, t0, last = 0, 0, time.time(), time.time()
     lock = threading.Lock()
 
@@ -456,7 +462,7 @@ def _copy(d, src: Path, app0: str, todo: list[str], files: dict[str, int], title
         with lock:
             done += files[rel]
             count += 1
-            if time.time() - last > 30:
+            if time.time() - last > progress:
                 last = time.time()
                 log(f"{title}: {done / 2**30:.1f} of {need / 2**30:.1f} GiB, {count} of {len(todo)} files, "
                     f"{done / 2**20 / (last - t0):.0f} MiB/s")
@@ -504,7 +510,7 @@ def _copy(d, src: Path, app0: str, todo: list[str], files: dict[str, int], title
 
 
 def _put_title(d, src: Path, title: str, prefix: str, prof: dict, name, icon, backdrop, fetch, art_dir, refetch,
-               log, jobs: int = 1) -> dict:
+               log, jobs: int = 1, progress: float = 30) -> dict:
     d.check_root()
     if not (src / "eboot.bin").is_file():
         raise DriveError(f"{src}: no eboot.bin (point --src at the title's app0)")
@@ -523,7 +529,7 @@ def _put_title(d, src: Path, title: str, prefix: str, prof: dict, name, icon, ba
     free = d.free()
     if free is not None and need > free:
         raise DriveError(f"{d.label}: {need / 2**30:.1f} GiB to copy, {free / 2**30:.1f} GiB free")
-    _copy(d, src, app0, todo, files, title, log, jobs)
+    _copy(d, src, app0, todo, files, title, log, jobs, progress)
     copied, kept = len(todo), len(files) - len(todo)
     d.mkdirs(app0)
     for p in sorted(src.rglob("*")):            # empty folders too

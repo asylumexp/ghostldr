@@ -261,7 +261,7 @@ def to_usb(args, src: Path, title: str, prefix: str, prof: dict) -> int:
         name = titles.eboot_module_name(src)
     try:
         info = usb_drive.put_title(src, args.usb, title, prefix, prof, name, args.icon, args.backdrop, args.fetch_art,
-                                   args.art_dir, args.refetch, jobs=args.jobs)
+                                   args.art_dir, args.refetch, jobs=args.jobs, progress=args.progress)
     except (usb_drive.DriveError, gm.ArtError) + ftplib.all_errors as e:
         raise SystemExit(str(e))
     print(f"selector: {info['summary']}")
@@ -287,6 +287,8 @@ def main() -> int:
                     "has it mounted, or ftp://HOST[:PORT]/mnt/usbN for one plugged into a jailbroken PS5")
     ap.add_argument("--jobs", type=int, default=usb_drive.FTP_JOBS,
                     help=f"with --usb ftp://...: files sent at once (default {usb_drive.FTP_JOBS})")
+    ap.add_argument("--progress", type=float, default=30, metavar="SECONDS",
+                    help="with --usb: seconds between progress lines (default 30)")
     gm.add_args(ap)
     args = ap.parse_args()
     src = args.src

@@ -23,13 +23,18 @@ The release includes a desktop app that does everything below without a terminal
    - **Windows:** double-click `ghostldr.bat`.
    - **Linux:** run `ghostldr.sh`.
 
-The app takes you through the same steps as this guide:
+The app takes you through the same steps as this guide, on one of two paths you choose at the top:
+
+- **Saved data:** install each game into SWRR's saved data, as this guide does.
+- **USB drive:** copy each game to an exFAT USB drive instead and play it from there ([usb.md](usb.md)).
+
+Either way the steps are:
 
 - **Console:** find the PS5, start Luac0re and check the setup.
-- **Game:** choose your dump and prepare it.
-- **Install** and **Play**, with the game's log live.
+- **Game:** choose your dump (and, for saved data, prepare it).
+- **Install** or **USB drive**, then **Play**, with the game's log live.
 
-It also keeps a library of installed games and offers the save manager.
+It also keeps a library of the games installed and on the drive, and offers the save manager.
 
 You still need everything under What you need, including the firewall rules. [app/README.md](../app/README.md) has more about the app. The rest of this guide is the command-line way, which is what the app runs for you.
 

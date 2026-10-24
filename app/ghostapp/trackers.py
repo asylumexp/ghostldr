@@ -170,6 +170,83 @@ class InstallTracker(Tracker):
         return d
 
 
+class UsbCopyTracker(Tracker):
+    """gfs_pack.py --usb: copying a dump onto the USB drive."""
+
+    def __init__(self) -> None:
+        self.phase = "checking"           # checking, copying, finishing, done
+        self.title = ""
+        self.name = ""
+        self.files = 0                    # the dump's
+        self.todo = 0                     # still to copy (the others are on the drive already)
+        self.need_gib = 0.0
+        self.done_gib = 0.0
+        self.count = 0
+        self.rate = 0
+        self.connections = 0
+        self.ftp = False
+        self.summary: dict | None = None
+        self.fit: dict | None = None
+        self.selector = ""
+        self.started = time.time()
+        self.updated = time.time()
+
+    def feed(self, line: str) -> None:
+        ev = P.parse_usb_line(line)
+        if not ev:
+            return
+        kind = ev["event"]
+        if kind == "start":
+            self.title, self.files, self.todo, self.need_gib = ev["title"], ev["files"], ev["todo"], ev["gib"]
+            self.phase = "copying" if self.todo else "finishing"
+        elif kind == "progress":
+            self.phase = "copying"
+            self.done_gib, self.need_gib, self.count, self.todo, self.rate = (
+                ev["done_gib"], ev["need_gib"], ev["count"], ev["todo"], ev["rate"])
+        elif kind == "connections":
+            self.connections = ev["count"]
+        elif kind == "ftp":
+            self.ftp = True
+        elif kind == "name":
+            self.name = ev["name"]
+            self.selector = line.strip()[len("selector: "):]
+        elif kind == "selector":
+            self.selector = ev["text"]
+        elif kind == "summary":
+            self.summary = {k: v for k, v in ev.items() if k != "event"}
+            self.title = ev["title"]
+            self.phase = "finishing"
+        elif kind == "fit":
+            self.fit = ev["fit"]
+        self.updated = time.time()
+
+    def finish(self, job) -> None:
+        if job.state == "done":
+            self.phase = "done"
+
+    def snapshot(self) -> dict:
+        d = dict(self.__dict__)
+        d["now"] = time.time()
+        return d
+
+
+class UsbListTracker(Tracker):
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self.result: dict = {}
+
+    def feed(self, line: str) -> None:
+        self.lines.append(line)
+
+    def finish(self, job) -> None:
+        self.result = P.parse_usb_list("\n".join(self.lines))
+        if job.state != "done":
+            self.result["ok"] = False
+
+    def snapshot(self) -> dict:
+        return {"result": self.result}
+
+
 class LibraryTracker(Tracker):
     def __init__(self) -> None:
         self.lines: list[str] = []

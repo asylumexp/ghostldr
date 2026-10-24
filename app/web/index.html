@@ -34,6 +34,20 @@
 <main>
 <!-- ================= HOME ================= -->
 <section class="view" id="view-home">
+  <section class="paths" id="paths" aria-labelledby="paths-head">
+    <div class="paths-top"><h2 class="paths-head" id="paths-head">How do you want to load games?</h2><span class="hint" id="paths-hint">You can switch any time.</span></div>
+    <div class="path-row" role="radiogroup" aria-labelledby="paths-head">
+      <button class="path" data-mode="saves" type="button" role="radio" aria-checked="false">
+        <span class="path-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h11.5L19 6.5V20H5z"/><path d="M8.5 4v4.5h6V4"/><path d="M8 13.5h8V20H8z"/></svg></span>
+        <span class="path-text"><span class="path-name">Saved data</span><span class="path-sub">Install each game into SWRR's saved data on the PS5. Nothing to plug in. A big game takes 30–100 minutes to install.</span></span>
+      </button>
+      <button class="path" data-mode="usb" type="button" role="radio" aria-checked="false">
+        <span class="path-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5V3"/><path d="M9.6 5.4 12 3l2.4 2.4"/><path d="M12 12.5 7.5 10V7.2"/><circle cx="7.5" cy="6" r="1.3"/><path d="M12 14l4.5-2.6V9.2"/><path d="M15.3 6.9h2.4v2.3h-2.4z"/><circle cx="12" cy="18.3" r="2.4"/></svg></span>
+        <span class="path-text"><span class="path-name">USB drive</span><span class="path-sub">Copy games to an exFAT USB drive and plug it into the PS5. No install step, and games load faster.</span></span>
+      </button>
+    </div>
+  </section>
+
   <ol class="stepper" id="stepper">
     <li><button class="step" data-step="console" type="button"><span class="num">1</span><span class="step-text"><span class="lbl">Console</span><span class="st"></span></span></button></li>
     <li><button class="step" data-step="game" type="button"><span class="num">2</span><span class="step-text"><span class="lbl">Game</span><span class="st"></span></span></button></li>
@@ -96,7 +110,7 @@
     <div class="panel-head">
       <div>
         <h1>Choose your game</h1>
-        <p class="sub">Pick the folder of your own game dump — the one with <code>eboot.bin</code> and <code>sce_module</code>. Preparing it only writes a small layout on this computer; nothing is sent yet.</p>
+        <p class="sub" id="game-sub">Pick the folder of your own game dump — the one with <code>eboot.bin</code> and <code>sce_module</code>. Preparing it only writes a small layout on this computer; nothing is sent yet.</p>
       </div>
     </div>
     <div class="card folder-card">
@@ -144,6 +158,7 @@
     <div class="actions">
       <button class="btn primary" id="btn-pack" type="button">Prepare game</button>
       <button class="btn primary" id="btn-game-next" type="button" hidden>Continue to Install</button>
+      <button class="btn primary" id="btn-game-usb" type="button" hidden>Continue to USB drive</button>
       <button class="btn ghost" id="btn-report" type="button">Compatibility report</button>
     </div>
   </section>
@@ -190,6 +205,49 @@
     </div>
   </section>
 
+  <!-- ---------- 3 USB drive (the USB path) ---------- -->
+  <section class="panel" id="panel-usb" data-step="usb" hidden>
+    <div class="panel-head">
+      <div>
+        <h1>Copy to a USB drive</h1>
+        <p class="sub">Copies the game folder onto the drive as it is, into <code>ghostldr/</code>: no install step, and the PS5 reads it straight from the drive. Format the drive exFAT (FAT32 holds no file of 4 GiB or more). Your other files on the drive are left alone.</p>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Where is the drive?</h3>
+      <div class="list" id="usb-where" role="radiogroup" aria-label="Where the USB drive is">
+        <button class="item" data-where="computer" type="button" role="radio" aria-checked="false"><span class="radio"></span><span class="grow"><span class="name">Plugged into this computer</span><span class="meta">The fastest way. Move the drive to the PS5 afterwards.</span></span></button>
+        <button class="item" data-where="console" type="button" role="radio" aria-checked="false"><span class="radio"></span><span class="grow"><span class="name">Plugged into the PS5</span><span class="meta">Copied over your network while a game started by ghostldr runs: it has an FTP server for this.</span></span></button>
+      </div>
+      <div id="usb-where-body" class="usb-where-body"></div>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <h3>Game to copy</h3>
+        <div id="usb-game"></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>On the drive</h3><button class="btn ghost sm" id="btn-usb-list" type="button">Read the drive</button></div>
+        <div id="usb-ondrive"></div>
+        <div class="problem" id="usb-list-problem"></div>
+      </div>
+    </div>
+    <div class="card job-card" id="usbcopy-card" hidden>
+      <div class="card-head"><h3 id="usbcopy-head">Copying</h3><span class="pill" id="usbcopy-pill"></span></div>
+      <div class="progress" id="usbcopy-progress"><div class="bar"></div></div>
+      <div class="progress-meta"><span id="usbcopy-left"></span><span id="usbcopy-right"></span></div>
+      <div id="usbcopy-result"></div>
+      <div class="problem" id="usbcopy-problem"></div>
+      <details class="raw" data-raw="usbcopy"><summary>Details</summary><pre class="rawout"></pre></details>
+      <div class="row"><button class="btn secondary sm" id="btn-usbcopy-cancel" type="button" hidden>Stop copying</button></div>
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="btn-usb-copy" type="button">Copy to USB drive</button>
+      <button class="btn primary" id="btn-usb-next" type="button" hidden>Continue to Play</button>
+      <span class="hint" id="usb-copy-hint"></span>
+    </div>
+  </section>
+
   <!-- ---------- 4 Play ---------- -->
   <section class="panel" id="panel-play" data-step="play" hidden>
     <div class="panel-head">
@@ -202,6 +260,7 @@
       <div class="card">
         <h3>Restart SWRR first</h3>
         <ol class="checklist">
+          <li id="play-usb-plug" hidden>Plug the USB drive into the PS5.</li>
           <li>Close SWRR: <b>PS button → SWRR's card → Options (…) → Close Game</b>.</li>
           <li>Start it again; at <b>PRESS START</b> click the right half of the touchpad.</li>
           <li>Open <b>OPTIONS → HALL OF FAME</b>.</li>
@@ -239,13 +298,20 @@
 <!-- ================= LIBRARY ================= -->
 <section class="view" id="view-library" hidden>
   <div class="view-head">
-    <div><h1>Library</h1><p class="sub">Games installed in SWRR on your PS5. Reading the list needs SWRR at HALL OF FAME.</p></div>
+    <div><h1>Library</h1><p class="sub">Games installed in SWRR's saved data on your PS5. Reading the list needs SWRR at HALL OF FAME.</p></div>
     <button class="btn primary" id="btn-lib-refresh" type="button">Refresh from PS5</button>
   </div>
   <p class="hint" id="lib-status"></p>
   <div class="problem" id="lib-problem"></div>
   <div class="tiles" id="lib-tiles"></div>
   <details class="raw" data-raw="library"><summary>Details</summary><pre class="rawout"></pre></details>
+
+  <div class="section-head">
+    <div><h2 class="section">On the USB drive</h2><p class="hint" id="usb-lib-status"></p></div>
+    <button class="btn secondary sm" id="btn-usb-lib-refresh" type="button">Read the drive</button>
+  </div>
+  <div class="problem" id="usb-lib-problem"></div>
+  <div class="tiles" id="usb-tiles"></div>
 
   <h2 class="section">Prepared on this computer</h2>
   <div class="tiles" id="packed-tiles"></div>
