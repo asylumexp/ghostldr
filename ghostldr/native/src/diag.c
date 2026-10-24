@@ -21,8 +21,10 @@
  *  6. last: each buffer's first 16 KiB, read and written through the
  *     compiler by the same probes;
  *  7. on a PS4 only, before 4-6: SWRR's budget, the kernel's limits for the
- *     application (the 2.5 GiB of the sixth report), and one try to raise
- *     its direct memory limit, put back at once.
+ *     application (the 2.5 GiB of the sixth report): the budget calls, the
+ *     per-type limits sceKernelGetResourceLimit returns, and the game direct
+ *     memory limit sysctl (sceKernelSetGameDirectMemoryLimit's), with one
+ *     try each to raise the budget and the sysctl, put back at once.
  */
 #include "ghost.h"
 
@@ -172,8 +174,9 @@ COLD static void diag_memory(void)
  * counts, are psdevwiki's; budget_get's and budget_set's are unknown, so
  * everything the kernel may write ends at an unmapped page: a wrong guess
  * fails with EFAULT and never overwrites memory.  The libkernel functions
- * around them (sceKernelGetBudget, sceKernelSetGameDirectMemoryLimit, ...)
- * are only dumped, for their prototypes, never called. */
+ * around them are dumped for their prototypes; of them only
+ * sceKernelGetResourceLimit and sysctlbyname are called, whose code is
+ * known (the seventh report). */
 #define MiB (1UL << 20)
 typedef s64 (*sysfn)(u64, u64, u64, u64, u64, u64);
 
@@ -229,6 +232,8 @@ struct bsigaction {
 #define SIGSYS 12
 
 COLD static void diag_budget_calls(void);
+COLD static void diag_resource_limits(void);
+COLD static void diag_dmem_limit(void);
 
 /* A system call the kernel refuses through nosys() also sends SIGSYS, which
  * would end SWRR: it is ignored while the calls run, then put back. */
@@ -244,6 +249,8 @@ COLD static void diag_budget(void)
         return;
     }
     diag_budget_calls();
+    diag_resource_limits();
+    diag_dmem_limit();
     sigaction(SIGSYS, &old, NULL);
 }
 
@@ -362,6 +369,105 @@ COLD static void diag_budget_calls(void)
         logf("diag: budget: set back -> %ld (errno %d)", br, br < 0 ? *err : 0);
     }
     K.munmap(g, 0x10000);
+}
+
+/* The kernel's default limits per process type, as ShellCore reads them
+ * to build an application's budget (lnc_budget.cpp): GetResourceLimit(type
+ * 0-3, entries, &count) checks the type and calls budget_get(-2 - type, ...);
+ * an entry is {u32 id, u32 attr, u64 limit, u64 0}. */
+COLD static void diag_resource_limits(void)
+{
+    int (*grl)(u64, void *, u32 *) = lk("sceKernelGetResourceLimit");
+    u8 *g = grl ? guarded() : NULL;
+    if (!g) {
+        logf("diag: limits: %s", grl ? "no guarded buffer" : "sceKernelGetResourceLimit is not exported here");
+        return;
+    }
+    for (u32 type = 0; type < 4; type++) {
+        memset(g, 0, 0x2000);
+        u32 *count = (u32 *)g;
+        *count = 64;
+        u8 *out = g + 0x1000;
+        int rc = grl(type, out, count);
+        logf("diag: limits: sceKernelGetResourceLimit(type %u) -> %x (errno %d), %u entries", type, rc,
+             rc ? *K.errno_fn() : 0, rc ? 0 : *count);
+        for (u32 i = 0; rc == 0 && i < *count && i < 64; i++) {
+            u32 id, attr;
+            u64 limit;
+            memcpy(&id, out + 24 * i, 4);
+            memcpy(&attr, out + 24 * i + 4, 4);
+            memcpy(&limit, out + 24 * i + 8, 8);
+            logf("diag: limits:   type %u: resource %u attr %x limit %lx (%lu MiB)", type, id, attr, limit, limit / MiB);
+        }
+    }
+    K.munmap(g, 0x10000);
+}
+
+/* The game's direct memory limit: sceKernelSetGameDirectMemoryLimit(limit)
+ * writes it with sysctlbyname(name, NULL, NULL, &limit, 8), the name loaded
+ * by its "lea rdi, [rip + disp32]".  Read; then one write of 4608 MiB, and if
+ * the kernel takes it, what it hands out then and the old value back. */
+COLD static bool sysctl_char(char ch)
+{
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '.' ||
+           ch == '_' || ch == '-';
+}
+
+COLD static void diag_dmem_limit(void)
+{
+    const u8 *fn = lk("sceKernelSetGameDirectMemoryLimit");
+    int (*sbn)(const char *, void *, size_t *, const void *, size_t) = lk("sysctlbyname");
+    if (!fn || !sbn) {
+        logf("diag: limit: %s is not exported here", fn ? "sysctlbyname" : "sceKernelSetGameDirectMemoryLimit");
+        return;
+    }
+    const char *name = NULL;
+    for (u32 i = 0; i + 7 <= 0x80 && !name; i++)
+        if (fn[i] == 0x48 && fn[i + 1] == 0x8d && fn[i + 2] == 0x3d) {
+            s32 d;
+            memcpy(&d, fn + i + 3, 4);
+            name = (const char *)(fn + i + 7 + d);
+        }
+    u32 n = 0;
+    while (name && n < 97 && sysctl_char(name[n]))
+        n++;
+    if (!name || !n || n > 96 || name[n]) {
+        logf("diag: limit: no sysctl name in sceKernelSetGameDirectMemoryLimit's first 128 bytes");
+        return;
+    }
+    logf("diag: limit: sceKernelSetGameDirectMemoryLimit writes sysctl '%s'", name);
+    /* its neighbours may be the other memory sysctls */
+    char word[100];
+    for (u32 i = n + 1, w = 0, dot = 0; i < n + 0x180; i++) {
+        if (sysctl_char(name[i]) && w < sizeof(word) - 1) {
+            dot |= name[i] == '.';
+            word[w++] = name[i];
+            continue;
+        }
+        word[w] = 0;
+        if (w >= 6 && dot)
+            logf("diag: limit:   near it: '%s'", word);
+        w = dot = 0;
+    }
+    u64 old = 0;
+    size_t len = sizeof(old);
+    int rc = sbn(name, &old, &len, NULL, 0);
+    logf("diag: limit: %s = %lx (%lu MiB), %lu bytes: rc %d errno %d", name, old, old / MiB, (u64)len, rc,
+         rc ? *K.errno_fn() : 0);
+    if (rc != 0 || len != sizeof(old))
+        return;
+    u64 want = 4608 * MiB;
+    rc = sbn(name, NULL, NULL, &want, sizeof(want));
+    logf("diag: limit: write %lu MiB -> rc %d errno %d", want / MiB, rc, rc ? *K.errno_fn() : 0);
+    if (rc != 0)
+        return;
+    u64 now = 0;
+    len = sizeof(now);
+    sbn(name, &now, &len, NULL, 0);
+    logf("diag: limit: now %lu MiB; the kernel hands out %lu MiB more direct memory (type 0)", now / MiB,
+         budget_allocatable(0) / MiB);
+    rc = sbn(name, NULL, NULL, &old, sizeof(old));
+    logf("diag: limit: written back to %lu MiB -> rc %d", old / MiB, rc);
 }
 
 COLD static void diag_writes(void)

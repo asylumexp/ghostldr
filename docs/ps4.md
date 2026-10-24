@@ -1,6 +1,6 @@
 # ghostldr on a PS4
 
-Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe). The third (v0.6.0) got one check further, then the compiler process died: ghostldr had sent every system call through getpid's libkernel stub, which a PS4 refuses. See [The third report](#the-third-report-the-compiler-died-at-its-first-clock_gettime). The fourth (v0.6.1) passed every check, placed Ghost and ran it for about 3 seconds, until the PS4 refused Ghost's texture streaming pool: see [The fourth report](#the-fourth-report-ghost-ran-until-its-streaming-pool-was-refused). The fifth (v0.6.2) measured the PS4's limit: SWRR may allocate 2480 MiB more, about 1.6 GiB less than Ghost needs, and Ghost stopped at a black screen once that ran out: see [The fifth report](#the-fifth-report-a-black-screen-ghost-ran-out-of-the-ps4s-memory). The sixth (v0.6.3) showed that this is SWRR's whole budget on a PS4, 2.5 GiB, so Ghost can't run there: see [The sixth report](#the-sixth-report-swrrs-budget-on-a-ps4-is-25-gib).
+Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe). The third (v0.6.0) got one check further, then the compiler process died: ghostldr had sent every system call through getpid's libkernel stub, which a PS4 refuses. See [The third report](#the-third-report-the-compiler-died-at-its-first-clock_gettime). The fourth (v0.6.1) passed every check, placed Ghost and ran it for about 3 seconds, until the PS4 refused Ghost's texture streaming pool: see [The fourth report](#the-fourth-report-ghost-ran-until-its-streaming-pool-was-refused). The fifth (v0.6.2) measured the PS4's limit: SWRR may allocate 2480 MiB more, about 1.6 GiB less than Ghost needs, and Ghost stopped at a black screen once that ran out: see [The fifth report](#the-fifth-report-a-black-screen-ghost-ran-out-of-the-ps4s-memory). The sixth (v0.6.3) showed that this is SWRR's whole budget on a PS4, 2.5 GiB, so Ghost can't run there: see [The sixth report](#the-sixth-report-swrrs-budget-on-a-ps4-is-25-gib). The seventh traced where that limit is set: a kernel sysctl, most likely written by SceSysCore for PS2 Classics; see [The seventh report](#the-seventh-report-where-the-25-gib-is-set).
 
 **Status: experimental.** Everything below was worked out from the logs, Luac0re's source and SWRR's executable. On a 12.02 PS4, Ghost's code has run, but no title has reached its title screen yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
 
@@ -126,6 +126,7 @@ What it logs:
    - `budget_get`'s and `budget_set`'s prototypes aren't documented. Everything the kernel may write ends at an unmapped page, so a wrong guess fails with EFAULT and never overwrites memory. The returned budget is logged as hex.
    - The libkernel functions around them (`sceKernelGetBudget`, `sceKernelSetBudget`, `sceKernelGetResourceLimit`, `sceKernelSetGameDirectMemoryLimit` and others) are dumped (96 bytes of code each) when SWRR's libkernel exports them. They aren't called. The dumps give their prototypes.
    - **One try to raise the limit:** if the budget holds a value near 2.5 GiB, `budget_set` (571) is called with it raised to 4608 MiB. If the kernel takes it, the diagnostic measures what it then hands out and sets the budget back at once. A game is very unlikely to be allowed to change its own budget, so expect a refusal.
+   - **The game direct memory limit sysctl** ([the seventh report](#the-seventh-report-where-the-25-gib-is-set)): its name, from `sceKernelSetGameDirectMemoryLimit`'s code, and its value. Then one write of 4608 MiB; if the kernel takes it, what it then hands out, and the old value written back. Also `sceKernelGetResourceLimit` for process types 0 to 3, decoded as `{id, attr, limit}` entries.
 
 It changes nothing a boot depends on. The test writes are restored and the JIT blocks are destroyed. Afterwards SWRR is in the same state as after Luac0re's loader, so `run.py boot` can follow in the same session. Restart SWRR for normal play.
 
@@ -312,7 +313,24 @@ budget: PS4: CUSA11456 needs about 1592 MiB more direct memory than this PS4 let
 - **Smaller titles may fit.** A title without a memory plan is told what the PS4 hands out: about 2.4 GiB, less ghostldr's reserve and the title's flexible memory.
 - **A PS4 on 12.02 is within Lapse's range** (the kernel exploit covers PS4 firmware up to 12.02). A jailbroken PS4 runs PS4 games directly, without SWRR or ghostldr.
 
-**Where the limit lives.** The v0.6.4 diagnostic found that SWRR can't read or set its own budget: `budget_getid` returns ENOSYS. libkernel's `sceKernelSetGameDirectMemoryLimit(limit)` writes the game's direct memory limit with `sysctlbyname`. `ghostldr/lua/diag/ps4_memlimit.lua` reads that sysctl and tries once to raise it. It's a single file for Luac0re's loader, with no ghostldr release needed: `python payload_sender.py <PS4 address> ps4_memlimit.lua`. The report shows in a notification and at `http://<PS4 address>:9031/`.
+
+## The seventh report: where the 2.5 GiB is set
+
+v0.6.4's diagnostic, and a PS4 SceShellCore read statically:
+
+- **SWRR can't read or set its budget.** `budget_getid` returns ENOSYS: the budget calls need credentials a game doesn't have. A refused call can end in `nosys()`, which also sends SIGSYS; with SIGSYS ignored, SWRR survived.
+- **libkernel's budget functions,** decoded from their code in SWRR's libkernel:
+  - `sceKernelGetBudget(&id)` is `budget_getid`;
+  - `sceKernelSetBudget` passes its arguments to `budget_set`;
+  - `sceKernelGetResource` is `budget_get`;
+  - `sceKernelGetResourceLimit(type 0-3, entries, &count)` is `budget_get(-2 - type, ...)`.
+  - **`sceKernelSetGameDirectMemoryLimit(limit)` writes the limit with `sysctlbyname(name, NULL, NULL, &limit, 8)`.** The game's direct memory limit is a kernel sysctl.
+- **ShellCore doesn't set the 2.5 GiB.** It builds every application's budget from the kernel's defaults for its process type: `sceKernelGetResourceLimit(type, entries, &count)`, entries `{u32 id; u32 attr; u64 limit; u64 0}`, nine resources, then `sceKernelCreateBudget`. The type comes from param.sfo's CATEGORY; a game gets type 0, PS2 Classics included. ShellCore never calls `sceKernelSetGameDirectMemoryLimit` or `sceKernelSetBudget`, and writes no memory sysctl. For a PS2 Classic it only passes an `isPs2Emu` flag (CATEGORY `gdo`) on to SceSysCore. So the cut is most likely made in SceSysCore, through that sysctl.
+
+**What v0.6.5's diagnostic adds,** on a PS4 (section 8 of the diagnostic):
+- the sysctl's name, found in `sceKernelSetGameDirectMemoryLimit`'s code, its value, and the strings stored next to it;
+- **one write of 4608 MiB to it.** If the kernel takes it, the diagnostic measures what SWRR can then allocate and writes the old value back. A game writing a system setting will most likely be refused;
+- `sceKernelGetResourceLimit` for types 0 to 3, decoded as entries: the kernel's default limits per process type, if a game may read them.
 
 ## What is verified
 
