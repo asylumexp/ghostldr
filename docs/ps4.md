@@ -388,7 +388,7 @@ diag: limits: sceKernelGetResourceLimit(type 0) -> 8002004e (errno 78), 0 entrie
 ## What is not verified
 
 - Whether other PS4 firmware gives SWRR the same 2.5 GiB. Only 12.02 was measured.
-- Who writes `kern.dmem.game_budget_limit` for SWRR, and from what: most likely SceSysCore at launch.
+- Who writes `kern.dmem.game_budget_limit` for SWRR, and from what. Not ShellCore and not SceSysCore (12.02, read statically): neither contains the name or imports `sceKernelSetGameDirectMemoryLimit`, and both copy the kernel's budget limits unchanged. So the kernel decides, or another process does. The only per-title input found on the way is ShellCore's title workaround database (`sceWorkaroundCtlGetTitleWorkaroundInfo`), which SceSysCore passes to the kernel with `sceKernelSetAppInfo`; whether it causes the cut isn't known. SWRR's compiler process joins SWRR's own budget, so whatever it holds counts against the same 2.5 GiB.
 - How much new JIT memory a PS4 allows. The extension's 384 KiB block worked; a 13.60 PS5 allows 768 KiB in all. The PS4 compiler process's flexible memory was 248.1 of 249.6 MiB. A 25 MiB fallback block is very unlikely to work.
 - That no other SWRR thread uses the released buffers on a PS4. None did in the 3 s Ghost ran.
 - That Luac0re's thread cancels work on a PS4.
