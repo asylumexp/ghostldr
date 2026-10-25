@@ -433,9 +433,40 @@ COLD static int load_index(const char *name, const char *want_title, const char 
     g_hdr = (const struct gfs_header *)idx;
     u32 hsize = got >= 64 && g_hdr->version >= 2 ? g_hdr->header_size : 64;
     if (got != (s64)size || size < 64 || memcmp(g_hdr->magic, "GFS1", 4) != 0 || g_hdr->containers > GFS_MAX_CONT ||
-        hsize < 64 || hsize > size) {
+        hsize < 64 || hsize > size ||
+        (g_hdr->version >= 2 && (hsize < sizeof(struct gfs_header) || size < sizeof(struct gfs_header)))) {
         logf("ghostfs: %s: bad index (%ld of %lu bytes)", name, got, size);
         return -1;
+    }
+    /* The catalogue (gfs_titles, just below) bounds-checks its table; the
+     * index did not, and find()/ename() feed entry name offsets straight
+     * into strcmp.  Reject a truncated or corrupt index here, before
+     * anything reads through it: cap 0 would divide by zero in
+     * read_linear, an entry past the table or names blob would read past
+     * the index, and an entry past `total` names bytes no container has. */
+    if (g_hdr->cap == 0 || hsize > size || (u64)g_hdr->entries * sizeof(struct gfs_entry) > size - hsize ||
+        g_hdr->names_off > size || (u64)g_hdr->names_size > size - g_hdr->names_off) {
+        logf("ghostfs: %s: bad index: table or names out of range", name);
+        return -1;
+    }
+    {
+        const struct gfs_entry *ents = (const struct gfs_entry *)(idx + hsize);
+        const char *names = (const char *)idx + g_hdr->names_off;
+        for (u32 i = 0; i < g_hdr->entries; i++) {
+            u32 noff = ents[i].name;
+            bool terminated = false;
+            if (noff < g_hdr->names_size) {
+                for (u32 k = noff; k < g_hdr->names_size; k++)
+                    if (!names[k]) {
+                        terminated = true;
+                        break;
+                    }
+            }
+            if (!terminated || ents[i].off > g_hdr->total || ents[i].size > g_hdr->total - ents[i].off) {
+                logf("ghostfs: %s: bad index: entry %u out of range", name, i);
+                return -1;
+            }
+        }
     }
     const char *title = g_hdr->version >= 2 ? g_hdr->title : "";
     if ((want_title && g_hdr->version >= 2 && strncmp(title, want_title, 16) != 0) ||

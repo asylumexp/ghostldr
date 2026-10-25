@@ -27,16 +27,35 @@ static const char *str_at(struct module *m, u64 off)
     return off < m->strsz ? m->strtab + off : "";
 }
 
+/* [off, off + len) inside a buffer of `size`: overflow-safe, so a
+ * truncated or corrupt file fails here instead of being dereferenced. */
+static bool in_file(u64 off, u64 len, u64 size)
+{
+    return off <= size && len <= size - off;
+}
+
 int module_parse(struct module *m, u8 *file, u64 size)
 {
     m->file = file;
     m->file_size = size;
+    if (size < 4) {
+        logf("%s: file too small for a header", m->name);
+        return -1;
+    }
     u64 elf_off = 0;
     bool is_self = memcmp(file, SELF_MAGIC, 4) == 0;
     u16 nentries = 0;
     if (is_self) {
+        if (!in_file(0x18, 2, size) || !in_file(0x20, (u64)(*(u16 *)(file + 0x18)) * 0x20, size)) {
+            logf("%s: SELF entry table out of range", m->name);
+            return -1;
+        }
         nentries = *(u16 *)(file + 0x18);
         elf_off = 0x20 + (u64)nentries * 0x20;
+    }
+    if (!in_file(elf_off, 64, size)) {
+        logf("%s: ELF header out of range", m->name);
+        return -1;
     }
     u8 *ehdr = file + elf_off;
     if (memcmp(ehdr, ELF_MAGIC, 4) != 0) {
@@ -46,9 +65,12 @@ int module_parse(struct module *m, u8 *file, u64 size)
     m->entry = *(u64 *)(ehdr + 0x18);
     u64 phoff = *(u64 *)(ehdr + 0x20);
     m->phnum = *(u16 *)(ehdr + 0x38);
-    m->phdrs = (struct elf_phdr *)(ehdr + phoff);
-    if (m->phnum > 32)
+    if (m->phnum > 32 || elf_off > size || phoff > size - elf_off ||
+        !in_file(elf_off + phoff, (u64)m->phnum * sizeof(struct elf_phdr), size)) {
+        logf("%s: program header table out of range", m->name);
         return -1;
+    }
+    m->phdrs = (struct elf_phdr *)(ehdr + phoff);
 
     if (is_self) {
         for (u32 i = 0; i < nentries; i++) {
@@ -61,8 +83,13 @@ int module_parse(struct module *m, u8 *file, u64 size)
                 return -1;
             }
             u32 seg = (props >> 20) & 0xFFF;
-            if (seg < m->phnum)
+            if (seg < m->phnum) {
+                if (!in_file(off, m->phdrs[seg].filesz, size)) {
+                    logf("%s: SELF segment %u out of range", m->name, seg);
+                    return -1;
+                }
                 m->seg_data[seg] = file + off;
+            }
         }
         /* PT_DYNAMIC, PT_TLS, PT_SCE_PROCPARAM... have no SELF entry: their
          * bytes sit inside another segment's file range */
@@ -73,15 +100,20 @@ int module_parse(struct module *m, u8 *file, u64 size)
             for (u32 j = 0; j < m->phnum; j++) {
                 struct elf_phdr *q = &m->phdrs[j];
                 if (m->seg_data[j] && j != i && p->offset >= q->offset &&
-                    p->offset + p->filesz <= q->offset + q->filesz) {
+                    p->offset - q->offset <= q->filesz && p->filesz <= q->filesz - (p->offset - q->offset)) {
                     m->seg_data[i] = m->seg_data[j] + (p->offset - q->offset);
                     break;
                 }
             }
         }
     } else {
-        for (u32 i = 0; i < m->phnum; i++)
+        for (u32 i = 0; i < m->phnum; i++) {
+            if (m->phdrs[i].filesz && !in_file(m->phdrs[i].offset, m->phdrs[i].filesz, size)) {
+                logf("%s: segment %u out of range", m->name, i);
+                return -1;
+            }
             m->seg_data[i] = file + m->phdrs[i].offset;
+        }
     }
 
     const u64 *dyn = NULL;
@@ -127,6 +159,14 @@ int module_parse(struct module *m, u8 *file, u64 size)
         case DT_FINI: m->fini = val; break;
         case DT_SCE_FINGERPRINT: fingerprint = val; break;
         }
+    }
+    /* The dynamic tables are offsets into PT_SCE_DYNLIBDATA, not the file:
+     * a table past its end would point module_sym_name / relocation at
+     * bytes outside the module, so reject it here, not at first use. */
+    if (!in_file(strtab, m->strsz, dynlib_size) || !in_file(symtab, symtabsz, dynlib_size) ||
+        !in_file(rela, relasz, dynlib_size) || !in_file(jmprel, pltrelsz, dynlib_size)) {
+        logf("%s: dynamic table out of range", m->name);
+        return -1;
     }
     /* (fingerprint + 20 would wrap when the tag is missing) */
     bool has_fp = fingerprint < dynlib_size && dynlib_size - fingerprint >= 20;
