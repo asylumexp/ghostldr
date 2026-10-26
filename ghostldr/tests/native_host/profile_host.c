@@ -140,6 +140,20 @@ int hle_checked_release_direct(off_t start, size_t len) { return 0; }
 int hle_dmem_query(off_t off, int flags, void *info, size_t size) { return 0; }
 int hle_dmem_type(off_t off, int *type, off_t *start, off_t *end) { return 0; }
 
+/* page_alloc: zeroed pages (automem.c's plans) */
+static u8 g_pages[1 << 16] __attribute__((aligned(0x4000)));
+static u64 g_pages_used;
+void *page_alloc(size_t size)
+{
+    size = ALIGN_UP(size, 0x4000);
+    if (g_pages_used + size > sizeof(g_pages))
+        return NULL;
+    void *p = g_pages + g_pages_used;
+    g_pages_used += size;
+    memset(p, 0, size);
+    return p;
+}
+
 /* the learned memory plan, in the file GHOSTLDR_TEST_AUTOMEM names */
 long pread(int fd, void *buf, unsigned long n, long off);
 long pwrite(int fd, const void *buf, unsigned long n, long off);

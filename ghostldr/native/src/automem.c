@@ -88,7 +88,7 @@ struct am_plan {
     struct am_shrink shrink[AM_SHRINKS];
 };
 
-static struct am_plan g_last, g_now;
+static struct am_plan *g_last, *g_now; /* allocated at plan time: the core's image stays small */
 static bool g_have_last, g_on, g_dirty;
 static volatile u64 g_eager;                /* direct memory held by up-front allocations */
 static u64 g_site_off[AM_SITES];            /* this boot: each site's latest lazy allocation */
@@ -117,8 +117,8 @@ static u64 now_us(void)
 COLD static void save(void)
 {
     g_dirty = false;
-    s64 n = savedata_aux_write(AM_FILE, &g_now, sizeof(g_now));
-    if (n != (s64)sizeof(g_now))
+    s64 n = savedata_aux_write(AM_FILE, g_now, sizeof(*g_now));
+    if (n != (s64)sizeof(*g_now))
         logf("automem: saving the learned plan failed (%ld)", n);
 }
 
@@ -262,12 +262,12 @@ COLD static u32 plan_shrinks(struct module *m, u8 *text, u32 want)
 {
     struct cand cand[AM_SITES];
     u32 nc = 0, taken = 0;
-    for (u32 i = 0; i < g_last.nsites && i < AM_SITES; i++) {
-        const struct am_site *s = &g_last.sites[i];
+    for (u32 i = 0; i < g_last->nsites && i < AM_SITES; i++) {
+        const struct am_site *s = &g_last->sites[i];
         if ((u64)s->len_mib * MiB < AM_POOL_MIN || s->peak_mib * 10 < s->len_mib * 9)
             continue; /* not a pool used whole */
         struct cand *c = &cand[nc];
-        *c = (struct cand){.s = s, .k = shrink_of(&g_now, s->site)};
+        *c = (struct cand){.s = s, .k = shrink_of(g_now, s->site)};
         if (c->k && (!active(c->k) || c->k->locked))
             continue; /* the wrong cells, or the title stopped after it */
         if (!c->k) {
@@ -289,12 +289,12 @@ COLD static u32 plan_shrinks(struct module *m, u8 *text, u32 want)
     u32 nw = 0;
     for (u32 i = 0; i < nc; i++)
         w[nw++] = witness(m, text, kof(&cand[i]));
-    for (u32 i = 0; i < g_now.nshrink && i < AM_SHRINKS; i++) {
+    for (u32 i = 0; i < g_now->nshrink && i < AM_SHRINKS; i++) {
         bool known = false;
         for (u32 j = 0; j < nc; j++)
-            known |= cand[j].s->site == g_now.shrink[i].site;
-        if (!known && g_now.shrink[i].ncells && g_now.shrink[i].state != AM_WRONG)
-            w[nw++] = witness(m, text, &g_now.shrink[i]);
+            known |= cand[j].s->site == g_now->shrink[i].site;
+        if (!known && g_now->shrink[i].ncells && g_now->shrink[i].state != AM_WRONG)
+            w[nw++] = witness(m, text, &g_now->shrink[i]);
     }
     for (u32 i = 0; i < nc; i++)
         cand[i].elastic = elasticity(m, text, w, nw, i);
@@ -312,15 +312,15 @@ COLD static u32 plan_shrinks(struct module *m, u8 *text, u32 want)
         if (kof(&cand[i])->new_mib <= floor + 32)
             continue;
         if (!k) { /* a pool shrinking for the first time */
-            if (g_now.nshrink >= AM_SHRINKS)
+            if (g_now->nshrink >= AM_SHRINKS)
                 continue;
-            k = &g_now.shrink[g_now.nshrink++];
+            k = &g_now->shrink[g_now->nshrink++];
             *k = cand[i].fresh;
         }
         u32 take = (k->new_mib - floor < want ? k->new_mib - floor : want) & ~1u;
         k->prev_mib = k->new_mib;
         k->new_mib -= take;
-        k->since = (u16)g_now.boots;
+        k->since = (u16)g_now->boots;
         want -= take;
         taken += take;
         logf("automem: the %u MiB pool from eboot+%x (its size varies %u%% across memory modes) shrinks to %u MiB, "
@@ -333,8 +333,8 @@ COLD static u32 plan_shrinks(struct module *m, u8 *text, u32 want)
 /* write the active shrinks into the executable before it runs */
 COLD static void apply_shrinks(struct module *m, u8 *text)
 {
-    for (u32 i = 0; i < g_now.nshrink && i < AM_SHRINKS; i++) {
-        struct am_shrink *k = &g_now.shrink[i];
+    for (u32 i = 0; i < g_now->nshrink && i < AM_SHRINKS; i++) {
+        struct am_shrink *k = &g_now->shrink[i];
         if (!active(k) || k->new_mib == k->orig_mib)
             continue;
         u32 done = 0;
@@ -355,19 +355,27 @@ COLD static void apply_shrinks(struct module *m, u8 *text)
 /* phys: direct memory the title can have for real.  Returns what it is told. */
 COLD u64 automem_plan(struct module *m, u8 *text, u64 phys)
 {
+    if (!g_now) {
+        struct am_plan *p = page_alloc(2 * sizeof(*p));
+        if (!p) {
+            logf("automem: no memory for the learned plan: plan-free budget alone");
+            return phys;
+        }
+        g_last = p, g_now = p + 1;
+    }
     g_on = true;
-    struct am_plan *l = &g_last;
+    struct am_plan *l = g_last;
     if (!(g_ctx->flags & CTX_FLAG_AUTO_MEM_FORGET) &&
         savedata_aux_read(AM_FILE, l, sizeof(*l)) == (s64)sizeof(*l) && l->magic == AM_MAGIC &&
         l->version == AM_VERSION && l->size == sizeof(*l) && !memcmp(l->fingerprint, m->fingerprint, 20))
         g_have_last = true;
     else
         memset(l, 0, sizeof(*l));
-    g_now = (struct am_plan){.magic = AM_MAGIC, .version = AM_VERSION, .size = sizeof(g_now),
+    *g_now = (struct am_plan){.magic = AM_MAGIC, .version = AM_VERSION, .size = sizeof(*g_now),
                              .boots = l->boots + 1, .phys_mib = (u32)(phys / MiB), .strict = l->strict};
-    memcpy(g_now.fingerprint, m->fingerprint, 20);
-    g_now.nshrink = l->nshrink < AM_SHRINKS ? l->nshrink : AM_SHRINKS;
-    memcpy(g_now.shrink, l->shrink, sizeof(g_now.shrink));
+    memcpy(g_now->fingerprint, m->fingerprint, 20);
+    g_now->nshrink = l->nshrink < AM_SHRINKS ? l->nshrink : AM_SHRINKS;
+    memcpy(g_now->shrink, l->shrink, sizeof(g_now->shrink));
 
     u64 told = phys;
     if (g_have_last) {
@@ -379,11 +387,11 @@ COLD u64 automem_plan(struct module *m, u8 *text, u64 phys)
         /* stopped early: the pools shrunk last are to blame */
         bool early = l->alive_min < 2 && !l->oom;
         u16 latest = 0;
-        for (u32 i = 0; i < g_now.nshrink; i++)
-            if (active(&g_now.shrink[i]) && g_now.shrink[i].since > latest)
-                latest = g_now.shrink[i].since;
-        for (u32 i = 0; i < g_now.nshrink; i++) {
-            struct am_shrink *k = &g_now.shrink[i];
+        for (u32 i = 0; i < g_now->nshrink; i++)
+            if (active(&g_now->shrink[i]) && g_now->shrink[i].since > latest)
+                latest = g_now->shrink[i].since;
+        for (u32 i = 0; i < g_now->nshrink; i++) {
+            struct am_shrink *k = &g_now->shrink[i];
             if (!active(k))
                 continue;
             k->strikes = early && k->since == latest ? k->strikes + 1 : 0;
@@ -404,7 +412,7 @@ COLD u64 automem_plan(struct module *m, u8 *text, u64 phys)
         }
         logf("automem: learned plan, boot %u of this build: last time told %u MiB, reserved at most %u, held %u, "
              "%s%s; its heaps left %lu MiB unused",
-             g_now.boots, l->told_mib, l->demand_mib, l->peak_mib,
+             g_now->boots, l->told_mib, l->demand_mib, l->peak_mib,
              l->oom & AM_OOM_REAL ? "ran out of memory" : l->oom ? "ran out of what it was told" : "did not run out",
              early ? " but stopped within two minutes" : "", savings / MiB);
         /* what it reserves now: last time's demand, refusals included, with
@@ -412,7 +420,7 @@ COLD u64 automem_plan(struct module *m, u8 *text, u64 phys)
         s64 need = l->demand_mib;
         if ((l->oom & AM_OOM_TOLD) && l->told_mib + l->short_mib > need)
             need = l->told_mib + l->short_mib;
-        need += AM_MARGIN_MIB + (s64)shrunk(l, AM_OK) - shrunk(&g_now, 0);
+        need += AM_MARGIN_MIB + (s64)shrunk(l, AM_OK) - shrunk(g_now, 0);
         s64 cap = (s64)((phys + savings) / MiB);
         u32 more = 0;
         if (l->oom & AM_OOM_REAL)
@@ -422,8 +430,8 @@ COLD u64 automem_plan(struct module *m, u8 *text, u64 phys)
         if (more) {
             u32 got = plan_shrinks(m, text, more);
             need -= got;
-            if ((l->oom & AM_OOM_REAL) && !got && !g_now.strict) {
-                g_now.strict = 1;
+            if ((l->oom & AM_OOM_REAL) && !got && !g_now->strict) {
+                g_now->strict = 1;
                 logf("automem: out of memory with no pool left to shrink: allocations past what the title is "
                      "told are refused from now on");
             }
@@ -433,15 +441,15 @@ COLD u64 automem_plan(struct module *m, u8 *text, u64 phys)
         told = need > 0 ? (u64)(need < cap ? need : cap) * MiB : 0;
         if ((l->oom & AM_OOM_REAL) && told > (u64)l->told_mib * MiB)
             told = (u64)l->told_mib * MiB;
-        if (told < phys || g_now.strict)
+        if (told < phys || g_now->strict)
             told = phys;
     }
     told &= ~(2 * MiB - 1);
     apply_shrinks(m, text);
-    g_now.told_mib = (u32)(told / MiB);
+    g_now->told_mib = (u32)(told / MiB);
     logf("automem: told %lu MiB of direct memory (%lu MiB for real); allocations of %lu MiB or more are committed "
          "as they are mapped%s",
-         told / MiB, phys / MiB, AM_LAZY_MIN / MiB, g_now.strict ? "" : ", and admitted past that much");
+         told / MiB, phys / MiB, AM_LAZY_MIN / MiB, g_now->strict ? "" : ", and admitted past that much");
     save();
     return told;
 }
@@ -450,12 +458,12 @@ COLD u64 automem_plan(struct module *m, u8 *text, u64 phys)
 
 COLD static struct am_site *site_of(u32 site, bool add)
 {
-    for (u32 i = 0; i < g_now.nsites && i < AM_SITES; i++)
-        if (g_now.sites[i].site == site)
-            return &g_now.sites[i];
-    if (!add || g_now.nsites >= AM_SITES)
+    for (u32 i = 0; i < g_now->nsites && i < AM_SITES; i++)
+        if (g_now->sites[i].site == site)
+            return &g_now->sites[i];
+    if (!add || g_now->nsites >= AM_SITES)
         return NULL;
-    struct am_site *s = &g_now.sites[g_now.nsites++];
+    struct am_site *s = &g_now->sites[g_now->nsites++];
     *s = (struct am_site){.site = site};
     return s;
 }
@@ -464,7 +472,7 @@ COLD static struct am_site *site_of(u32 site, bool add)
  * is committed only as it is mapped */
 bool automem_admit(u64 total, u64 len, u64 told)
 {
-    if (!g_on || g_now.strict || len < AM_LAZY_MIN || total > told + AM_ADMIT_MIB * MiB)
+    if (!g_on || g_now->strict || len < AM_LAZY_MIN || total > told + AM_ADMIT_MIB * MiB)
         return false;
     static bool said;
     if (!said) {
@@ -477,18 +485,18 @@ bool automem_admit(u64 total, u64 len, u64 told)
 
 COLD static void measure(void)
 {
-    for (u32 i = 0; i < g_now.nsites && i < AM_SITES; i++) {
-        struct am_site *s = &g_now.sites[i];
+    for (u32 i = 0; i < g_now->nsites && i < AM_SITES; i++) {
+        struct am_site *s = &g_now->sites[i];
         u32 c = s->lazy && g_site_off[i] ? (u32)(vdm_lazy_bytes(g_site_off[i]) / MiB) : 0;
         if (c > s->peak_mib)
             s->peak_mib = c, g_dirty = true;
     }
     u32 demand = (u32)(budget_title_dmem() / MiB);
     u32 held = (u32)((g_eager + budget_flex_used()) / MiB) + vdm_lazy_committed_mib();
-    if (demand > g_now.demand_mib)
-        g_now.demand_mib = demand, g_dirty = true;
-    if (held > g_now.peak_mib)
-        g_now.peak_mib = held, g_dirty = true;
+    if (demand > g_now->demand_mib)
+        g_now->demand_mib = demand, g_dirty = true;
+    if (held > g_now->peak_mib)
+        g_now->peak_mib = held, g_dirty = true;
 }
 
 void automem_note_alloc(u64 site, u64 len, int type, bool lazy, u64 off)
@@ -498,9 +506,9 @@ void automem_note_alloc(u64 site, u64 len, int type, bool lazy, u64 off)
     if (!lazy)
         __atomic_fetch_add(&g_eager, len, __ATOMIC_RELAXED);
     u32 demand = (u32)(budget_title_dmem() / MiB);
-    if (demand > g_now.demand_mib)
-        g_now.demand_mib = demand, g_dirty = true;
-    struct am_shrink *k = shrink_of(&g_now, (u32)site);
+    if (demand > g_now->demand_mib)
+        g_now->demand_mib = demand, g_dirty = true;
+    struct am_shrink *k = shrink_of(g_now, (u32)site);
     if (k && active(k) && k->new_mib != k->orig_mib) {
         u8 was = k->state;
         if (len == (u64)k->new_mib * MiB)
@@ -524,7 +532,7 @@ void automem_note_alloc(u64 site, u64 len, int type, bool lazy, u64 off)
     if (!lazy && len / MiB > s->peak_mib)
         s->peak_mib = (u32)(len / MiB);
     if (lazy)
-        g_site_off[s - g_now.sites] = off;
+        g_site_off[s - g_now->sites] = off;
     g_dirty = true;
 }
 
@@ -542,19 +550,19 @@ void automem_note_out_of_memory(int kind, u64 short_bytes)
     if (!g_on)
         return;
     u32 mib = (u32)((short_bytes + MiB - 1) / MiB);
-    bool news = !(g_now.oom & (u32)kind) || (kind == AM_OOM_TOLD && mib > g_now.short_mib);
+    bool news = !(g_now->oom & (u32)kind) || (kind == AM_OOM_TOLD && mib > g_now->short_mib);
     if (!news)
         return;
-    g_now.oom |= (u32)kind;
+    g_now->oom |= (u32)kind;
     if (kind == AM_OOM_TOLD)
-        g_now.short_mib = mib;
+        g_now->short_mib = mib;
     measure();
     if (kind == AM_OOM_REAL) { /* what more the lazy heaps could still ask for */
         u32 left = 0;
-        for (u32 i = 0; i < g_now.nsites && i < AM_SITES; i++)
-            if (g_now.sites[i].lazy && g_site_off[i])
-                left += g_now.sites[i].len_mib - (u32)(vdm_lazy_bytes(g_site_off[i]) / MiB);
-        g_now.left_mib = left;
+        for (u32 i = 0; i < g_now->nsites && i < AM_SITES; i++)
+            if (g_now->sites[i].lazy && g_site_off[i])
+                left += g_now->sites[i].len_mib - (u32)(vdm_lazy_bytes(g_site_off[i]) / MiB);
+        g_now->left_mib = left;
     }
     save();
 }
@@ -571,9 +579,9 @@ COLD void automem_tick(void)
     measure();
     u32 alive = (u32)((t - g_start_us) / 60000000);
     static u64 last_save;
-    bool minute = alive != g_now.alive_min && alive <= 2; /* past the early-stop window soon */
-    if (alive != g_now.alive_min)
-        g_now.alive_min = alive, g_dirty = true;
+    bool minute = alive != g_now->alive_min && alive <= 2; /* past the early-stop window soon */
+    if (alive != g_now->alive_min)
+        g_now->alive_min = alive, g_dirty = true;
     if (minute || (g_dirty && t - last_save >= 300000000)) {
         last_save = t;
         save();

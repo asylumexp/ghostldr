@@ -40,7 +40,22 @@ struct vdm {
     u64 *chunk; /* lazy: physical offset of each 2 MiB chunk, 0 = not committed */
     u32 committed;
 };
-static struct vdm g_vdm[VDM_MAX];
+/* allocated on first use: the core's image has to stay inside the IPU
+ * buffer (tools/core_info.py), and most titles never need it */
+static struct vdm *g_vdm;
+
+static struct vdm *vdm_table(void)
+{
+    struct vdm *t = __atomic_load_n(&g_vdm, __ATOMIC_ACQUIRE);
+    if (t)
+        return t;
+    struct vdm *p = page_alloc(VDM_MAX * sizeof(*p)), *none = NULL;
+    if (p && !__atomic_compare_exchange_n(&g_vdm, &none, p, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        page_free(p, VDM_MAX * sizeof(*p));
+        p = none;
+    }
+    return p;
+}
 
 bool vdm_is(u64 off)
 {
@@ -51,7 +66,7 @@ static struct vdm *vdm_of(u64 off, u64 *rel)
 {
     u64 i = (off - VDM_BASE) / VDM_STRIDE;
     *rel = (off - VDM_BASE) % VDM_STRIDE;
-    return i < VDM_MAX && (g_vdm[i].n || g_vdm[i].lazy) ? &g_vdm[i] : NULL;
+    return g_vdm && i < VDM_MAX && (g_vdm[i].n || g_vdm[i].lazy) ? &g_vdm[i] : NULL;
 }
 
 static int release_real(u64 phys, u64 len)
@@ -64,6 +79,8 @@ int vdm_alloc(u64 start, u64 end, u64 len, u64 align, int type, off_t *out)
     int (*alloc)(off_t, off_t, size_t, size_t, int, off_t *) =
         (int (*)(off_t, off_t, size_t, size_t, int, off_t *))host_real("sceKernelAllocateDirectMemory");
     u32 slot = 0;
+    if (!vdm_table())
+        return 0x8002000c;
     while (slot < VDM_MAX && (g_vdm[slot].n || g_vdm[slot].lazy))
         slot++;
     if (slot == VDM_MAX)
@@ -101,6 +118,8 @@ int vdm_alloc(u64 start, u64 end, u64 len, u64 align, int type, off_t *out)
 int vdm_alloc_lazy(u64 len, int type, bool zero, off_t *out)
 {
     u32 slot = 0;
+    if (!vdm_table())
+        return 0x8002000c;
     while (slot < VDM_MAX && (g_vdm[slot].n || g_vdm[slot].lazy))
         slot++;
     if (slot == VDM_MAX)
@@ -167,7 +186,7 @@ u64 vdm_lazy_bytes(u64 off)
  * allocation holding off, or with next the first one at or after it */
 int vdm_query(u64 off, bool next, u64 *start, u64 *end, int *type)
 {
-    for (u64 i = off < VDM_BASE ? 0 : (off - VDM_BASE) / VDM_STRIDE; i < VDM_MAX; i++) {
+    for (u64 i = off < VDM_BASE ? 0 : (off - VDM_BASE) / VDM_STRIDE; g_vdm && i < VDM_MAX; i++) {
         struct vdm *v = &g_vdm[i];
         u64 s = VDM_BASE + i * VDM_STRIDE;
         if ((v->n || v->lazy) && off < s + v->len && (next || off >= s)) {
@@ -183,7 +202,7 @@ int vdm_query(u64 off, bool next, u64 *start, u64 *end, int *type)
 u32 vdm_lazy_committed_mib(void)
 {
     u32 n = 0;
-    for (u32 i = 0; i < VDM_MAX; i++)
+    for (u32 i = 0; g_vdm && i < VDM_MAX; i++)
         if (g_vdm[i].lazy)
             n += g_vdm[i].committed * (u32)(LAZY_CHUNK >> 20);
     return n;
@@ -191,7 +210,7 @@ u32 vdm_lazy_committed_mib(void)
 
 void vdm_log_lazy(void)
 {
-    for (u32 i = 0; i < VDM_MAX; i++)
+    for (u32 i = 0; g_vdm && i < VDM_MAX; i++)
         if (g_vdm[i].lazy)
             logf("watchdog: lazy %lx (type %d): %u of %lu MiB committed", VDM_BASE + i * VDM_STRIDE, g_vdm[i].type,
                  g_vdm[i].committed * (u32)(LAZY_CHUNK >> 20), g_vdm[i].len >> 20);
