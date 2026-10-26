@@ -311,7 +311,21 @@ class BootContextTests(unittest.TestCase):
         self.assertEqual(self.stubs("PS4", "12.02"), {
             0x14: 0x800060100, 0x1c: 0x800060140, 0x4: 0x800060180, 0x6: 0x8000601c0,
             0x49: 0x800060200, 0x61: 0x800060240, 0xe8: 0x800060000 + 0x24000,
+            # the diagnostic's direct memory checks in the compiler: open, ioctl, dmem_container
+            0x5: 0x800060280, 0x36: 0x8000602c0, 0x24a: 0x800060300,
         })
+
+    def test_memory_hints(self) -> None:
+        """A PS4 boot stopped for lack of memory gets a plain-language hint."""
+        import run
+        stop = ("budget: PS4: CUSA11456 needs about 1592 MiB more direct memory than this PS4 lets SWRR "
+                "allocate: not started (docs/ps4.md)")
+        self.assertIn("2.5 GiB", run.hint_for(stop))
+        self.assertIn("On a PS5", run.hint_for(stop))
+        warn = ("budget: PS4: the title's plan needs about 172 MiB more direct memory than this console hands "
+                "out; it may fail when it allocates the rest")
+        self.assertIn("2.5 GiB", run.hint_for(warn))
+        self.assertIsNone(run.hint_for("budget: PS4: the kernel hands out 2480 MiB of direct memory (type 0)"))
 
     def test_ps4_without_search(self) -> None:
         """No module info: only Luac0re's table, so no clock_gettime."""

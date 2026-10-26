@@ -22,6 +22,8 @@
 #define GHOST_ABI 0u /* the Makefile passes the headers' checksum */
 #endif
 
+struct lib_title;
+
 struct ghost_api {
     u32 version; /* GHOST_API_VERSION */
     u32 size;    /* sizeof(struct ghost_api) */
@@ -141,6 +143,46 @@ struct ghost_api {
      * (jitrpc.c; < 0 on errors).  The compiler keeps its own copy.  Like
      * jit_call, only from the boot thread: the calls share one channel. */
     int (*jit_recv_fd)(int compiler_fd);
+    /* the ELF loader (ext/src/elfldr_sys.c, docs/elfldr.md): Orbis modules
+     * parsed and their imports resolved as a title's are, published while
+     * they run; the RPC lock around every compiler call once payloads run
+     * (their sockets come from the compiler too); payload TLS and threads
+     * (tls.c); the emulator's JIT objects (arena.c, bigexec.c); and the
+     * crash handler's hook for a payload thread that faults (crash.c) */
+    int (*module_parse)(struct module *m, u8 *file, u64 size);
+    u64 (*resolve_import)(struct module *m, const char *encoded, bool weak, int kind);
+    void (*module_publish)(struct module *m);
+    void (*module_unpublish)(struct module *m);
+    u64 (*unresolved_stub)(const char *lib, const char *nid, const char *modname, s64 ret, bool denied);
+    void (*stubs_flush)(void);
+    void (*rpc_lock)(void);
+    void (*rpc_unlock)(void);
+    void (*tls_static_reserve)(u64 size, u64 align);
+    struct module *(*tls_owner)(void);
+    int (*payload_thread_start)(struct module *owner, void *thr, const void *attr, void *(*fn)(void *), void *arg,
+                                const char *name);
+    u32 (*arena_buffers)(u64 *start, u64 *end, u32 max);
+    int (*jit_objects_find)(struct jit_obj *o, u32 n, u32 want);
+    void (**payload_fault)(struct module *owner, int sig, u64 rip, u64 addr);
+    /* the games an app root that is a folder of games holds (a USB drive:
+     * ext/src/approot.c, docs/usb.md), as the game selector lists them:
+     * their count, 0 for none */
+    int (*library)(const struct lib_title **list);
+};
+
+/* A game found under an app root that is a folder of games (a USB drive, or
+ * a dev setup's folder), by its contents: a folder with eboot.bin, or one
+ * with app0/eboot.bin (ext/src/approot.c).  The game selector shows them in
+ * this order, and its choice comes back to approot_pick by index. */
+#define LIB_TITLE_BAD 1u /* can't be booted: note says why */
+#define LIB_TITLE_DUP 2u /* a second copy of a title: --title boots the first */
+struct lib_title {
+    char id[16];    /* param.sfo's TITLE_ID, meta.bin's, or the folder's name; "" when unknown */
+    char path[256]; /* its app0: the folder with eboot.bin */
+    u16 dir_len;    /* path's first dir_len bytes: its folder, with prefix and meta.bin (path's parent for .../app0) */
+    u16 flags;      /* LIB_TITLE_* */
+    u32 reserved;
+    char note[96];  /* why it can't be booted, or about the copy; may be empty */
 };
 
 /* A provider of the title's files other than ghostfs: the extension's usbfs
@@ -171,7 +213,10 @@ struct appfs_ops {
 struct ext_early {
     u32 magic, size;
     int (*approot_init)(const char **root);
-    int (*approot_pick)(const char *title, const char **root);
+    /* the game the selector chose: its index in library()'s list and its ID
+     * (index < 0 or title NULL: none chosen) */
+    int (*approot_pick)(const char *title, int index, const char **root);
+    int (*library)(const struct lib_title **list);
 };
 typedef const struct ext_early *(*ext_early_fn)(const struct ghost_api *api);
 
@@ -230,6 +275,10 @@ struct ext_exports {
      * stop short (the FTP server starts here: ftp_sys.c).  The core checks
      * size before calling it. */
     void (*title_starting)(void);
+    /* No title (ctx CTX_FLAG_ELFLDR): the ELF loader serves payloads on the
+     * boot thread until a client tells it to quit (ext/src/elfldr.c).  The
+     * core checks size before calling it. */
+    int (*elfldr_main)(void);
 };
 
 typedef const struct ext_exports *(*ext_init_fn)(const struct ghost_api *api);

@@ -3,6 +3,10 @@
 build/ghostldr/ext.bin.  The layout is struct ext_blob in ghost_api.h.
 
     python3 ghostldr/tools/mkext.py --abi N build/ghostldr/ext.elf build/ghostldr/ext.bin
+
+--no-nids packs an empty table (no names, one NUL in the string pool): the
+ELF loader's own extension (ext-elfldr.bin), whose payloads name their
+imports.
 """
 
 from __future__ import annotations
@@ -99,9 +103,10 @@ def main() -> int:
     ap.add_argument("elf", type=Path)
     ap.add_argument("out", type=Path)
     ap.add_argument("--abi", type=lambda s: int(s, 0), required=True, help="GHOST_ABI (the Makefile's header checksum)")
+    ap.add_argument("--no-nids", action="store_true", help="an empty NID table (ext-elfldr.bin)")
     args = ap.parse_args()
     code = code_image(elf64.Elf(args.elf))
-    nids = gen_nids.encode_table(gen_nids.name_db())
+    nids = (0, b"", b"", b"\0") if args.no_nids else gen_nids.encode_table(gen_nids.name_db())
     blob = pack(code, nids, args.abi & 0xFFFFFFFF)
     args.out.write_bytes(blob)
     print(f"{args.out}: {len(blob)} bytes, CRC-32 {zlib.crc32(blob):08x}: code {code['memsz'] >> 10} KiB "

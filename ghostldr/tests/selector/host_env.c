@@ -19,9 +19,13 @@
  *           nofont  like single, libSceFont.sprx cannot be loaded
  *           badfont like single, libSceFont loads but its library fails
  *           badcrc  sel.c refuses a module with the wrong CRC
+ *           ps4     a PS4 (CTX_FLAG_PS4), three titles: Right, Cross, Cross (No),
+ *                   Cross, Circle, Cross, Left (Yes), Cross -> 1 (CUSA00001)
  *
  * Environment: SEL_SHOTS="ms:name,..." saves what is on the screen at each
- * time as OUT_DIR/MODE-name.png.
+ * time as OUT_DIR/MODE-name.png.  SEL_BUNDLE=1: the module comes in memory,
+ * as the release's ghostldr.lua passes it (CTX_FLAG_BUNDLE), and sel.c must
+ * unmap it whether it runs it or not.
  */
 #include "sel_api.h"
 
@@ -187,8 +191,16 @@ static int k_map_direct(void **addr, size_t len, int prot, int flags, off_t phys
     return (int)0x80020016;
 }
 
+static u8 *g_bundle_sel; /* SEL_BUNDLE: the module in "flexible memory" */
+static u64 g_bundle_len;
+static int g_bundle_unmapped;
+
 static int k_munmap(void *addr, size_t len)
 {
+    if (g_bundle_sel && addr == g_bundle_sel && len == g_bundle_len && !g_bundle_unmapped) {
+        g_bundle_unmapped = 1;
+        return 0;
+    }
     for (int i = 0; i < g_nblocks; i++)
         if (g_blocks[i].va == (u64)addr && g_blocks[i].len == len && !g_blocks[i].unmapped) {
             sys_unmap(addr, len);
@@ -393,15 +405,19 @@ struct step {
 };
 static const struct step SINGLE[] = {{1500, 0x8}, {1600, 0}, {2600, 0x2000}, {2700, 0}, {3400, 0x4000}, {3500, 0}};
 static const struct step MULTI[] = {{2500, 0x20}, {2600, 0}, {3000, 0x20}, {3100, 0}, {4400, 0x4000}, {4500, 0}};
+static const struct step PS4[] = {{2500, 0x20},   {2600, 0}, {3200, 0x4000}, {3300, 0}, {3800, 0x4000}, {3900, 0},
+                                  {4400, 0x4000}, {4500, 0}, {5000, 0x2000}, {5100, 0}, {5600, 0x4000}, {5700, 0},
+                                  {6200, 0x80},   {6300, 0}, {6800, 0x4000}, {6900, 0}};
 
 static int pad_open(s32 user, s32 type, s32 index, const void *param) { return user == 0x10000001 ? 5 : -1; }
 static void shots(void);
 static int pad_read(s32 handle, u8 *data)
 {
     shots();
-    const struct step *s = str_eq(g_mode, "multi") ? MULTI : SINGLE;
+    const struct step *s = str_eq(g_mode, "multi") ? MULTI : str_eq(g_mode, "ps4") ? PS4 : SINGLE;
+    int n = str_eq(g_mode, "ps4") ? (int)(sizeof(PS4) / sizeof(PS4[0])) : 6;
     u32 ms = (u32)((g_now - 1000000) / 1000), b = 0;
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < n; i++)
         if (ms >= s[i].ms)
             b = s[i].buttons;
     memset(data, 0, 0x68);
@@ -671,7 +687,9 @@ int main(int argc, char **argv)
     cx->staging_size = 4u << 20, cx->staging = (u64)sys_calloc(cx->staging_size);
     cx->app_root = (u64)(str_eq(g_mode, "approot") ? "/data/test/app0" : "ghostfs");
     cx->flags = (str_eq(g_mode, "skip") ? 0 : CTX_FLAG_SELECT) | 2 |
-                (str_eq(g_mode, "single") || str_eq(g_mode, "multi") ? CTX_FLAG_SEL_FONT_BUILTIN : 0);
+                (str_eq(g_mode, "single") || str_eq(g_mode, "multi") || str_eq(g_mode, "ps4") ? CTX_FLAG_SEL_FONT_BUILTIN
+                                                                                               : 0) |
+                (str_eq(g_mode, "ps4") ? CTX_FLAG_PS4 : 0);
     struct ghost_api *a = &g_ghost_api;
     a->version = GHOST_API_VERSION, a->size = sizeof(*a), a->ctx = &g_ctx, a->k = &K, a->logf = logf;
     a->call_gadget6 = call_gadget6, a->host_dlsym = host_dlsym, a->hle_lookup = hle_lookup;
@@ -679,19 +697,32 @@ int main(int argc, char **argv)
     a->gfs_active = gfs_active, a->gfs_mount = gfs_mount, a->gfs_umount = gfs_umount;
 
     u64 size = (u64)sys_file_size(argv[2]);
-    cx->sel_fd = (u64)sys_open(argv[2]); /* the "socket": sel.c closes it */
-    g_opens++;
+    const char *in_mem = sys_getenv("SEL_BUNDLE");
+    if (in_mem && *in_mem) { /* the release's ghostldr.lua: the module where it received it */
+        int fd = sys_open(argv[2]);
+        g_bundle_len = (size + 0x3FFF) & ~0x3FFFull;
+        g_bundle_sel = sys_map(g_bundle_len);
+        check(fd >= 0 && sys_read(fd, g_bundle_sel, size) == (s64)size, "the module read for the bundle");
+        sys_close(fd);
+        cx->sel_fd = (u64)g_bundle_sel;
+        cx->flags |= CTX_FLAG_BUNDLE;
+    } else {
+        cx->sel_fd = (u64)sys_open(argv[2]); /* the "socket": sel.c closes it */
+        g_opens++;
+    }
     cx->sel_size = size;
     cx->sel_crc = sys_strtoul(argv[3]) ^ (str_eq(g_mode, "badcrc") ? 1 : 0);
     char title[16];
     /* boot.c: show when ghostfs left the choice to it, or with run.py --select */
     int pick = sel_run((cx->flags & CTX_FLAG_SELECT) != 0, title);
 
-    int want = str_eq(g_mode, "multi") ? 2 : str_eq(g_mode, "skip") || str_eq(g_mode, "badcrc") ? -1 : 0;
+    int want = str_eq(g_mode, "multi") ? 2 : str_eq(g_mode, "ps4") ? 1 : str_eq(g_mode, "skip") || str_eq(g_mode, "badcrc") ? -1 : 0;
     say("selector_host: %s chose %d (%.16s)", g_mode, pick, pick >= 0 ? title : "-");
     check(pick == want, "the expected title was chosen");
     if (str_eq(g_mode, "multi"))
         check(str_eq(title, "CUSA00003"), "its ID is returned");
+    if (str_eq(g_mode, "ps4"))
+        check(str_eq(title, "CUSA00001"), "its ID is returned");
     int shown = want >= 0;
     if (shown) {
         check(g_vo_open == 1 && g_vo_closed == 1, "VideoOut opened once and closed");
@@ -723,6 +754,8 @@ int main(int argc, char **argv)
     check(g_mounts == g_umounts && mounted_now() == 0, "every save container unmounted");
     check(g_max_mounted <= 1, "at most one container mounted at a time");
     check(g_opens == g_closes, "every file closed");
+    if (g_bundle_sel)
+        check(g_bundle_unmapped && (s64)cx->sel_fd == -1, "the bundle's module taken and unmapped");
     int clean = 1;
     if (g_region)
         for (u64 i = 0; i < REGION_SIZE; i++)

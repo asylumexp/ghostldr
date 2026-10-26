@@ -237,11 +237,13 @@ static NOINLINE u64 h_dup(u64 fd, u64 to, u64 c, u64 d, u64 e, u32 i)
     return pass(i, fd, to, 0, 0, 0);
 }
 
-/* The title's stdout and stderr go to the UDP log, one line per record.
- * ghostfs files are read-only. */
+/* The title's stdout and stderr go to the UDP log, one line per record;
+ * an ELF loader payload's also to its connection (elfldr_sys.c).  ghostfs
+ * files are read-only. */
 static volatile int g_out_lock;
 static char g_out_line[512];
 static u32 g_out_len;
+unsigned elfldr_output(int fd, const void *buf, u64 len) HIDDEN;
 
 static NOINLINE u64 h_write(u64 fd, u64 buf, u64 len, u64 d, u64 e, u32 i)
 {
@@ -250,11 +252,15 @@ static NOINLINE u64 h_write(u64 fd, u64 buf, u64 len, u64 d, u64 e, u32 i)
     if (fd != 1 && fd != 2)
         return pass(i, fd, buf, len, 0, 0);
     const char *c = (const char *)buf;
+    unsigned payload = elfldr_output((int)fd, c, len);
     spin_lock(&g_out_lock);
     for (u64 k = 0; k < len; k++) {
         if (c[k] == '\n' || g_out_len == sizeof(g_out_line) - 1) {
             g_out_line[g_out_len] = 0;
-            logf("ghost%d: %s", (int)fd, g_out_line);
+            if (payload)
+                logf("payload %u%s: %s", payload, fd == 2 ? " (stderr)" : "", g_out_line);
+            else
+                logf("ghost%d: %s", (int)fd, g_out_line);
             g_out_len = 0;
             if (c[k] == '\n')
                 continue;

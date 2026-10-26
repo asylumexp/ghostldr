@@ -24,6 +24,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 EXT = ROOT / "build/ghostldr/ext.bin"
+SLIM = ROOT / "build/ghostldr/ext-elfldr.bin"    # the ELF loader's own, in ghostldr-elfldr.bin
 sys.path.insert(0, str(ROOT / "ghostldr/tools"))
 sys.path.insert(0, str(ROOT / "ghostldr/host"))
 sys.path.insert(0, str(HERE))
@@ -139,6 +140,33 @@ class ExtensionOnHost(unittest.TestCase):
                      "TLS: an ended thread's blocks serve the next thread, fresh",
                      "TLS: a callback thunk gives a host thread its block, arguments intact"):
             self.assertIn("ok " + line, out)
+
+    def test_from_a_bundle_in_memory(self) -> None:
+        """The release's ghostldr.lua passes the blob where it received it
+        (CTX_FLAG_BUNDLE): the core checks it as a fetched one, uses it in place
+        and unmaps it with the rest, or at once when it is refused."""
+        out = self.run_host("bundle")
+        for line in ("the bundle's memory used where it is", "start (place, relocate, ext_init, self-test)",
+                     "flexible memory returned"):
+            self.assertIn("ok " + line, out)
+        self.assertIn("SHA-256 verified", out)
+        out = self.run_host("bundle-badcrc")
+        self.assertIn("is corrupt", out)
+        self.assertIn("ok the bundle's memory taken and unmapped", out)
+
+    @unittest.skipUnless(SLIM.exists(), "build/ghostldr/ext-elfldr.bin missing: run make -C ghostldr/native")
+    def test_elfldr_extension_loads_with_no_nid_table(self) -> None:
+        """ext-elfldr.bin: no NID table, and the core still places it, binds
+        by NID and runs its self-test."""
+        import hashlib
+        blob = SLIM.read_bytes()
+        p = subprocess.run([str(self.host), "slim", str(SLIM), hex(zlib.crc32(blob)), hashlib.sha256(blob).hexdigest()],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("FAILED", p.stdout)
+        self.assertIn("ok no NID table", p.stdout)
+        self.assertIn("ext: self-test ok", p.stdout)
+        self.assertIn("0 NIDs", p.stdout)
 
     def test_refuses_a_bad_transfer_before_touching_anything(self) -> None:
         self.assertIn("is corrupt", self.run_host("badcrc"))

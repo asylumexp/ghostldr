@@ -17,7 +17,7 @@ The desktop app ([app/](../../app/README.md)) packaged per system, for the relea
 python3 tools/package/build_all.py --out ~/ghostldr-release
 ```
 
-- **What it does:** `make -s` in `ghostldr/native` (the prebuilt files; `--no-make` skips it), then every installer from `HEAD` (`--ref` for another revision), then `SHA256SUMS.txt` in the output folder. `--only deb,appimage` builds some of them.
+- **What it does:** `make -s` in `ghostldr/native` (the prebuilt files; `--no-make` skips it), then copies the two-file boot's files from that build into the output folder (`ghostldr.lua`, `ghostldr-ext.bin`, `ghostldr-elfldr.bin`: [docs/using-the-release.md](../../docs/using-the-release.md#boot-with-no-computer)), then every installer from `HEAD` (`--ref` for another revision), then `SHA256SUMS.txt` in the output folder, covering all of them. `--only deb,appimage` builds some of the installers.
 - **Where:** the macOS app is built on macOS, the rest on macOS or Linux. Default output: `build/package/dist`; downloads are cached in `build/package/cache`.
 - **Tools:**
   - Python 3.9+ to run the scripts;

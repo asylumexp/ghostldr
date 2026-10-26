@@ -557,9 +557,9 @@ class UsbPathTest(ServiceJobTest):
             write(self.root / "build/ghostldr" / n, "x")
         write(self.root / "ghostldr/host/run.py", "import sys\nprint(sys.argv[1:])\n")
         self.assertEqual(self.args(self.service.boot("CUSA00900", source="usb")),
-                         ["boot", "--app-root", "usb:/ghostldr", "--no-build", "--title", "CUSA00900"])
+                         ["boot", "--app-root", "usb:/", "--no-build", "--title", "CUSA00900"])
         self.assertEqual(self.args(self.service.boot("", select=True, source="usb")),
-                         ["boot", "--app-root", "usb:/ghostldr", "--no-build", "--select"])
+                         ["boot", "--app-root", "usb:/", "--no-build", "--select"])
         with self.assertRaises(AppError):
             self.service.boot("CUSA00900", source="somewhere")
 

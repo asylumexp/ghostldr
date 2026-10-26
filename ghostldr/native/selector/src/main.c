@@ -164,6 +164,13 @@ static const char *name_src(u8 src)
 #define PNG_FILE_MAX (8u << 20)
 #define META_HEAD (1u << 20) /* read with META's header: param.sfo and the icon fit in it */
 
+/* TITLE_* from what the catalogue (or the extension's list) and param.sfo say */
+static u32 title_flags(const struct cat_title *c)
+{
+    return (c->flags & (CAT_INCOMPLETE | CAT_BAD) ? 0 : TITLE_COMPLETE) | (c->flags & CAT_DUP ? TITLE_COPY : 0) |
+           (title_is_dump(c->id, c->sfo_id, c->content_id) ? TITLE_DUMP : 0);
+}
+
 /* what reading a title's META, index or param.sfo taught us */
 static void sync_title(struct sel *S, struct plat *P, int i)
 {
@@ -175,6 +182,13 @@ static void sync_title(struct sel *S, struct plat *P, int i)
         str_copy(t->version, c->version, sizeof(t->version));
     if (!t->id[0] && c->id[0])
         str_copy(t->id, c->id, sizeof(t->id));
+    u32 dump = title_flags(c) & TITLE_DUMP;
+    if ((t->flags & TITLE_DUMP) != dump) {
+        LOG(P, "title %d (%s): %s, by its param.sfo (%s, %s)", i, c->id, dump ? "a game's dump" : "homebrew",
+            c->sfo_id[0] ? c->sfo_id : "no TITLE_ID", c->content_id[0] ? c->content_id : "no CONTENT_ID");
+        t->flags = (t->flags & ~TITLE_DUMP) | dump;
+        S->changed |= CH_ALL;
+    }
 }
 
 /* <prefix>META: its header once (with whatever follows it in the first MiB) */
@@ -443,6 +457,7 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     P.ctx = *api->ctx;
     P.k = api->k;
     int force = (P.ctx->flags & CTX_FLAG_SELECT) != 0;
+    P.ps4 = (P.ctx->flags & CTX_FLAG_PS4) != 0;
     u32 lk = (u32)P.ctx->libkernel_handle;
     P.proc_time = (u64(*)(void))sys_sym(&P, lk, "sceKernelGetProcessTime");
     P.gettimeofday = (s32(*)(void *, void *))sys_sym(&P, lk, "sceKernelGettimeofday");
@@ -453,9 +468,9 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     api->logf("selector: symbols %p %p %p %p", (void *)P.proc_time, (void *)P.gettimeofday, (void *)P.utc2local, (void *)P.param_int);
     /* 1. what is installed */
     int n = cat_count(&P);
-    LOG(&P, "module at %p: %d title(s) installed (%s)%s", (void *)sel_main, n,
+    LOG(&P, "module at %p: %d title(s) installed (%s)%s%s", (void *)sel_main, n,
         P.library ? P.root : !P.ghostfs ? "app root" : P.catalogue ? "GFSCATALOG" : P.legacy[0] ? P.legacy : "nothing",
-        force ? ", shown on request" : "");
+        force ? ", shown on request" : "", P.ps4 ? "; a PS4: game dumps are marked and ask before they boot" : "");
     if (n <= 0 || (n == 1 && !force))
         return -1;
     if (n > SEL_MAX_TITLES)
@@ -501,9 +516,28 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         str_copy(titles[i].version, c->version, sizeof(titles[i].version));
         str_copy(titles[i].prefix, P.ghostfs ? c->prefix : "", sizeof(titles[i].prefix));
         titles[i].size = c->total;
-        titles[i].flags = c->flags & CAT_INCOMPLETE ? 0 : TITLE_COMPLETE;
-        LOG(&P, "title %d: %s '%s' (name %s) %s, %lu MiB, index %s%s", i, c->id, c->name, name_src(c->name_src),
-            c->version, c->total >> 20, c->index[0] ? c->index : "-", c->flags & CAT_INCOMPLETE ? ", incomplete" : "");
+        titles[i].flags = title_flags(c);
+        str_copy(titles[i].note, c->note, sizeof(titles[i].note));
+        if (P.library) { /* its folder, as the drive shows it: without the mount point and app0 */
+            const char *w = c->path;
+            int len = (int)c->dir_len, mp = str_len("/ghostldr_usb/");
+            if (len > mp && !memcmp(w, "/ghostldr_usb/", (size_t)mp))
+                w += mp, len -= mp;
+            str_copy(titles[i].where, w, len + 1 < (int)sizeof(titles[i].where) ? len + 1 : (int)sizeof(titles[i].where));
+            if (!titles[i].name[0] && !titles[i].id[0]) { /* nothing names it: its folder's name */
+                const char *base = titles[i].where;
+                for (const char *c = base; *c; c++)
+                    if (*c == '/' && c[1])
+                        base = c + 1;
+                str_copy(titles[i].name, base, sizeof(titles[i].name));
+            }
+        }
+        LOG(&P, "title %d: %s '%s' (name %s) %s, %lu MiB, %s %s%s, %s%s", i, c->id, c->name, name_src(c->name_src),
+            c->version, c->total >> 20, P.library ? "at" : "index", P.library ? c->path : c->index[0] ? c->index : "-",
+            c->flags & CAT_INCOMPLETE ? ", incomplete" : "", titles[i].flags & TITLE_DUMP ? "a game's dump" : "homebrew",
+            c->note[0] ? ": " : "");
+        if (c->note[0])
+            LOG(&P, "title %d: %s", i, c->note);
     }
     if (font_init(S, sel_font_glf, 2u << 20) != 0) {
         LOG(&P, "built-in font unusable");
@@ -513,6 +547,7 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         LOG(&P, "system font unavailable: using the built-in one (Noto Sans)");
     if (png_init(&P) != 0)
         LOG(&P, "libScePngDec unavailable: tiles and backgrounds use the built-in fallback");
+    ui_set_platform(S, P.ps4 ? SEL_PS4 : SEL_PS5);
     if (ui_init(S, titles, n, 0) != 0)
         goto out;
     for (int i = 0; i < n && i < 2; i++) /* the first icons; the rest load while the row is on screen */

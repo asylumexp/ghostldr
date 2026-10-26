@@ -40,3 +40,42 @@ int sfo_get(const u8 *sfo, u64 size, const char *key, char *out, int cap, s32 *n
     }
     return -1;
 }
+
+/* ---- a game's dump, or homebrew? ---- */
+
+static int upper(int c) { return c >= 'a' && c <= 'z' ? c - 32 : c; }
+static int digit(int c) { return c >= '0' && c <= '9'; }
+
+/* s starts with a retail title ID: a product prefix of PS4 (and PS5) games
+ * and five digits, then nothing more of the ID */
+static int retail_id(const char *s)
+{
+    static const char prefixes[] = "CUSA" "PCAS" "PCJS" "PCKS" "PLAS" "PLJM" "PLJS" "PLKS" "PPSA";
+    if (!s)
+        return 0;
+    for (int i = 0; i < 9; i++)
+        if (!s[i])
+            return 0;
+    for (int i = 4; i < 9; i++)
+        if (!digit(s[i]))
+            return 0;
+    if (digit(s[9]) || (upper(s[9]) >= 'A' && upper(s[9]) <= 'Z'))
+        return 0;
+    for (u64 p = 0; p < sizeof(prefixes) - 1; p += 4) {
+        int k = 0;
+        while (k < 4 && upper(s[k]) == prefixes[p + k])
+            k++;
+        if (k == 4)
+            return 1;
+    }
+    return 0;
+}
+
+int title_is_dump(const char *id, const char *sfo_id, const char *content_id)
+{
+    const char *c = content_id ? content_id : "";
+    int cid = c[0] && c[1] && digit(c[2]) && digit(c[3]) && digit(c[4]) && digit(c[5]) && c[6] == '-';
+    if (cid && upper(c[0]) == 'I' && upper(c[1]) == 'V')
+        return 0; /* IV0000-BREW00083_00-...: homebrew's publisher code */
+    return retail_id(id) || retail_id(sfo_id) || (cid && retail_id(c + 7));
+}

@@ -122,7 +122,6 @@ int host_init(struct boot_ctx *ctx)
     RESOLVE(getpid, lk, "getpid");
     RESOLVE(sendto, lk, "sendto");
     RESOLVE(debug_out, lk, "sceKernelDebugOutText");
-    log_init(ctx);
     RESOLVE(usleep, lk, "sceKernelUsleep");
     RESOLVE(pthread_create, lk, "scePthreadCreate");
     RESOLVE(pthread_attr_init, lk, "scePthreadAttrInit");

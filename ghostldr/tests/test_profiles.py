@@ -104,10 +104,11 @@ class ProfileTests(unittest.TestCase):
                          (256, 32, 100, 0))
         kinds = [k for k, _ in b["records"]]
         self.assertEqual(kinds, [profiles.REC_PLAN] + [profiles.REC_TABLE] * 4 + [profiles.REC_NEO]  # Pro mode
-                         + [profiles.REC_TLS] + [profiles.REC_NAME])                          # tls_sites, name
+                         + [profiles.REC_TLS] + [profiles.REC_NAME, profiles.REC_PREFIX])     # tls_sites, name
+        self.assertEqual(b["records"][-1][1].rstrip(b"\0"), b"GHOST")       # a USB drive's copy without a prefix file
         self.assertEqual(struct.unpack_from("<11I", b["records"][5][1]),   # Ghost's mode 2 (Jak X), GPU heap 1680
                          (2, 4636, 74, 0, 0, 0, 0, 1680, 0, 0, 0))
-        self.assertEqual(b["records"][-1][1].rstrip(b"\0"), b"Ghost of Tsushima")   # the selector's name
+        self.assertEqual(b["records"][-2][1].rstrip(b"\0"), b"Ghost of Tsushima")   # the selector's name
         fixed, over, n, *sites = struct.unpack_from("<6I", b["records"][0][1])
         self.assertEqual((fixed, over, n, sites), (3996, 120, 3, [0x896126, 0x89614A, 0xEEE2CF]))
         table, role, knob, nexp, mib, min_mib = struct.unpack_from("<IBBHII", b["records"][1][1])

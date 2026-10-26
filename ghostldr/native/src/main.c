@@ -38,6 +38,8 @@ __attribute__((section(".text.entry"), force_align_arg_pointer, used)) u64 ghost
              ctx->size >= __builtin_offsetof(struct boot_ctx, fw) + 8 ? ctx->fw & 0xff : 0);
     if (ctx->flags & CTX_FLAG_DIAG)
         return (u64)ghost_diag();
+    if (ctx->flags & CTX_FLAG_ELFLDR)
+        return (u64)ghost_elfldr();
     if (ctx->flags & 1)
         return (u64)ghost_probe();
     return (u64)ghost_boot();

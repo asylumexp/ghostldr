@@ -198,6 +198,29 @@ static void nosigpipe(int fd)
 #define SYS_socket 97
 #define SYS_close 6
 
+/* A socket the JIT compiler process makes and hands over: fd, or -errno.
+ * The compiler's channel is one at a time (rpc_lock): title threads never
+ * call this while Luac0re's Lua may use the compiler, only ftp_start on the
+ * boot thread and, with no title, the ELF loader's payloads (elfldr_sys.c),
+ * whose service holds the boot thread so no Lua runs. */
+int jit_socket(int domain, int type, int proto) HIDDEN;
+int jit_socket(int domain, int type, int proto)
+{
+    if (!g_ctx->jit_syscall)
+        return -FV_ENOSYS;
+    rpc_lock();
+    long cfd = (long)jit_call(g_ctx->jit_syscall, SYS_socket, (u64)domain, (u64)type, (u64)proto, 0, 0, 0);
+    int fd = cfd >= 0 ? jit_recv_fd((int)cfd) : -1;
+    if (cfd >= 0)
+        jit_call(g_ctx->jit_syscall, SYS_close, (u64)cfd, 0, 0, 0, 0, 0);
+    rpc_unlock();
+    if (cfd < 0)
+        logf("net: the compiler's socket(%d, %d, %d) failed %ld", domain, type, proto, cfd);
+    if (fd >= 0)
+        nosigpipe(fd);
+    return fd >= 0 ? fd : cfd < 0 ? -FV_ENOSYS : -FV_EIO;
+}
+
 /* a TCP socket: SWRR's own, else one the JIT compiler process makes (ftp_start
  * only: it runs on the boot thread, before the title) */
 static long new_socket(bool boot)
@@ -205,13 +228,7 @@ static long new_socket(bool boot)
     long fd = bsd(S.socket(AF_INET, SOCK_STREAM, 0));
     if (fd != -FV_ENOSYS || !boot || !g_ctx->jit_syscall)
         return fd;
-    long cfd = (long)jit_call(g_ctx->jit_syscall, SYS_socket, AF_INET, SOCK_STREAM, 0, 0, 0, 0);
-    if (cfd < 0) {
-        logf("ftp: the compiler's socket() failed %ld", cfd);
-        return -FV_ENOSYS;
-    }
-    fd = jit_recv_fd((int)cfd);
-    jit_call(g_ctx->jit_syscall, SYS_close, (u64)cfd, 0, 0, 0, 0, 0);
+    fd = jit_socket(AF_INET, SOCK_STREAM, 0);
     return fd < 0 ? -FV_ENOSYS : fd;
 }
 
@@ -370,14 +387,14 @@ const char *fv_home(void) { return usb_ftp_home(); }
             missing = missing ? missing : name;                                \
     } while (0)
 
-void ftp_title_starting(void) HIDDEN;
-void ftp_title_starting(void)
+/* libkernel's socket and file calls for ftp.c and elfldr.c, and SIGPIPE
+ * ignored: 0, or -1 (logged) */
+int net_setup(void) HIDDEN;
+int net_setup(void)
 {
-    u32 port = CTX_FTP_PORT(g_ctx->flags);
-    if (!port) {
-        logf("ftp: no FTP server (run.py --ftp-port 0)");
-        return;
-    }
+    static int done;
+    if (done)
+        return done > 0 ? 0 : -1;
     const char *missing = NULL;
     SYM(socket, "socket");
     SYM(bind, "bind");
@@ -394,8 +411,9 @@ void ftp_title_starting(void)
     SYM(unlink, "sceKernelUnlink");
     SYM(rename, "sceKernelRename");
     if (missing || !K.sendto) {
-        logf("ftp: libkernel has no %s: no FTP server", missing ? missing : "sendto");
-        return;
+        logf("net: libkernel has no %s", missing ? missing : "sendto");
+        done = -1;
+        return -1;
     }
     *(void **)&S.shutdown = host_dlsym((u32)g_ctx->libkernel_handle, "shutdown");
     *(void **)&S.getsockopt = host_dlsym((u32)g_ctx->libkernel_handle, "getsockopt");
@@ -410,7 +428,23 @@ void ftp_title_starting(void)
             u32 mask[4];
         } sa = {1 /* SIG_IGN */, 0, {0}};
         if (S.sigaction(SIGPIPE, &sa, NULL) != 0)
-            logf("ftp: SIGPIPE stays as it was");
+            logf("net: SIGPIPE stays as it was");
+    }
+    done = 1;
+    return 0;
+}
+
+void ftp_title_starting(void) HIDDEN;
+void ftp_title_starting(void)
+{
+    u32 port = CTX_FTP_PORT(g_ctx->flags);
+    if (!port) {
+        logf("ftp: no FTP server (run.py --ftp-port 0)");
+        return;
+    }
+    if (net_setup() != 0) {
+        logf("ftp: no FTP server");
+        return;
     }
     usb_ftp_prepare();
     ftp_start((unsigned short)port);

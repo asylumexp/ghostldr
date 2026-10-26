@@ -9,8 +9,9 @@ struct dm_ent {
     off_t phys;
 };
 /* every block direct_alloc mapped; the table grows when full (anonymous mmap
- * makes one block per large allocation of a title's malloc) */
-static struct dm_ent g_dm0[256];
+ * makes one block per large allocation of a title's malloc).  The first one
+ * is in the core's image, which must stay small (tools/core_info.py). */
+static struct dm_ent g_dm0[64];
 static struct dm_ent *volatile g_dm = g_dm0;
 static volatile u32 g_dm_cap = ARRAY_SIZE(g_dm0);
 static volatile int g_dm_lock;

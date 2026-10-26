@@ -97,6 +97,17 @@ void module_publish(struct module *m)
     __atomic_store_n(pp, m, __ATOMIC_RELEASE);
 }
 
+/* The ELF loader's payload is done (ext/src/elfldr_sys.c): readers that
+ * walk the list without a lock may be on m, whose next stays as it was. */
+void module_unpublish(struct module *m)
+{
+    for (struct module **pp = &g_modules; *pp; pp = &(*pp)->next)
+        if (*pp == m) {
+            __atomic_store_n(pp, m->next, __ATOMIC_RELEASE);
+            return;
+        }
+}
+
 int module_place(struct module *m, u64 base)
 {
     if (m->bx) /* code in whole JIT objects, the rest in direct memory (bigexec.c) */

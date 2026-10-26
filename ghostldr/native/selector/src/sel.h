@@ -38,6 +38,8 @@ static inline int surf_y1(const surface *s) { return s->cy1 > 0 && s->cy1 < s->h
 
 /* ---- the catalogue, as the selector sees it ---- */
 #define TITLE_COMPLETE 1u /* fully installed: can boot */
+#define TITLE_DUMP 2u     /* a game's dump, not homebrew (title_is_dump): marked on a PS4 */
+#define TITLE_COPY 4u     /* a second copy of a game on the USB drive (note: which one boots by ID) */
 
 /* where a picture came from (host/gfs_meta.py ART_*) */
 #define ART_TITLE 1     /* the title's own sce_sys/icon0.png, pic1.png */
@@ -77,6 +79,9 @@ struct title {
     u8 icon_state;    /* 0 not tried, 1 loaded, 2 none */
     u8 bg_state;      /* 0 not tried, 1 has a backdrop, 2 none */
     u8 icon_src, bg_src; /* ART_*: set by sel_load_art, or ART_GENERATED */
+    u8 marked;        /* the PS4 warning is drawn into icon and icon_small */
+    char where[128];  /* a game on a USB drive: its folder there; empty: installed */
+    char note[96];    /* why it can't start, or about this copy; may be empty */
 };
 
 /* ---- outline font (font.c) ---- */
@@ -113,8 +118,11 @@ struct fontcache {
 /* ---- whole-UI state (ui.c) ---- */
 #define TILE_BIG 384             /* the focused tile (host/gfs_meta.py ICON) */
 #define TILE_SMALL 256
+#define SEL_PS5 0                /* the console (ui_set_platform) */
+#define SEL_PS4 1                /* SWRR gets 2.5 GiB here (docs/ps4.md): game dumps are marked and need a Yes */
 struct sel {
     void *plat;              /* platform state */
+    int platform;            /* SEL_PS5 or SEL_PS4 */
     int plat_title;          /* platform scratch: the title being loaded */
     surface back;            /* where frames are drawn (always the whole current frame) */
     int damage_y0, damage_y1; /* rows ui_draw changed in back */
@@ -135,7 +143,11 @@ struct sel {
     int launching;
     u64 last_move_us;        /* time of the last selection change */
     u64 toast_until_us;
+    float toast_a;           /* 0..1: the message fading in and out */
     char toast[96];
+    /* PS4: the question before a game dump boots */
+    int ask_open, ask_yes;   /* the dialog is up; Yes has the focus (No at first) */
+    float ask, ask_focus;    /* 0..1: the dialog fading in; the focus moving from No (0) to Yes (1) */
     /* top bar */
     int clock_h, clock_m, clock_24h, clock_valid;
     char user[64];           /* the signed-in user's name; empty: not shown */
@@ -177,24 +189,27 @@ int sel_fmt(char *buf, int size, const char *fmt, ...) __attribute__((format(pri
 int sel_load_art(struct sel *S, int title, int which, surface *out);
 
 /* ---- drawing (draw.c) ---- */
-void draw_fill(surface *s, int x, int y, int w, int h, u32 argb);
 void draw_rect_blend(surface *s, int x, int y, int w, int h, u32 argb); /* alpha from argb */
 void draw_copy(surface *dst, const surface *src);                        /* same size */
 void draw_mix(surface *dst, const surface *a, const surface *b, int t256); /* dst = a + (b - a) * t */
-void draw_scale(surface *dst, int dx, int dy, int dw, int dh, const surface *src, int alpha, int clip_x0);
+/* src scaled to dw x dh, blended by its alpha * alpha/256, its colour * bright/256 */
+void draw_scale(surface *dst, int dx, int dy, int dw, int dh, const surface *src, int alpha, int bright, int clip_x0);
 void draw_resample(surface *dst, const surface *src); /* area/bilinear resample into the whole dst */
 void draw_cover(surface *dst, const surface *src);    /* scale to cover dst, centred, cropped */
-void draw_shadow(surface *s, int x, int y, int w, int h, int radius, int alpha);
-void draw_frame(surface *s, int x, int y, int w, int h, int t, u32 argb);
+/* soft shadow / glow around a rectangle with corner radius cr, fading over radius */
+void draw_shadow(surface *s, int x, int y, int w, int h, int cr, int radius, int alpha);
+void draw_halo(surface *s, int x, int y, int w, int h, int cr, int radius, int alpha, u32 rgb);
+void draw_rrect(surface *s, int x, int y, int w, int h, int r, u32 argb);        /* filled rounded rect */
+void draw_rring(surface *s, int x, int y, int w, int h, int r, int t, u32 argb); /* its outline, t wide */
+void draw_round_corners(surface *s, int r); /* cut a picture's corners round (its alpha) */
+void draw_wash(surface *s, u32 argb);       /* colours towards argb by its alpha, alpha kept */
 void draw_dim(surface *s, int x0, int x1, int y0, int y1, int alpha); /* darken by alpha/256 */
 void draw_disc(surface *s, float cx, float cy, float r, float stroke, u32 argb); /* stroke 0: filled */
 void draw_line(surface *s, float x0, float y0, float x1, float y1, float w, u32 argb);
-void draw_round_rect(surface *s, float x, float y, float w, float h, float r, float stroke, u32 argb);
-void draw_triangle_outline(surface *s, float cx, float cy, float r, float w, u32 argb);
-void draw_square_outline(surface *s, float cx, float cy, float r, float w, u32 argb);
+void draw_warning(surface *s, float cx, float cy, float size, u32 fill, u32 ink); /* a warning sign */
+void draw_ghost(surface *s, int cx, int cy, int size, u32 body, u32 eyes);       /* ghostldr's mark */
 void draw_generated_bg(surface *s, u32 tint);  /* a backdrop in the title's colour */
 void draw_fallback_tile(surface *s, u32 tint); /* a tile's background in its colour */
-void draw_halo(surface *s, int x, int y, int w, int h, int radius, int alpha, u32 rgb); /* soft glow around a rect */
 void draw_shade(surface *s);                     /* the backdrop's dimming and gradients */
 void draw_vgradient(surface *s, int x, int y, int w, int h, u32 top, u32 bottom); /* alpha-blended */
 u32 mix_rgb(u32 a, u32 b, int t256);
@@ -212,6 +227,12 @@ u32 utf8_next(const char **p);
 
 /* ---- param.sfo (sfo.c) ---- */
 int sfo_get(const u8 *sfo, u64 size, const char *key, char *out, int cap, s32 *num);
+/* A game's dump rather than homebrew?  id: the catalogue's (or folder's) title
+ * ID; sfo_id, content_id: param.sfo's TITLE_ID and CONTENT_ID; any may be
+ * empty.  A CONTENT_ID from publisher IVnnnn is homebrew; otherwise a retail
+ * title ID (CUSA, PLAS, ... and five digits) in any of them is a dump; and
+ * anything else homebrew.  Doubt goes to "dump" (docs/selector.md). */
+int title_is_dump(const char *id, const char *sfo_id, const char *content_id);
 
 /* ---- META and QOI (meta.c) ---- */
 int meta_parse(const u8 *d, u64 n, struct meta_info *mi);
@@ -225,6 +246,7 @@ int ui_init(struct sel *S, struct title *titles, int n, int initial);
 int ui_step(struct sel *S, u64 now_us, u64 dt_us, u32 buttons, int stick_x, int *boot);
 void ui_set_clock(struct sel *S, int h, int m, int h24);
 void ui_set_user(struct sel *S, const char *name);
+void ui_set_platform(struct sel *S, int platform); /* SEL_PS5 (the default) or SEL_PS4, before ui_init */
 void ui_draw(struct sel *S);
 void ui_prepare_bg(struct sel *S, int title); /* decode + dim pic1 into the spare buffer */
 void ui_load_icon(struct sel *S, int title);

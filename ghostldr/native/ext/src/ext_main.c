@@ -132,6 +132,8 @@ static void add_functions(const struct ext_family *fam)
 extern const struct ext_early g_approot_early HIDDEN;
 /* the title's main thread is next (ext_exports.title_starting) */
 void ftp_title_starting(void) HIDDEN;
+/* no title: the ELF loader (elfldr_sys.c) */
+int elfldr_main(void) HIDDEN;
 
 const struct ext_early *ext_early(const struct ghost_api *api)
 {
@@ -174,6 +176,6 @@ const struct ext_exports *ext_init(const struct ghost_api *api)
             add_functions(*f);
     }
     g_exports = (struct ext_exports){EXT_EXPORTS_MAGIC, sizeof(g_exports), ext_lookup, lib_policy, g_hle,
-                                     g_nhle, nfam, g_nlibs, ext_sysmodule_failed, ftp_title_starting};
+                                     g_nhle, nfam, g_nlibs, ext_sysmodule_failed, ftp_title_starting, elfldr_main};
     return &g_exports;
 }

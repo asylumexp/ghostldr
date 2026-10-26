@@ -53,10 +53,10 @@ export PS_HOST=192.168.1.123
 Plug the drive into the computer (here `/Volumes/MYDRIVE`) and copy the dump onto it:
 
 ```bash
-python3 ghostldr/host/gfs_pack.py --usb /Volumes/MYDRIVE
+python3 ghostldr.py copy build/ghost/app0
 ```
 
-It copies `build/ghost/app0` to `ghostldr/CUSA11456/app0` on the drive as it is, with a `prefix` file (`GHOST`, so Ghost's progress is `GHOSTSAVE` as with an install) and the selector's `meta.bin`. Nothing is packed: copying the folder by hand works too ([usb.md](usb.md#putting-titles-on-a-drive)). Then plug the drive into the PS5. More games go next to it with `--src`; `usb_drive.py list` shows what a drive holds. With a game running, the PS5's FTP server takes copies onto the drive in it ([ftp.md](ftp.md)).
+It copies the dump to `ghostldr/CUSA11456/app0` on the drive as it is (`--folder` puts it anywhere else, under any name), with a `prefix` file (`GHOST`, so Ghost's progress is `GHOSTSAVE` as with an install) and the selector's `meta.bin`, then checks the copy. Nothing is packed: copying the folder by hand works too, in a folder of any name ([usb.md](usb.md#what-goes-on-the-drive)). Then plug the drive into the PS5. More games go next to it; `python3 ghostldr.py check` shows what the PS5 will find on a drive. With a game running, the PS5's FTP server takes copies onto the drive in it (`copy DUMP ps5`, [ftp.md](ftp.md)). `gfs_pack.py --usb DRIVE` does the same as `copy`.
 
 ### Or install it into SWRR's saved data
 
@@ -103,16 +103,10 @@ python3 ghostldr/host/gfs_install.py --title CUSA12345
 With Luac0re's loader listening (a fresh SWRR start after every Ghost session), from the USB drive:
 
 ```bash
-python3 ghostldr/host/run.py boot --app-root usb:/ghostldr --snap
+python3 ghostldr/host/run.py boot --snap
 ```
 
-or, installed into the saved data:
-
-```bash
-python3 ghostldr/host/run.py boot --app-root ghostfs --snap
-```
-
-From a release zip (prebuilt core, no LLVM), add `--no-build`.
+`--app-root` defaults to `auto`: the games on a USB drive in the PS5, else the installed ones. `--app-root usb:/` only looks on the drive, `--app-root ghostfs` only at the installed games. From a release zip (prebuilt core, no LLVM), add `--no-build`; `python3 ghostldr.py boot` does that by itself.
 
 - **Extension:** run.py serves `build/ghostldr/ext.bin` (the NID table and extra HLE code) on TCP 18195, and the core fetches it before touching the title. Without it, the boot stops there with `ext: ...` in the log. See [ghostldr/native/ext/README.md](../ghostldr/native/ext/README.md).
 - **Several titles:** add `--title CUSA11456`. Without it the only title boots; with several, the game selector shows them on the TV.

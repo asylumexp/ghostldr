@@ -14,6 +14,8 @@
  *     MODE: small | jit | tiny (small area too small: falls back to a JIT
  *           block) | badcrc | short (the server sends fewer bytes) | nosock
  *           | resolve (imports bound through the self-test family)
+ *           | bundle (the blob in flexible memory ghostldr.lua mapped,
+ *           CTX_FLAG_BUNDLE) | bundle-badcrc | slim (ext-elfldr.bin: no NIDs)
  *
  * Prints "ext_host: ..." lines and, with NID_FILE (one NID per line), "nid NID
  * NAME" for each; exits 0 when every step of the mode behaved as expected.
@@ -304,6 +306,15 @@ int main(int argc, char **argv)
     char *blob;
     ctx.ext_size = (u64)sys_read_file(argv[2], &blob);
     ctx.ext_fd = (u64)sys_open(argv[2]);
+    bool bundle = strncmp(mode, "bundle", 6) == 0, slim = strcmp(mode, "slim") == 0;
+    if (bundle) { /* the release's ghostldr.lua received it into flexible memory, the core's to unmap */
+        u8 *copy = sys_map(ALIGN_UP(ctx.ext_size, 0x4000));
+        memcpy(copy, blob, ctx.ext_size);
+        sys_close((int)ctx.ext_fd);
+        ctx.ext_fd = (u64)copy;
+        ctx.flags |= CTX_FLAG_BUNDLE;
+        g_flex_maps++;
+    }
     /* 64 KiB of small area, as after a 192 KiB core image.  An extension
      * that needs more goes to a JIT block on the console ("tiny" tests
      * that); the other modes grow the area so the small-area path stays
@@ -316,6 +327,12 @@ int main(int argc, char **argv)
     sys_protect(g_small, small_size, 0);
     g_small_cur = (u64)g_small, g_small_end = (u64)g_small + small_size;
 
+    if (strcmp(mode, "bundle-badcrc") == 0) {
+        ctx.ext_crc ^= 1;
+        expect(ext_fetch() != 0, "a wrong CRC is refused");
+        expect((s64)ctx.ext_fd == -1 && g_flex_unmaps == 1, "the bundle's memory taken and unmapped");
+        return g_failed;
+    }
     if (strcmp(mode, "badcrc") == 0) {
         ctx.ext_crc ^= 1;
         expect(ext_fetch() != 0, "a wrong CRC is refused");
@@ -339,7 +356,13 @@ int main(int argc, char **argv)
 
     expect(ext_fetch() == 0, "fetch");
     expect((s64)ctx.ext_fd == -1, "socket consumed");
-    expect(nid_to_name("1jfXLRVzisc") && strcmp(nid_to_name("1jfXLRVzisc"), "sceKernelUsleep") == 0, "NID lookup");
+    if (bundle)
+        expect(g_flex_maps == 1, "the bundle's memory used where it is");
+    if (slim)
+        expect(!nid_to_name("1jfXLRVzisc"), "no NID table");
+    else
+        expect(nid_to_name("1jfXLRVzisc") && strcmp(nid_to_name("1jfXLRVzisc"), "sceKernelUsleep") == 0,
+               "NID lookup");
     expect(!nid_to_name("1jfXLRVzis") && !nid_to_name("1jfXLRVziscc") && !nid_to_name("1jfXLRV!isc") && !nid_to_name("1jfXLRVzisd"),
            "malformed NIDs");
     expect(ext_start() == 0, "start (place, relocate, ext_init, self-test)");

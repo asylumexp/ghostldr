@@ -15,6 +15,8 @@ You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your o
 - **Bloodborne 1.09** (CUSA00900) reaches gameplay, with its large executable spread over several JIT buffers and no memory plan yet.
 - **OpenOrbis homebrew** runs ([details](docs/compatibility.md#homebrew)).
 - **An FTP server on the PS5** while a game runs, to put more games onto the drive in it ([docs/ftp.md](docs/ftp.md)).
+- **An ELF loader** without a game: send OpenOrbis or freestanding ELF payloads to it with `nc`, and their output comes back on the connection. Userland only, no kernel exploit ([docs/elfldr.md](docs/elfldr.md)).
+- **A boot with no computer:** two files sent with `nc` or a payload-sender app start a game or the ELF loader, with nothing on the computer serving files ([below](#boot-with-no-computer)).
 - **Other games** boot as far as their imports and memory allow.
 - **PS4 consoles** are experimental: Ghost's code runs on a 12.02 PS4, but SWRR's memory budget there is 2.5 GiB, so Ghost doesn't fit and stops before it starts. Games load from saved data there, not from a USB drive ([docs/ps4.md](docs/ps4.md)).
 - **Jak X instead of SWRR** (EU CUSA07992 1.04, with [UltraC0re](https://github.com/matem6/UltraC0re)) is experimental: Ghost plays there, in its PS4 Pro mode, from its own install in Jak X's save data ([docs/jakx.md](docs/jakx.md)).
@@ -25,48 +27,56 @@ Download the [latest release](https://github.com/asylumexp/ghostldr/releases/lat
 
 Prefer not to use a terminal? The [desktop app](app/README.md) walks through the same steps: find the console, check the setup, copy a game to a USB drive (or install it into SWRR's saved data), and play. The release page has an installer for macOS, Windows and Linux with Python included, and the release zip has it in `app/` (with Python 3.11+).
 
-Quick start, from the release folder: start Luac0re in SWRR until its loader listens on port 9026, then check the setup.
+Quick start, from the release folder. Copy your dump to an exFAT USB drive plugged into the computer (any folder name works; [docs/usb.md](docs/usb.md) says what goes on the drive):
 
 ```bash
-python3 ghostldr/host/run.py doctor
+python3 ghostldr.py copy /path/to/CUSA11456/app0
 ```
 
-Copy your dump to an exFAT USB drive plugged into the computer (here mounted at `/Volumes/MYDRIVE`):
+Plug the drive into the PS5, start SWRR, click the right half of the touchpad at PRESS START, then OPTIONS → HALL OF FAME until Luac0re's loader listens on port 9026. Check the setup once, then boot:
 
 ```bash
-python3 ghostldr/host/gfs_pack.py --src /path/to/app0 --usb /Volumes/MYDRIVE
-```
-
-Plug the drive into the PS5, restart SWRR, start Luac0re again, and boot:
-
-```bash
-python3 ghostldr/host/run.py boot --app-root usb:/ghostldr --no-build
-```
-
-No drive? Install the game into SWRR's saved data instead, once per title (about 40 minutes for Ghost), from the SWRR region you will play in:
-
-```bash
-python3 ghostldr/host/gfs_pack.py --src /path/to/app0
+python3 ghostldr.py doctor
 ```
 
 ```bash
-python3 ghostldr/host/gfs_install.py
+python3 ghostldr.py boot
 ```
 
-Then restart SWRR, start Luac0re again, and boot with `python3 ghostldr/host/run.py boot --no-build`.
+With several games on the drive, the game selector shows them on the TV; `boot CUSA11456` (or `boot ghost`) starts one straight away. `python3 ghostldr.py check` shows what the PS5 will find on a drive, and `python3 ghostldr.py --help` lists every command.
+
+No drive? Install the game into SWRR's saved data instead, once per title (about 40 minutes for Ghost), from the SWRR region you will play in, with the loader listening:
+
+```bash
+python3 ghostldr.py install /path/to/CUSA11456/app0
+```
+
+Then restart SWRR, start Luac0re again, and `python3 ghostldr.py boot`: with no game on a drive, it boots the installed ones.
 
 The computer's firewall must let Python receive on UDP 18194 and TCP 18195–18196.
+
+### Boot with no computer
+
+No Python, no tools, and nothing on the computer serving files during the boot: the release page also has `ghostldr.lua`, `ghostldr-ext.bin` and `ghostldr-elfldr.bin`. With Luac0re's loader listening, send two files with `nc` (or a payload-sender app), where `CONSOLE` is the PS5's address:
+
+```bash
+nc CONSOLE 9026 < ghostldr.lua
+nc CONSOLE 9021 < ghostldr-ext.bin
+```
+
+The first opens TCP 9021 on the PS5 and waits five minutes for the second; a jailbroken console's own ELF loader already has 9021, so there it opens 9022. The TV says which, with the PS5's address, in the dialog where Luac0re shows its own text, and then what happened. The second boots a game as `ghostldr.py boot` does: one on a USB drive in the PS5, else an installed one, with the game selector when there are several. Its log comes back on the same connection. Send `ghostldr-elfldr.bin` instead to start the [ELF loader](docs/elfldr.md). The three files must come from the same release. [docs/using-the-release.md](docs/using-the-release.md#boot-with-no-computer) has the details.
 
 ## Documentation
 
 - [Using the release](docs/using-the-release.md): download to gameplay, step by step.
-- [USB drives](docs/usb.md): games on a USB drive, the recommended way.
+- [USB drives](docs/usb.md): games on a USB drive, the recommended way: what goes on the drive, copying, checking.
 - [Ghost on a stock PS5](docs/ghost-on-stock-ps5.md): the same from source, with more troubleshooting.
 - [Compatibility](docs/compatibility.md): other games, homebrew, profiles, reading the log.
 - [Game selector](docs/selector.md): the picker for several games, on a drive or installed.
 - [FTP server](docs/ftp.md): the console's files over FTP while a title runs.
+- [ELF loader](docs/elfldr.md): run ELF payloads in SWRR without a game, and build them.
 - [Web manager](docs/manager.md): save backup and restore from a browser.
-- [Host tooling](docs/host-tooling.md): `run.py doctor`, the boot preflight, the stub report.
+- [Host tooling](docs/host-tooling.md): `ghostldr.py`'s commands, `run.py doctor`, the boot preflight, the stub report.
 - [ghostfs](docs/ghostfs-catalogue.md): container names and the title catalogue.
 - [PS4](docs/ps4.md): status and the diagnostic to run.
 - [Jak X](docs/jakx.md): ghostldr in Jak X with UltraC0re, and what differs from SWRR.

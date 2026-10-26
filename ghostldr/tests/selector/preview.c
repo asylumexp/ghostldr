@@ -4,7 +4,12 @@
  * against a fake catalogue, and writes PNG screenshots.
  *
  *   preview --font notosans.glf --out DIR [--meta TITLE=FILE]... [--art TITLE=DIR]...
- *           [--titles N] [--scene NAME] [--user NAME]
+ *           [--titles N] [--scene NAME] [--user NAME] [--ps4] [--start N]
+ *   preview --is-dump ID SFO_TITLE_ID CONTENT_ID   (prints "dump" or "homebrew")
+ *
+ * --ps4 runs the UI as on a PS4: game dumps marked, a question before one
+ * boots.  The fake catalogue has games (CUSA IDs), one with a very long
+ * name, and two homebrew titles.
  *
  * Art: --meta TITLE=FILE reads a meta.bin (host/gfs_meta.py) as the console
  * reads <prefix>META, QOI and all; --art TITLE=DIR takes icon0.png / pic1.png
@@ -288,16 +293,21 @@ struct fake {
     const char *id, *name, *version, *prefix;
     double gib;
     int complete, art;
+    const char *content_id; /* param.sfo's CONTENT_ID */
 };
 static const struct fake FAKES[] = {
-    {"CUSA11456", "Ghost of Tsushima", "02.18", "GHOST", 53.3, 1, 0},
-    {"CUSA00001", "Starfall Odyssey", "01.05", "G00001", 41.2, 1, 2},
-    {"CUSA00002", "Neon Drift: Night Circuit", "01.12", "G00002", 18.7, 1, 3},
-    {"CUSA00003", "Harbor Lights", "01.00", "G00003", 9.4, 1, 4},
-    {"CUSA00004", "Cascade Valley", "02.01", "G00004", 27.9, 1, 1},
-    {"CUSA00005", "Ironclad Tactics II", "01.03", "G00005", 6.1, 1, 0},
-    {"CUSA00006", "\xE6\x98\x9F\xE3\x81\xAE\xE5\xAE\x88\xE3\x82\x8A\xE4\xBA\xBA", "01.00", "G00006", 12.0, 1, -5},
-    {"CUSA00007", "Emberfall Chronicles", "", "G00007", 0, 0, 5},
+    {"CUSA11456", "Ghost of Tsushima", "02.18", "GHOST", 53.3, 1, 0, ""},
+    {"CUSA00001", "Starfall Odyssey", "01.05", "G00001", 41.2, 1, 2, "UP0001-CUSA00001_00-STARFALLODYSSEY0"},
+    {"CUSA00002", "Neon Drift: Night Circuit", "01.12", "G00002", 18.7, 1, 3, ""},
+    {"CUSA00003", "Harbor Lights", "01.00", "G00003", 9.4, 1, 4, ""},
+    {"CUSA00004", "Cascade Valley", "02.01", "G00004", 27.9, 1, 1, ""},
+    {"CUSA00005", "Ironclad Tactics II", "01.03", "G00005", 6.1, 1, 0, ""},
+    {"CUSA00006", "\xE6\x98\x9F\xE3\x81\xAE\xE5\xAE\x88\xE3\x82\x8A\xE4\xBA\xBA", "01.00", "G00006", 12.0, 1, -5, ""},
+    {"CUSA00007", "Emberfall Chronicles", "", "G00007", 0, 0, 5, ""},
+    {"CUSA00008", "The Remarkably Long and Winding Chronicles of the Very Small Robot Who Wanted to See the Sea: "
+                  "Definitive Collector's Edition", "01.02", "G00008", 33.0, 1, 2, ""},
+    {"HBPR00002", "hbprobe (system malloc)", "01.00", "G00002H", 0.004, 1, 0, "IV0000-HBPR00002_00-HBPROBE000000000"},
+    {"LAPY20001", "PS4-Xplorer", "01.34", "G20001", 0.09, 1, 3, ""},
 };
 
 static u8 *read_file(const char *path, u64 *n)
@@ -405,7 +415,8 @@ static void run(struct sel *S, const struct event *ev, int nev, const char *outd
 int main(int argc, char **argv)
 {
     const char *font = NULL, *out = ".", *scene_name = "tour", *prefix = "", *write_art = NULL, *user = NULL;
-    int ntitles = (int)(sizeof(FAKES) / sizeof(FAKES[0])), clock_h = 21, clock_m = 47, h24 = 1;
+    int ntitles = (int)(sizeof(FAKES) / sizeof(FAKES[0])), clock_h = 21, clock_m = 47, h24 = 1, usb = 0, ps4 = 0;
+    int start = 0;
     static struct plat P;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--font") && i + 1 < argc)
@@ -420,6 +431,16 @@ int main(int argc, char **argv)
             ntitles = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--12h"))
             h24 = 0;
+        else if (!strcmp(argv[i], "--usb")) /* the games on a USB drive: folders, a second copy, one that can't start */
+            usb = 1;
+        else if (!strcmp(argv[i], "--ps4")) /* as on a PS4: game dumps marked, a question before one boots */
+            ps4 = 1;
+        else if (!strcmp(argv[i], "--start") && i + 1 < argc)
+            start = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--is-dump") && i + 3 < argc) { /* the selector's rule (sfo.c) */
+            printf("%s\n", title_is_dump(argv[i + 1], argv[i + 2], argv[i + 3]) ? "dump" : "homebrew");
+            return 0;
+        }
         else if (!strcmp(argv[i], "--write-art") && i + 1 < argc)
             write_art = argv[++i];
         else if (!strcmp(argv[i], "--decode-meta") && i + 2 < argc) { /* FILE DIR: its pictures through meta.c */
@@ -451,8 +472,9 @@ int main(int argc, char **argv)
             if (eq)
                 *eq = 0, P.art[P.nart].id = a, P.art[P.nart].meta = meta, P.art[P.nart++].dir = eq + 1;
         } else {
-            fprintf(stderr, "usage: preview --font F.glf --out DIR [--scene tour|info|single|launch] [--titles N] "
-                            "[--art TITLE=DIR] [--meta TITLE=meta.bin] [--user NAME] [--12h] [--prefix P]\n");
+            fprintf(stderr, "usage: preview --font F.glf --out DIR [--scene tour|info|single|launch|usb|ps4|long] [--usb] "
+                            "[--ps4] [--titles N] [--start N] [--art TITLE=DIR] [--meta TITLE=meta.bin] [--user NAME] "
+                            "[--12h] [--prefix P]\n       preview --is-dump ID SFO_TITLE_ID CONTENT_ID\n");
             return 2;
         }
     }
@@ -477,10 +499,28 @@ int main(int argc, char **argv)
         str_copy(titles[i].version, f->version, 16);
         str_copy(titles[i].prefix, f->prefix, 16);
         titles[i].size = (u64)(f->gib * (1u << 30));
-        titles[i].flags = f->complete ? TITLE_COMPLETE : 0;
+        titles[i].flags = (f->complete ? TITLE_COMPLETE : 0) | (title_is_dump(f->id, "", f->content_id) ? TITLE_DUMP : 0);
         P.procedural[i] = f->art;
+        if (usb) { /* as main.c fills them from the extension's list */
+            titles[i].size = 0;
+            titles[i].prefix[0] = 0;
+            snprintf(titles[i].where, sizeof(titles[i].where), i ? "My Games/%s" : "Ghost of Tsushima (CUSA11456)",
+                     f->name);
+            if (i == 1) {
+                str_copy(titles[i].id, FAKES[0].id, 16);
+                str_copy(titles[i].name, FAKES[0].name, 128);
+                str_copy(titles[i].where, "ghostldr/CUSA11456", sizeof(titles[i].where));
+                str_copy(titles[i].note, "a second copy: --title boots the one in Ghost of Tsushima (CUSA11456)",
+                         sizeof(titles[i].note));
+                titles[i].flags |= TITLE_COPY;
+            }
+            if (!f->complete)
+                str_copy(titles[i].note, "no sce_sys/param.sfo: name the folder after the game's ID (CUSA12345)",
+                         sizeof(titles[i].note));
+        }
     }
-    if (font_init(&S, glf, 2u << 20) || ui_init(&S, titles, ntitles, 0)) {
+    ui_set_platform(&S, ps4 ? SEL_PS4 : SEL_PS5);
+    if (font_init(&S, glf, 2u << 20) || ui_init(&S, titles, ntitles, start)) {
         fprintf(stderr, "init failed\n");
         return 1;
     }
@@ -513,6 +553,39 @@ int main(int argc, char **argv)
             {800, PAD_RIGHT, 0, NULL}, {880, 0, 0, NULL},
             {2000, PAD_OPTIONS, 0, NULL}, {2080, 0, 0, NULL}, {2600, 0, 0, "info"},
             {2700, PAD_CIRCLE, 0, NULL}, {2780, 0, 0, NULL}, {3300, 0, 0, "info-closed"},
+        };
+        run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
+    } else if (!strcmp(scene_name, "usb")) { /* with --usb: a second copy's panel, a folder that can't start */
+        static const struct event ev[] = {
+            {800, PAD_RIGHT, 0, NULL}, {880, 0, 0, NULL},
+            {2000, PAD_OPTIONS, 0, NULL}, {2080, 0, 0, NULL}, {2600, 0, 0, "usb-copy"},
+            {2700, PAD_CIRCLE, 0, NULL}, {2780, 0, 0, NULL},
+            {3000, PAD_R1, 0, NULL}, {3080, 0, 0, NULL}, {3200, PAD_RIGHT, 0, NULL}, {3280, 0, 0, NULL},
+            {4400, 0, 0, "usb-bad"},
+            {4500, PAD_CROSS, 0, NULL}, {4580, 0, 0, NULL}, {4900, 0, 0, "usb-why"},
+            {5000, PAD_OPTIONS, 0, NULL}, {5080, 0, 0, NULL}, {5600, 0, 0, "usb-bad-info"},
+        };
+        run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
+    } else if (!strcmp(scene_name, "ps4")) { /* with --ps4: marked dumps; No, Circle, then Yes boots; homebrew unmarked */
+        static const struct event ev[] = {
+            {1000, 0, 0, "ps4-home"},
+            {1100, PAD_CROSS, 0, NULL}, {1180, 0, 0, NULL}, {1600, 0, 0, "ps4-ask"},
+            {1700, PAD_CROSS, 0, NULL}, {1780, 0, 0, NULL}, {2200, 0, 0, "ps4-no"},
+            {2300, PAD_CROSS, 0, NULL}, {2380, 0, 0, NULL}, {2700, PAD_CIRCLE, 0, NULL}, {2780, 0, 0, NULL},
+            {3000, PAD_R1, 0, NULL}, {3080, 0, 0, NULL}, {3200, PAD_R1, 0, NULL}, {3280, 0, 0, NULL},
+            {3400, PAD_LEFT, 0, NULL}, {3480, 0, 0, NULL}, {4600, 0, 0, "ps4-homebrew"},
+            {4700, PAD_OPTIONS, 0, NULL}, {4780, 0, 0, NULL}, {5300, 0, 0, "ps4-homebrew-info"},
+            {5400, PAD_CIRCLE, 0, NULL}, {5480, 0, 0, NULL},
+            {5600, PAD_L1, 0, NULL}, {5680, 0, 0, NULL}, {5800, PAD_L1, 0, NULL}, {5880, 0, 0, NULL},
+            {7000, PAD_OPTIONS, 0, NULL}, {7080, 0, 0, NULL}, {7600, 0, 0, "ps4-info"},
+            {7700, PAD_CROSS, 0, NULL}, {7780, 0, 0, NULL}, {8300, 0, 0, "ps4-ask-panel"},
+            {8400, PAD_LEFT, 0, NULL}, {8480, 0, 0, NULL}, {8800, 0, 0, "ps4-ask-yes"},
+            {8900, PAD_CROSS, 0, NULL}, {8980, 0, 0, NULL}, {10000, 0, 0, NULL},
+        };
+        run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
+    } else if (!strcmp(scene_name, "long")) { /* a very long name (start at it): the row, then its information */
+        static const struct event ev[] = {
+            {1000, 0, 0, "long"}, {1100, PAD_OPTIONS, 0, NULL}, {1180, 0, 0, NULL}, {1700, 0, 0, "long-info"},
         };
         run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
     } else if (!strcmp(scene_name, "launch")) {

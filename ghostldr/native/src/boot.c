@@ -26,6 +26,26 @@ static void *ghost_main_thread(void *unused)
     return NULL;
 }
 
+/* No title: the extension's ELF loader serves payloads until it is told to
+ * quit (docs/elfldr.md).  It needs the NID table and the extension's code,
+ * placed as for a title; then the call returns to Luac0re's loader with the
+ * extension's JIT block given back. */
+int ghost_elfldr(void)
+{
+    crash_install();
+    if (is_ps4()) {
+        logf("elfldr: a PS5 only (its executable memory comes from views of the emulator's JIT objects)");
+        return -9;
+    }
+    if (ext_fetch() != 0)
+        return -7;
+    int rc = arena_init() != 0 || ext_start() != 0 ? -8 : ext_elfldr();
+    g_payload_fault = NULL;
+    ext_abandon();
+    logf("elfldr: back to the Lua loader (%d)", rc);
+    return rc;
+}
+
 int ghost_boot(void)
 {
     const char *root = (const char *)g_ctx->app_root;
@@ -36,13 +56,31 @@ int ghost_boot(void)
     if (ext_fetch() != 0)
         return -7;
     int choose = 0; /* game selector: 1 when ghostfs or a library left the choice to it */
-    bool library = false;
+    bool library = false, decided = false; /* decided: "auto" found the title on a USB drive */
+    if (strcmp(root, "auto") == 0) {
+        /* the games on a USB drive, else the installed ones (run.py's
+         * default); drives are untested on a PS4 and in Jak X */
+        if (is_ps4() || is_jakx() || (choose = ext_approot_init(&root)) == 2) {
+            if (choose == 2)
+                ext_unplace();
+            logf("boot: %s: the installed titles", is_ps4() || is_jakx() ? "no USB drives here" : "no game on a USB drive");
+            root = "ghostfs";
+            g_ctx->app_root = (u64)root; /* what the game selector reads */
+            choose = 0;
+        } else if (choose < 0) {
+            ext_abandon();
+            return -6;
+        } else {
+            library = choose > 0;
+            decided = true;
+        }
+    }
     if (strcmp(root, "ghostfs") == 0) {
         /* the title's files live in the host's save containers (no kernel exploit) */
         if ((choose = gfs_init()) < 0)
             return -6;
         root = "/app0";
-    } else {
+    } else if (!decided) {
         /* a title's directory, as before; a USB drive or a folder of titles:
          * the extension decides (ext/src/approot.c) */
         char eboot[288];
@@ -83,7 +121,7 @@ int ghost_boot(void)
      * loaded and its memory planned, and frees all it used first ---- */
     char title[16];
     int picked = sel_run(choose || (g_ctx->flags & CTX_FLAG_SELECT), title);
-    if (choose && library && ext_approot_pick(picked >= 0 ? title : NULL, &root) != 0) {
+    if (choose && library && ext_approot_pick(picked >= 0 ? title : NULL, picked, &root) != 0) {
         ext_abandon();
         return -6;
     }

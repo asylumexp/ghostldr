@@ -608,17 +608,55 @@ def console_files(root: Path) -> None:
     put(root, f"{lib}/CUSA11111/app0/eboot.bin", b"e" * 11)
     put(root, f"{lib}/CUSA22222/app0/eboot.bin", b"e" * 22)
     put(root, f"{lib}/CUSA22222/prefix", b"GHOST\n")
-    put(root, f"{lib}/CUSA33333/notes.txt")                         # no app0: not a title
-    put(root, f"{lib}/lowercase/app0/eboot.bin")                     # not a title ID
+    put(root, f"{lib}/CUSA33333/notes.txt")                         # no app0: not a game
+    put(root, f"{lib}/lowercase/app0/eboot.bin")                     # nothing names it
     put(root, f"{lib}/HOMEBREW_1/app0/eboot.bin", b"e" * 7)
     put(root, f"{lib}/HOMEBREW_1/prefix", b"GFSBAD\n")              # a reserved prefix: the default instead
     put(root, "mnt/usb0/games/mygame/eboot.bin", b"e" * 5)
     put(root, "mnt/usb0/games/mygame/sce_sys/param.sfo", make_sfo({"TITLE": "My Game", "TITLE_ID": "CUSA44444"}))
     put(root, "mnt/usb0/games/nosfo/eboot.bin")
     put(root, "mnt/usb0/one/ghostldr/CUSA88888/app0/eboot.bin", b"e" * 8)
+    put(root, "mnt/usb0/user's file.txt", b"keep")
     put(root, "data/lib/CUSA55555/app0/eboot.bin")
     put(root, "data/lib/CUSA66666/app0/eboot.bin")
     put(root, "data/empty/readme.txt")
+
+
+def anywhere_files(root: Path) -> None:
+    """A drive (FSROOT/mnt/usb1) with games in folders of any name, as a person would copy them."""
+    d = "mnt/usb1"
+    meta = gm.Meta("CUSA00900", "Bloodborne")
+    meta.name_source = gm.NAME_GIVEN
+    files = {
+        # param.sfo names it; no app0 level; spaces and parentheses in the names
+        "My Games/ghost of tsushima/eboot.bin": b"g" * 26,
+        "My Games/ghost of tsushima/sce_sys/param.sfo": make_sfo({"TITLE": "Ghost", "TITLE_ID": "CUSA11456"}),
+        "My Games/ghost of tsushima/sce_module/libc.prx": b"m",
+        # a game inside a game's folder is not looked for
+        "My Games/ghost of tsushima/extras/CUSA99999/eboot.bin": b"x",
+        # meta.bin names it (no param.sfo), with an app0 level
+        "Bloodborne copy/app0/eboot.bin": b"b" * 9,
+        "Bloodborne copy/meta.bin": gm.build(meta),
+        "Bloodborne copy/prefix": b"BB\n",
+        # the folder's name has the ID (no param.sfo, no meta.bin)
+        "Homebrew/PS4 Xplorer (LAPY20001)/eboot.bin": b"h" * 3,
+        # the old layout: the whole name is the ID
+        "ghostldr/CUSA11456/app0/eboot.bin": b"G" * 26,
+        "ghostldr/CUSA11456/app0/sce_sys/param.sfo": make_sfo({"TITLE": "Ghost", "TITLE_ID": "CUSA11456"}),
+        # can't be booted
+        "Broken/nothing names it/eboot.bin": b"n",
+        "Broken/half a copy/app0/sce_sys/param.sfo": make_sfo({"TITLE": "Half", "TITLE_ID": "CUSA77777"}),
+        "Broken/no eboot/sce_sys/param.sfo": make_sfo({"TITLE": "Bits", "TITLE_ID": "CUSA66666"}),
+        # too deep: 5 folders down
+        "a/b/c/d/e/eboot.bin": b"d",
+        "a/b/c/d/e/sce_sys/param.sfo": make_sfo({"TITLE": "Deep", "TITLE_ID": "CUSA12121"}),
+        # hidden folders are skipped
+        ".Trashes/501/old/eboot.bin": b"t",
+        ".Trashes/501/old/sce_sys/param.sfo": make_sfo({"TITLE": "Old", "TITLE_ID": "CUSA31313"}),
+        "notes/readme.txt": b"r",
+    }
+    for rel, data in files.items():
+        put(root, f"{d}/{rel}", data)
 
 
 class AppRootTests(unittest.TestCase):
@@ -635,6 +673,7 @@ class AppRootTests(unittest.TestCase):
                           [HERE / "ext_native", NATIVE / "ext/include", NATIVE / "include"], cls.DEFINES)
         cls.fs = cls.tmp / "fs"
         console_files(cls.fs)
+        anywhere_files(cls.fs)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -644,34 +683,124 @@ class AppRootTests(unittest.TestCase):
         out = subprocess.run([str(self.exe), str(fs or self.fs), root, *opts], capture_output=True, text=True,
                              timeout=60)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        r = {"log": out.stdout}
+        r = {"log": out.stdout, "lib": []}
         for line in out.stdout.splitlines():
             kind, _, rest = line.partition(" ")
-            if kind in ("init", "pick"):
-                f = dict(x.split("=", 1) for x in rest.split()[1:])
-                r[kind] = (int(rest.split()[0]), f["root"], f["app_root"], f["library"] == "1")
+            if kind in ("init", "pick"):        # paths may hold spaces
+                m = re.fullmatch(r"(-?\d+) root=(.*) app_root=(.*) library=([01])", rest)
+                r[kind] = (int(m[1]), m[2], m[3], m[4] == "1")
+            elif kind == "lib":
+                _, tid, flags, path, folder, note = rest.split("\t")
+                r["lib"].append((tid, int(flags), path, folder, note))
             elif kind in ("profile", "saves", "eboot", "registered", "mount", "prepared", "home", "mount-after",
-                          "session"):
+                          "session", "after-pick", "session-flag"):
                 r[kind] = rest
         return r
 
     MAP = ("--map", "/mnt/usb0")
+    ANY = ("--map", "/mnt/usb1")
     LIB = "/ghostldr_usb/ghostldr"
+    BAD = 1
+    DUP = 2
 
     def test_a_library_on_a_mounted_drive_goes_to_the_selector(self) -> None:
         r = self.run_root("usb:/ghostldr", *self.MAP, "--pick", "CUSA22222")
         self.assertIn("RequestMap2 0x", r["log"])                        # found through the unwind table
         self.assertIn("sceUsbStorageInit -> 0", r["log"])
         self.assertIn("USB drive 1001 mounted at /ghostldr_usb: 0; /ghostldr_usb/ghostldr found", r["log"])
-        self.assertIn(f"approot: 3 titles in {self.LIB}", r["log"])     # CUSA11111, CUSA22222, HOMEBREW_1
+        self.assertIn("approot: 3 games in ghostldr", r["log"])         # CUSA11111, CUSA22222, HOMEBREW_1
         self.assertEqual(r["init"], (1, "usb:/ghostldr", self.LIB, True))
+        self.assertEqual([(t, f) for t, f, *_ in r["lib"]],
+                         [("CUSA11111", 0), ("CUSA22222", 0), ("HOMEBREW_1", 0), ("", self.BAD)])
+        self.assertIn("no sce_sys/param.sfo", r["lib"][3][4])           # lowercase/: nothing names it
         root = f"{self.LIB}/CUSA22222/app0"
         self.assertEqual(r["pick"], (0, root, root, False))
+        self.assertEqual(r["after-pick"], "0")                           # the list is gone once chosen
         self.assertEqual(r["profile"], "CUSA22222")
         self.assertEqual(r["saves"], "CUSA22222 GHOSTSAVE")              # its prefix file
         self.assertEqual(r["eboot"], "found 22")
         self.assertEqual(r["mount"], "/ghostldr_usb")                    # kept for the title
         self.assertNotIn("registered", r)
+
+    def test_games_anywhere_on_the_drive(self) -> None:
+        r = self.run_root("usb:/", *self.ANY, "--pick", "-")
+        self.assertEqual(r["init"][:2], (1, "usb:/"))
+        lib = [(t, f, folder.removeprefix("/ghostldr_usb/"), note) for t, f, _, folder, note in r["lib"]]
+        ok = [x for x in lib if not x[1] & self.BAD]
+        self.assertEqual([(t, f, folder) for t, f, folder, _ in ok], [
+            ("CUSA00900", 0, "Bloodborne copy"),                         # meta.bin
+            ("CUSA11456", 0, "My Games/ghost of tsushima"),              # param.sfo
+            ("CUSA11456", self.DUP, "ghostldr/CUSA11456"),               # a second copy: after the first by folder
+            ("LAPY20001", 0, "Homebrew/PS4 Xplorer (LAPY20001)")])       # the folder's name
+        self.assertIn("--title boots the one in My Games/ghost of tsushima", ok[2][3])
+        bad = {folder: note for _, f, folder, note in lib if f & self.BAD}
+        self.assertEqual(set(bad), {"Broken/nothing names it", "Broken/half a copy", "Broken/no eboot"})
+        self.assertIn("name the folder after the game's ID", bad["Broken/nothing names it"])
+        self.assertIn("app0 folder has no eboot.bin", bad["Broken/half a copy"])
+        self.assertIn("no eboot.bin", bad["Broken/no eboot"])
+        self.assertNotIn("CUSA99999", r["log"])                          # inside a game's folder
+        self.assertNotIn("CUSA12121", r["log"])                          # too deep
+        self.assertNotIn("CUSA31313", r["log"])                          # .Trashes
+        self.assertIn("approot: 4 games on the USB drive", r["log"])
+        self.assertEqual(r["pick"][0], -1)                               # the selector chose nothing
+        self.assertIn("no game chosen", r["log"])
+        self.assertEqual(r["mount"], "none")
+
+    def test_a_game_by_title_or_by_the_selector_s_copy(self) -> None:
+        r = self.run_root("usb:/", *self.ANY, "--title", "CUSA11456")    # the first copy
+        root = "/ghostldr_usb/My Games/ghost of tsushima"
+        self.assertEqual(r["init"], (0, root, root, False))
+        self.assertEqual((r["profile"], r["saves"], r["eboot"]), ("CUSA11456", "CUSA11456 G11456SAVE", "found 26"))
+        r = self.run_root("usb:/", *self.ANY, "--pick-at", "2")         # the selector's second copy
+        root = "/ghostldr_usb/ghostldr/CUSA11456/app0"
+        self.assertEqual(r["pick"], (0, root, root, False))
+        r = self.run_root("usb:/", *self.ANY, "--pick", "CUSA00900")
+        self.assertEqual(r["pick"][1], "/ghostldr_usb/Bloodborne copy/app0")
+        self.assertEqual(r["saves"], "CUSA00900 BBSAVE")
+        r = self.run_root("usb:/", *self.ANY, "--title", "lapy20001")    # IDs compare as on a PC
+        self.assertEqual(r["init"][1], "/ghostldr_usb/Homebrew/PS4 Xplorer (LAPY20001)")
+
+    def test_a_profile_s_prefix(self) -> None:
+        bundle = self.tmp / "profiles.bin"
+        bundle.write_bytes(profiles.boot_bundle("CUSA11456"))
+        r = self.run_root("usb:/", *self.ANY, "--title", "CUSA11456", "--profiles", str(bundle))
+        self.assertEqual(r["saves"], "CUSA11456 GHOSTSAVE")              # no prefix file: Ghost's profile's
+        r = self.run_root("usb:/ghostldr", *self.MAP, "--title", "CUSA22222", "--profiles", str(bundle))
+        self.assertEqual(r["saves"], "CUSA22222 GHOSTSAVE")              # the prefix file comes first
+
+    def test_auto(self) -> None:
+        r = self.run_root("auto", *self.ANY, "--title", "CUSA00900")     # a game on a drive
+        self.assertEqual(r["init"][:2], (0, "/ghostldr_usb/Bloodborne copy/app0"))
+        r = self.run_root("auto", *self.ANY)                             # several: the selector
+        self.assertEqual(r["init"][0], 1)
+        r = self.run_root("auto", *self.ANY, "--title", "CUSA55555")     # not on the drive: the installed ones
+        self.assertEqual((r["init"][0], r["mount"]), (2, "none"))
+        self.assertIn("CUSA55555 is not among the games", r["log"])
+        self.assertIn("booting an installed title instead", r["log"])
+        r = self.run_root("auto", "--map", "/data/empty")                # a drive without games
+        self.assertEqual((r["init"][0], r["mount"]), (2, "none"))
+        self.assertIn("holds no games", r["log"])
+        self.assertEqual(r["session-flag"], "1")   # the session stays known when the code is placed again
+        r = self.run_root("auto")                                        # no USB storage at all
+        self.assertEqual(r["init"][0], 2)
+        r = self.run_root("auto", *self.ANY, "--map-fail")               # the mount refused
+        self.assertEqual(r["init"][0], 2)
+
+    def test_the_drive_with_games_out_of_two(self) -> None:
+        r = self.run_root("usb:/", "--other", "/data/empty", *self.ANY, "--title", "LAPY20001")
+        self.assertIn("fake: unmounted 1000", r["log"])                  # the first drive has no game
+        self.assertEqual(r["init"][:2], (0, "/ghostldr_usb/Homebrew/PS4 Xplorer (LAPY20001)"))
+
+    def test_a_large_drive_is_looked_at_only_so_far(self) -> None:
+        fs = self.tmp / "big"
+        for i in range(300):
+            put(fs, f"mnt/usb2/folder{i:03d}/readme.txt")
+        put(fs, "mnt/usb2/zz/game/eboot.bin")
+        put(fs, "mnt/usb2/zz/game/sce_sys/param.sfo", make_sfo({"TITLE_ID": "CUSA10101"}))
+        r = self.run_root("usb:/", "--map", "/mnt/usb2", fs=fs)
+        self.assertIn("stopped looking after", r["log"])
+        r = self.run_root("usb:/zz", "--map", "/mnt/usb2", fs=fs)        # a folder narrows it
+        self.assertEqual(r["init"][:2], (0, "/ghostldr_usb/zz/game"))
 
     def test_init_once(self) -> None:
         r = self.run_root("usb:/ghostldr", *self.MAP, "--title", "CUSA11111", "--inited")
@@ -706,7 +835,7 @@ class AppRootTests(unittest.TestCase):
         self.assertEqual((r["prepared"], r["home"], r["session"]), ("/ghostldr_usb", "/ghostldr_usb", "1"))
         # no FTP server: the title's own Init and Term reach the library
         r = self.run_root("/data/lib", *self.MAP, "--title", "CUSA55555")
-        self.assertEqual(r["session"], "0")
+        self.assertEqual((r["session"], r["session-flag"]), ("0", "0"))
         self.assertNotIn("sceUsbStorageInit", r["log"])
         # no drive as the title starts, one plugged in before a client logs in
         r = self.run_root("/data/lib", *self.MAP, "--title", "CUSA55555", "--ftp", "--late")
@@ -724,11 +853,11 @@ class AppRootTests(unittest.TestCase):
     def test_a_title_not_on_the_drive(self) -> None:
         r = self.run_root("usb:/ghostldr", *self.MAP, "--title", "CUSA99999")
         self.assertEqual(r["init"][0], -1)
-        self.assertIn("has no CUSA99999/app0/eboot.bin", r["log"])
+        self.assertIn("CUSA99999 is not among the games in ghostldr", r["log"])
         self.assertEqual(r["mount"], "none")                             # the boot stops: the drive goes back
         r = self.run_root("usb:/ghostldr", *self.MAP, "--pick", "-")      # the selector chose nothing
         self.assertEqual(r["pick"][0], -1)
-        self.assertIn("no title chosen", r["log"])
+        self.assertIn("no game chosen", r["log"])
         self.assertEqual(r["mount"], "none")
 
     def test_one_title_needs_no_selector_unless_asked(self) -> None:
@@ -751,6 +880,8 @@ class AppRootTests(unittest.TestCase):
         self.assertIn("pass run.py --title", r["log"])
         r = self.run_root("usb:/games/nosfo", *self.MAP, "--title", "NOSFO")
         self.assertEqual((r["init"][0], r["saves"]), (0, "NOSFO GNOSFOSAVE"))
+        r = self.run_root("usb:/Bloodborne copy", *self.ANY)            # a game's folder: its app0
+        self.assertEqual((r["init"][:2], r["saves"]), ((0, "/ghostldr_usb/Bloodborne copy/app0"), "CUSA00900 BBSAVE"))
 
     def test_a_missing_or_empty_library(self) -> None:
         r = self.run_root("usb:/nothing", *self.MAP)                     # no such folder on any drive
@@ -758,10 +889,12 @@ class AppRootTests(unittest.TestCase):
         self.assertIn("/ghostldr_usb/nothing missing", r["log"])
         self.assertIn("no USB drive has /nothing", r["log"])
         self.assertEqual(r["mount"], "none")
-        r = self.run_root("usb:/games", *self.MAP)                       # folders, but no <TITLE>/app0 in them
+        r = self.run_root("usb:/ghostldr/CUSA33333", *self.MAP)          # folders, but no game in them
         self.assertEqual(r["init"][0], -1)
-        self.assertIn("holds neither eboot.bin nor title folders", r["log"])
+        self.assertIn("holds no games", r["log"])
         self.assertEqual(r["mount"], "none")
+        r = self.run_root("usb:/games", *self.MAP)                       # one game, one that nothing names
+        self.assertEqual(r["init"][:2], (0, "/ghostldr_usb/games/mygame"))
 
     def test_no_way_to_the_drive(self) -> None:
         r = self.run_root("usb:/ghostldr", *self.MAP, "--map-fail")
@@ -783,7 +916,7 @@ class AppRootTests(unittest.TestCase):
         self.assertNotIn("sceUsbStorage", r["log"])
         r = self.run_root("/data/empty")
         self.assertEqual(r["init"][:2], (0, "/data/empty"))               # nothing here: the boot says so later
-        self.assertIn("holds neither eboot.bin nor title folders", r["log"])
+        self.assertIn("holds no games", r["log"])
 
 
 class RawRouteTests(AppRootTests):
@@ -816,7 +949,8 @@ class RawRouteTests(AppRootTests):
 
 
 class SelectorLibraryTests(unittest.TestCase):
-    """The game selector's catalogue reading a library (selector/src/cat.c)."""
+    """The game selector's catalogue reading the games the extension found
+    (selector/src/cat.c; ghost_api.library)."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -837,24 +971,36 @@ class SelectorLibraryTests(unittest.TestCase):
         m = gm.Meta("CUSA11111", "A Named Homebrew")
         m.name_source = gm.NAME_GIVEN
         put(fs, f"{lib}/CUSA11111/meta.bin", gm.build(m))
-        put(fs, f"{lib}/junk/app0/eboot.bin")
-        put(fs, f"{lib}/CUSA33333/app0/readme.txt")
+        put(fs, "usb0/My Games/a game/eboot.bin")                    # no app0 level: its own folder
+        put(fs, "usb0/My Games/a game/sce_sys/param.sfo", make_sfo({"TITLE": "Loose", "TITLE_ID": "CUSA33333"}))
+        put(fs, "usb0/broken/eboot.bin")
 
     @classmethod
     def tearDownClass(cls) -> None:
         cls.tmp_dir.cleanup()
 
+    @staticmethod
+    def game(tid: str, app0: str, folder: str, flags: int = 0, note: str = "") -> str:
+        return f"{tid}|{app0}|{len(folder)}|{flags}|{note}"
+
     def test_titles_names_and_art(self) -> None:
-        out = subprocess.run([str(self.exe), str(self.fs), "/usb0/ghostldr", "library"], capture_output=True,
+        games = [self.game("CUSA11111", "/usb0/ghostldr/CUSA11111/app0", "/usb0/ghostldr/CUSA11111"),
+                 self.game("CUSA22222", "/usb0/ghostldr/CUSA22222/app0", "/usb0/ghostldr/CUSA22222"),
+                 self.game("CUSA33333", "/usb0/My Games/a game", "/usb0/My Games/a game", 2, "a second copy"),
+                 self.game("", "/usb0/broken", "/usb0/broken", 1, "no sce_sys/param.sfo")]
+        out = subprocess.run([str(self.exe), str(self.fs), "/usb0", "library", *games], capture_output=True,
                              text=True, timeout=60).stdout
-        self.assertIn("count 2 library 1 root /usb0/ghostldr", out)
+        self.assertIn("count 4 library 1 root /usb0", out)
         rows = [ln.split("\t")[1:] for ln in out.splitlines() if ln.startswith("title\t")]
-        self.assertEqual([r[0] for r in rows], ["CUSA11111", "CUSA22222"])        # sorted by ID
+        self.assertEqual([r[0] for r in rows], ["CUSA11111", "CUSA22222", "CUSA33333", ""])   # the extension's order
         self.assertEqual(rows[1][1:7], ["Second Title", "01.05", "1", "1234", "4321",
                                         str(len(make_sfo({"TITLE": "Second Title", "TITLE_ID": "CUSA22222",
                                                           "APP_VER": "01.05"})))])
-        self.assertEqual(rows[0][-1], "A Named Homebrew")                         # its meta.bin
-        self.assertEqual(rows[1][-1], "-")
+        self.assertEqual(rows[0][8], "A Named Homebrew")                          # its meta.bin, beside app0
+        self.assertEqual(rows[1][8], "-")
+        self.assertEqual(rows[2][1], "Loose")                                     # param.sfo in its own folder
+        self.assertEqual(rows[2][9:], ["ok", "a second copy"])                    # a second copy can start
+        self.assertEqual(rows[3][9:], ["bad", "no sce_sys/param.sfo"])           # this one can't
         self.assertNotIn("FAILED", out)
 
     def test_one_title_at_the_root_as_before(self) -> None:
@@ -929,7 +1075,8 @@ class UsbDriveToolTests(unittest.TestCase):
                               str(self.drive)], capture_output=True, text=True, timeout=120)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertIn("progress goes to G54321SAVE", out.stdout)
-        self.assertIn("--app-root usb:/ghostldr --title CUSA54321", out.stdout)
+        self.assertIn("checked: 5 file sizes and 3 file(s) byte for byte", out.stdout)
+        self.assertIn("python3 ghostldr.py boot CUSA54321", out.stdout)
         self.assertTrue((self.drive / "ghostldr/CUSA54321/app0/eboot.bin").is_file())
         self.assertFalse((ROOT / "build/ghostfs/CUSA54321").exists(), "nothing packed into containers")
 

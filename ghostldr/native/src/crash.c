@@ -78,6 +78,20 @@ __attribute__((minsize, cold)) static void log_mission_world_wait(u64 b)
 
 static volatile int g_crashed;
 
+/* The ELF loader (ext/src/elfldr_sys.c): a payload thread that faults is
+ * reported, then ends here instead of parking, and SWRR runs on. */
+void (*g_payload_fault)(struct module *owner, int sig, u64 rip, u64 addr);
+
+__attribute__((force_align_arg_pointer, noreturn)) static void payload_thread_abort(void)
+{
+    tls_thread_exit();
+    void (*ex)(void *) = host_real("scePthreadExit");
+    if (ex)
+        ex(NULL);
+    for (;;)
+        K.usleep(1000000);
+}
+
 static void on_signal(int sig, void *info, void *ucv)
 {
     u8 *uc = ucv;
@@ -88,7 +102,8 @@ static void on_signal(int sig, void *info, void *ucv)
     u64 fault = *(u64 *)((u8 *)info + 0x18);
     u64 off;
     const char *mod = describe(rip, &off);
-    if (__atomic_exchange_n(&g_crashed, 1, __ATOMIC_SEQ_CST)) {
+    struct module *payload = g_payload_fault ? tls_owner() : NULL;
+    if (!payload && __atomic_exchange_n(&g_crashed, 1, __ATOMIC_SEQ_CST)) {
         logf("CRASH (nested) sig %d rip %lx (%s+%lx)", sig, rip, mod, off);
         for (;;)
             K.usleep(1000000);
@@ -124,6 +139,13 @@ static void on_signal(int sig, void *info, void *ucv)
         mod = describe(v, &off);
         if (mod[0] != '?')
             logf("  [rsp+%03x] %lx = %s+%lx", i * 8, v, mod, off);
+    }
+    if (payload) { /* the thread goes on in payload_thread_abort, as if called from where it was */
+        g_payload_fault(payload, sig, rip, fault);
+        mc[23] = ALIGN_DOWN(rsp - 0x100, 16) - 8;
+        mc[20] = (u64)payload_thread_abort;
+        logf("CRASH report end; the payload's thread ends");
+        return;
     }
     logf("CRASH report end; parking thread");
     for (;;)

@@ -66,7 +66,7 @@ MAGIC = b"GLPF"
 VERSION = 1
 HEADER = struct.Struct("<4sHHII16s20sI5iIiII4x")  # struct prof_hdr, 96 bytes
 REC = struct.Struct("<HHI")                        # struct prof_rec
-REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME, REC_EXEC, REC_NEO = 1, 2, 3, 4, 5, 6, 7
+REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME, REC_EXEC, REC_NEO, REC_PREFIX = 1, 2, 3, 4, 5, 6, 7, 8
 NAME_MAX = 127                 # bytes of UTF-8 in REC_NAME (the selector's name field is 128)
 TLS_PER_REC = 15000            # offsets per REC_TLS record (its size is a u16)
 MAX_BLOB = 0x10000
@@ -85,8 +85,15 @@ def param_sfo(src: Path | None) -> dict:
     """Every key of sce_sys/param.sfo; {} when it is missing or unreadable
     (homebrew often ships a minimal or odd one)."""
     try:
-        d = (Path(src) / "sce_sys/param.sfo").read_bytes()
-        if d[:4] != b"\0PSF":
+        return parse_sfo((Path(src) / "sce_sys/param.sfo").read_bytes())
+    except (OSError, TypeError):
+        return {}
+
+
+def parse_sfo(d: bytes | None) -> dict:
+    """param.sfo's keys from its bytes; {} when they aren't one."""
+    try:
+        if not d or d[:4] != b"\0PSF":
             return {}
         kt, dt, n = struct.unpack_from("<III", d, 8)
         out = {}
@@ -570,6 +577,9 @@ def compile_blob(prof: dict, src: Path | None = None, flags: int = 0, extra_feat
             recs += _rec(REC_TLS, struct.pack("<32sI", mod.encode(), len(chunk)) + struct.pack(f"<{len(chunk)}I", *chunk))
     if prof.get("name"):           # the game selector shows it when the title has no param.sfo
         recs += _rec(REC_NAME, _cstr(utf8_cut(prof["name"], NAME_MAX)))
+    prefix = prof.get("pack", {}).get("prefix")
+    if prefix and re.fullmatch(r"[A-Z0-9]{1,12}", prefix):   # a USB drive's copy without a prefix file
+        recs += _rec(REC_PREFIX, _cstr(prefix))
     for mod, ranges in sorted(exec_ranges(prof).items()):
         flat = [v for r in ranges for v in r]
         recs += _rec(REC_EXEC, struct.pack("<32sI", mod.encode(), len(ranges)) + struct.pack(f"<{len(flat)}I", *flat))
@@ -641,6 +651,17 @@ def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = (),
     data = b"".join(blobs) + b"\0" * 8
     if len(data) > MAX_BUNDLE:
         raise ProfileError(f"{len(titles)} profiles take {len(data)} bytes (at most {MAX_BUNDLE}): pass --title")
+    return data
+
+
+def release_bundle() -> bytes:
+    """GHOSTLDR_PROFILE_HEX of the release's ghostldr.lua (tools/mkbundle.py):
+    every profile in ghostldr/data/titles and the generic default, from the
+    repository alone: nothing of this computer's packs, dumps or drives."""
+    titles = known_titles()
+    data = b"".join(compile_blob(load(t)) for t in titles) + compile_blob(load(None)) + b"\0" * 8
+    if len(data) > MAX_BUNDLE:
+        raise ProfileError(f"{len(titles)} profiles take {len(data)} bytes (at most {MAX_BUNDLE})")
     return data
 
 

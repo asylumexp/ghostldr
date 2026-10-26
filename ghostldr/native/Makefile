@@ -1,6 +1,7 @@
 # ghostldr core: freestanding x86-64 blob for the PS4 process inside SWRR,
 # its runtime extension (ext/) and the game selector (selector/), both served
-# by run.py at boot.
+# by run.py at boot, and the two-file boot's files (tools/mkbundle.py):
+# ghostldr.lua, ghostldr-ext.bin and ghostldr-elfldr.bin.
 # LLVM 18's bin directory (Homebrew's llvm@18 unless given: make LLVM=/path/to/llvm/bin)
 LLVM ?= /opt/homebrew/opt/llvm@18/bin
 export LLVM
@@ -39,13 +40,22 @@ endif
 # while reading this file, before make looks at any timestamp: make 3.81's
 # are whole seconds, so a stamp-file prerequisite misses back-to-back builds.
 ifneq ($(shell cat $(OUT)/ext.cflags 2>/dev/null),$(strip $(EXT_CFLAGS)))
-$(shell mkdir -p $(OUT) && rm -rf $(OUT)/ext $(OUT)/ext.elf && echo '$(strip $(EXT_CFLAGS))' > $(OUT)/ext.cflags)
+$(shell mkdir -p $(OUT) && rm -rf $(OUT)/ext $(OUT)/ext.elf $(OUT)/ext-elfldr $(OUT)/ext-elfldr.elf && echo '$(strip $(EXT_CFLAGS))' > $(OUT)/ext.cflags)
 endif
 EXT_OBJS := $(patsubst ext/src/%.c,$(OUT)/ext/%.o,$(EXT_SRCS)) $(OUT)/ext/rt.o
+# The ELF loader's own extension, ext-elfldr.bin (in ghostldr-elfldr.bin):
+# the families a payload binds to and none of a game's, no FTP server
+# (ext/elfldr_only.c stands in for ftp.c) and no NID table (docs/elfldr.md)
+ELFLDR_EXT_SRCS := ext_main selftest elfldr elfldr_sys payload ftp_sys hle_file hle_homebrew hle_tsd hle_kernel \
+	hle_module hle_libc_heap hle_libc_stdio
+ELFLDR_EXT_OBJS := $(patsubst %,$(OUT)/ext/%.o,$(ELFLDR_EXT_SRCS)) $(OUT)/ext/rt.o $(OUT)/ext-elfldr/elfldr_only.o
+LINKED_core := $(OBJS)
+LINKED_ext := $(EXT_OBJS)
+LINKED_ext-elfldr := $(ELFLDR_EXT_OBJS)
 NAMES := ../../build/nid/known_names.txt
 EXTRA_NAMES := $(wildcard ../data/extra_names.txt)
 
-all: $(OUT)/core.bin $(OUT)/ext.bin $(OUT)/selector.bin $(OUT)/pump.bin
+all: $(OUT)/core.bin $(OUT)/ext.bin $(OUT)/selector.bin $(OUT)/pump.bin $(OUT)/ext-elfldr.bin $(OUT)/ghostldr.lua
 
 $(OUT)/obj/%.o: src/%.c $(HEADERS)
 	@mkdir -p $(dir $@)
@@ -54,8 +64,7 @@ $(OUT)/obj/%.o: src/%.c $(HEADERS)
 # relink when a source file is added or removed, not only when one changes
 $(OUT)/%.objs: FORCE
 	@mkdir -p $(dir $@)
-	@echo '$(if $(filter core,$*),$(OBJS),$(EXT_OBJS))' | cmp -s - $@ || \
-		echo '$(if $(filter core,$*),$(OBJS),$(EXT_OBJS))' > $@
+	@echo '$(LINKED_$*)' | cmp -s - $@ || echo '$(LINKED_$*)' > $@
 
 $(OUT)/core.elf: $(OBJS) $(OUT)/core.objs core.ld
 	$(LD) $(LDFLAGS) -T core.ld -o $@ $(OBJS)
@@ -79,6 +88,24 @@ $(OUT)/ext.elf: $(EXT_OBJS) $(OUT)/ext.objs ext/ext.ld
 $(OUT)/ext.bin: $(OUT)/ext.elf ../tools/mkext.py ../tools/elf64.py ../tools/gen_nids.py ../tools/orbis_elf.py \
 		$(NAMES) $(EXTRA_NAMES)
 	python3 ../tools/mkext.py --abi $(ABI) $< $@
+
+$(OUT)/ext-elfldr/elfldr_only.o: ext/elfldr_only.c $(wildcard ext/include/*.h) ext/src/kmod.h $(HEADERS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(EXT_CFLAGS) -Iext/include -Iext/src -c $< -o $@
+
+$(OUT)/ext-elfldr.elf: $(ELFLDR_EXT_OBJS) $(OUT)/ext-elfldr.objs ext/ext.ld
+	$(LD) $(LDFLAGS) -T ext/ext.ld -o $@ $(ELFLDR_EXT_OBJS)
+
+$(OUT)/ext-elfldr.bin: $(OUT)/ext-elfldr.elf ../tools/mkext.py ../tools/elf64.py
+	python3 ../tools/mkext.py --abi $(ABI) --no-nids $< $@
+
+# The two-file boot (docs/using-the-release.md): the core, the title profiles
+# and the bundles' pins in ghostldr.lua; the full and the ELF loader's bundle
+BUNDLED := $(OUT)/core.bin $(OUT)/ext.bin $(OUT)/selector.bin $(OUT)/ext-elfldr.bin ../lua/ghostldr.lua \
+	../tools/mkbundle.py ../host/profiles.py $(wildcard ../data/titles/*.json)
+$(OUT)/ghostldr-ext.bin $(OUT)/ghostldr-elfldr.bin: $(OUT)/ghostldr.lua
+$(OUT)/ghostldr.lua: $(BUNDLED)
+	python3 ../tools/mkbundle.py --out $(OUT)
 
 $(NAMES):
 	@echo "missing $@: run tools/fetch_deps.sh" >&2; exit 1

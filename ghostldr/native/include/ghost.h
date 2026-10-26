@@ -51,8 +51,8 @@ struct boot_ctx {
     /* PS4: the compiler's libkernel syscall stubs, (number, address) u64
      * pairs ended by a zero number (ghostldr.lua; jit_call); 0 on a PS5 */
     u64 jit_sysw;
-    u64 log_fd;            /* UDP socket from the loader's create_socket() */
-    u64 log_addr;          /* sockaddr_in (16 bytes) of the log server */
+    u64 log_fd;            /* UDP socket from the loader's create_socket(), or the bundle's TCP connection */
+    u64 log_addr;          /* sockaddr_in (16 bytes) of the log server; 0: log_fd is a connection (log.c) */
     /* compiler-process RPC (jitrpc.c): the compiler's base, then the chain
      * parts of the loader that runs us */
     u64 jit_base;
@@ -117,8 +117,7 @@ const char *strrchr_c(const char *s, int c);
 int vfmt(char *buf, size_t size, const char *fmt, __builtin_va_list ap);
 int fmt(char *buf, size_t size, const char *fmt, ...);
 
-/* ---- logging (log.c) ---- */
-void log_init(struct boot_ctx *ctx);
+/* ---- logging (log.c): to ctx->log_fd, read on each line ---- */
 void logf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void log_hex(const char *tag, const void *p, size_t n);
 
@@ -324,6 +323,11 @@ struct module {
     u8 fingerprint[20];                   /* DT_SCE_FINGERPRINT */
     u64 tls_offset;            /* static TLS: image at thread pointer - tls_offset (tls.c); 0: dynamic */
     struct bx_state *bx;       /* code in whole emulator JIT objects (bigexec.c); NULL: in the arena */
+    /* a payload of the ELF loader (ext/src/elfldr_sys.c, docs/elfldr.md):
+     * its threads' TLS blocks hold its own image only, and it is finished
+     * once none of them runs (tls.c) */
+    bool payload;
+    volatile s32 live_threads;
 };
 
 /* struct module.start_state */
@@ -461,6 +465,7 @@ struct prof_rec {
 #define REC_NAME 5      /* the title's display name, UTF-8 + NUL (the game selector reads it; the core ignores it) */
 #define REC_EXEC 6      /* a module's code ranges (bigexec.c) */
 #define REC_NEO 7       /* the plan for a Pro-mode host (Jak X): the title's own Pro memory mode */
+#define REC_PREFIX 8    /* the title's save container prefix, A-Z 0-9 + NUL (a USB drive's title without a prefix file: approot.c) */
 struct prof_tls {       /* tools/tls_sites.py: one module's thread-pointer loads, checked before patching */
     struct prof_rec r;
     char module[32];    /* its file name, e.g. "eboot.bin" */
@@ -520,6 +525,7 @@ int module_relocate(struct module *m);
 int module_finish(struct module *m);
 struct module *module_open(const char *path, bool is_main); /* read and parse; not in g_modules yet */
 void module_publish(struct module *m);                       /* handle, TLS id, append to g_modules */
+void module_unpublish(struct module *m);                     /* out of g_modules again (its struct stays valid) */
 struct module *module_load_runtime(const char *path, int *err); /* a title prx after boot (SCE error in *err) */
 int module_write_text(struct module *m);
 void stubs_flush(void);
@@ -556,6 +562,14 @@ int ghost_thread_start(void *real, void *thr, const void *attr, void *(*fn)(void
 bool module_has_tpoff(const struct module *m);
 void tls_thread_exit(void);   /* a title thread ends: its TLS blocks go back */
 u64 tls_thunk(u64 fn);        /* fn behind a stub that gives the calling thread its TLS block */
+/* ELF loader payloads (docs/elfldr.md): every thread's static TLS block is
+ * size bytes, whoever's thread it is; a thread started for owner (and the
+ * threads it starts) gets owner's image and counts in its live_threads */
+void tls_static_reserve(u64 size, u64 align);
+struct module *tls_owner(void); /* the payload the calling thread belongs to, or NULL */
+int payload_thread_start(struct module *owner, void *thr, const void *attr, void *(*fn)(void *), void *arg,
+                         const char *name);
+extern void (*g_payload_fault)(struct module *owner, int sig, u64 rip, u64 addr); /* crash.c: a payload thread faulted */
 void rpc_lock(void);          /* one user of the compiler-process RPC at a time (loader.c) */
 void rpc_unlock(void);
 void tls_ensure_thread(void);
@@ -590,6 +604,17 @@ struct bx_range {
 };
 u32 bx_code(const struct module *m, const struct bx_range **runs); /* its code runs (TLS patching) */
 bool bx_in_view(const struct module *m, u64 addr);                 /* executable: in one of its views */
+/* One of the emulator's JIT objects (home, size): the compiler's base
+ * descriptor of it (fd), an RX alias of it here (rx; mapped whole with
+ * sceKernelMmap MAP_FIXED, it shows the object anywhere) and where the
+ * compiler writes it (wr: its home).  jit_objects_find fills those of the
+ * objects in want (bit i: o[i]); 0, or -1 when some are missing. */
+struct jit_obj {
+    u64 home, size;
+    u64 wr;
+    int fd, rx;
+};
+int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 
 /* ---- runtime extension (ext.c; interface in ghost_api.h) ---- */
 #define CTX_FLAG_EXT_JIT 64 /* place the extension in a new JIT block (run.py --ext-jit) */
@@ -600,7 +625,9 @@ bool bx_in_view(const struct module *m, u64 addr);                 /* executable
  * 16384 PS4 diagnostic (diag.c), 32768 the host is Jak X under UltraC0re,
  * 262144 the app root is a library, 65536 no automatic memory plan, 131072
  * the automatic plan even over a manual one, 524288 forget the learned
- * memory plan (automem.c); bits 48-63 hold the FTP server's port
+ * memory plan (automem.c), 1048576 the USB storage session is open
+ * (approot.c) or the ELF loader, 2097152 the extension came in a bundle;
+ * bits 32-47 hold the ELF loader's port, bits 48-63 the FTP server's
  * (CTX_FTP_PORT) */
 #define CTX_FLAG_NO_AUTO_MEM 65536      /* plan-free titles keep the plain budget (run.py --no-auto-memory) */
 #define CTX_FLAG_AUTO_MEM 131072        /* the automatic plan instead of a profile's manual one (run.py --auto-memory) */
@@ -613,7 +640,19 @@ bool bx_in_view(const struct module *m, u64 addr);                 /* executable
 #define CTX_FLAG_DIAG 16384            /* run the PS4 diagnostic instead of booting (run.py probe --diag) */
 #define CTX_FLAG_JAKX 32768            /* UltraC0re in Jak X, not Luac0re in SWRR (ghostldr.lua) */
 #define CTX_FLAG_LIBRARY 262144        /* set by the core: app_root is a folder of title folders (the selector reads it) */
+#define CTX_FLAG_USB_SESSION 1048576   /* set by the extension: it opened libSceUsbStorage's session (approot.c), kept when its code is placed again */
 #define CTX_FTP_PORT(flags) ((u32)((flags) >> 48)) /* the FTP server's TCP port (run.py --ftp-port; 0: none) */
+#define CTX_FLAG_ELFLDR 1048576 /* no title: serve the ELF loader (run.py elfldr, docs/elfldr.md) */
+#define CTX_ELFLDR_PORT(flags) ((u32)((flags) >> 32) & 0xFFFF) /* its TCP port (run.py elfldr --port) */
+/* The release's ghostldr.lua received a bundle (ghostldr-ext.bin or
+ * ghostldr-elfldr.bin, docs/architecture.md "Two-file boot"): ext_fd and
+ * sel_fd hold the addresses of the extension and the selector in flexible
+ * memory it mapped (each ALIGN_UP(size, 16 KiB); the core unmaps what it
+ * takes and sets the field to -1), and log_fd is the bundle's TCP
+ * connection with log_addr 0 (log.c). */
+#define CTX_FLAG_BUNDLE 2097152
+int ghost_elfldr(void);   /* boot.c */
+int ext_elfldr(void);     /* ext.c: the extension's ELF loader; returns when told to quit */
 static inline bool is_ps4(void) { return (g_ctx->flags & CTX_FLAG_PS4) != 0; }
 static inline bool is_jakx(void) { return (g_ctx->flags & CTX_FLAG_JAKX) != 0; }
 
@@ -649,10 +688,15 @@ int ext_start(void);     /* place, relocate and initialize its code */
 /* app roots other than ghostfs and a title's own directory: USB drives and
  * folders of titles, decided by the extension before the title's modules
  * load (ext/src/approot.c, docs/usb.md).  init: 0 when *root is the title's
- * app0, 1 when the game selector picks (then pick), < 0 on errors */
+ * app0, 1 when the game selector picks (then pick), 2 when the app root is
+ * "auto" and no drive has a game (then the installed titles: ghostfs), < 0
+ * on errors */
 int ext_approot_init(const char **root);
-int ext_approot_pick(const char *title, const char **root);
+int ext_approot_pick(const char *title, int index, const char **root);
+struct lib_title;
+int ext_library(const struct lib_title **list); /* the games approot_init found (ghost_api.library) */
 void ext_abandon(void);  /* a boot stopped before the title loaded: free the code's JIT block and the blob */
+void ext_unplace(void);  /* auto app root with nothing on a drive: free the code's JIT block, keep the blob */
 void ext_boot_done(void); /* imports resolved: free the blob */
 u64 ext_hle_lookup(const char *lib, const char *nid, const char *name);
 const struct ext_lib *ext_lib_policy(const char *lib);

@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import build_all  # noqa: E402
 import build_deb  # noqa: E402
 import build_windows  # noqa: E402
 import common as C  # noqa: E402
@@ -118,6 +119,25 @@ class WindowsTest(Temp):
         self.assertIn('RMDir /r "$INSTDIR\\app"', text)
         self.assertIn('Delete "$INSTDIR\\LICENSE"', text)
         self.assertNotIn("build", text)
+
+
+class TwoFileBootTest(Temp):
+    def test_copied_beside_the_installers_and_summed(self) -> None:
+        src = C.REPO / "build/ghostldr"
+        if not all((src / n).is_file() for n in build_all.TWO_FILE):
+            self.skipTest("make -C ghostldr/native first")
+        copied = build_all.two_file_boot(self.tmp)
+        self.assertEqual([p.name for p in copied], ["ghostldr.lua", "ghostldr-ext.bin", "ghostldr-elfldr.bin"])
+        for p in copied:
+            self.assertEqual(p.read_bytes(), (src / p.name).read_bytes())
+        sums = C.write_sums(self.tmp, [p.name for p in copied]).read_text()
+        for p in copied:
+            self.assertIn(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n", sums)
+
+    def test_missing_files_stop_the_release(self) -> None:
+        with mock.patch.object(C, "REPO", self.tmp), self.assertRaises(SystemExit) as e:
+            build_all.two_file_boot(self.tmp / "out")
+        self.assertIn("ghostldr.lua", str(e.exception))
 
 
 class CommonTest(Temp):

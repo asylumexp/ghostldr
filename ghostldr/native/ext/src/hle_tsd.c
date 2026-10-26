@@ -152,6 +152,8 @@ static void thread_exit_hook(void)
 
 static s64 hle_set_thread_dtors(void (*fn)(void))
 {
+    if (tls_owner && tls_owner()) /* an ELF loader payload's: its code goes away before SWRR does */
+        return 0;
     g_title_dtors = fn;
     if (G->thread_dtors) /* a host without the core's slot (test harnesses) has nowhere to publish it */
         g_thread_dtors = thread_exit_hook;

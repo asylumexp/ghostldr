@@ -11,11 +11,15 @@
  * usbfs stack (--drive).  test_usb.py drives it:
  *
  *     approot_host FSROOT APP_ROOT [--title T] [--select] [--map PATH] [--other PATH2]
- *                  [--map-fail] [--no-fde] [--inited] [--drive IMAGE] [--pick T] [--ftp [--late|--unplug]]
+ *                  [--map-fail] [--no-fde] [--inited] [--drive IMAGE] [--pick T|-] [--pick-at N]
+ *                  [--profiles FILE] [--ftp [--late|--unplug]]
  *
- * Prints what approot_init (and approot_pick) decided, the profile picked,
- * where saves go, whether the title's eboot.bin is reachable and the
- * mount's state at the end.  --ftp then does what the FTP server does
+ * Prints what approot_init (and approot_pick) decided, the games it found
+ * (library(), one "lib" line each), the profile picked, where saves go,
+ * whether the title's eboot.bin is reachable and the mount's state at the
+ * end.  --pick T picks the first copy of T as the selector would, --pick-at
+ * N the N-th game; --profiles is a profile bundle (host/profiles.py) for the
+ * boot context's profile slot.  --ftp then does what the FTP server does
  * (ftp_sys.c): usb_ftp_prepare as the title starts, usb_ftp_home as a
  * client logs in; --late plugs the drive in between the two, --unplug
  * pulls it out.  It prints whether the title's own Init and Term are kept
@@ -89,7 +93,9 @@ void us_placeholder_close(s32 fd) {}
 /* ---- the fake core ---- */
 const struct ghost_api *G;
 static struct ghost_api g_api;
-static struct boot_ctx g_ctx_v, *g_ctx_p = &g_ctx_v;
+static u64 g_ctx_mem[64]; /* the boot context ghostldr.lua allocates: profiles in its last u64 */
+static struct boot_ctx *g_ctx_p = (struct boot_ctx *)g_ctx_mem;
+#define g_ctx_v (*g_ctx_p)
 static struct kfuncs g_k;
 static const char *g_want, *g_map, *g_drive;
 static int g_map_fail;
@@ -310,8 +316,8 @@ int main(int argc, char **argv)
         return 2;
     }
     hfs_set_root(argv[1]);
-    const char *root = argv[2], *pick = NULL;
-    int ftp = 0, late = 0, unplug = 0;
+    const char *root = argv[2], *pick = NULL, *profiles = NULL;
+    int ftp = 0, late = 0, unplug = 0, pick_at = -1;
     u64 flags = 0;
     for (int i = 3; i < argc; i++) {
         const char *o = argv[i];
@@ -340,12 +346,16 @@ int main(int argc, char **argv)
             g_drive = v, i++;
         else if (!strcmp(o, "--pick") && v)
             pick = v, i++;
+        else if (!strcmp(o, "--pick-at") && v)
+            pick_at = (int)(v[0] - '0'), pick = "", i++;
+        else if (!strcmp(o, "--profiles") && v)
+            profiles = v, i++;
         else {
             say("unknown option %s", o);
             return 2;
         }
     }
-    g_ctx_v.size = sizeof(g_ctx_v);
+    g_ctx_v.size = sizeof(struct boot_ctx);
     g_ctx_v.app_root = (u64)root;
     g_ctx_v.flags = flags;
     g_api.version = GHOST_API_VERSION;
@@ -373,6 +383,18 @@ int main(int argc, char **argv)
     g_api.spin_lock = f_spin;
     g_api.spin_unlock = f_spin;
     G = &g_api;
+    if (profiles) { /* a bundle file, read whole (a path on this machine, not under FSROOT) */
+        static u8 bundle[1 << 16];
+        hfs_set_root("");
+        int h = hfs_open(profiles);
+        long got = h >= 0 ? hfs_read(h, bundle, sizeof(bundle)) : -1;
+        if (h >= 0)
+            hfs_close(h);
+        hfs_set_root(argv[1]);
+        if (got <= 0)
+            return 4;
+        g_ctx_mem[63] = (u64)bundle;
+    }
     const struct ext_early *e = &g_approot_early;
     if (e->magic != EXT_EARLY_MAGIC || e->size != sizeof(*e))
         return 3;
@@ -380,10 +402,21 @@ int main(int argc, char **argv)
     int rc = e->approot_init(&r);
     say("init %d root=%s app_root=%s library=%d", rc, r, (const char *)g_ctx_v.app_root,
         (g_ctx_v.flags & CTX_FLAG_LIBRARY) != 0);
+    const struct lib_title *list = NULL;
+    int n = e->library(&list);
+    for (int i = 0; i < n; i++)
+        say("lib %d\t%s\t%u\t%s\t%.*s\t%s", i, list[i].id, list[i].flags, list[i].path, (int)list[i].dir_len,
+            list[i].path, list[i].note);
     if (rc == 1 && pick) {
-        rc = e->approot_pick(pick[0] == '-' ? NULL : pick, &r);
+        int at = pick_at;
+        for (int i = 0; i < n && at < 0 && pick[0] != '-'; i++)
+            if (!strcmp(list[i].id, pick))
+                at = i;
+        const char *t = at >= 0 && at < n ? list[at].id : pick[0] == '-' ? NULL : pick;
+        rc = e->approot_pick(t, at, &r);
         say("pick %d root=%s app_root=%s library=%d", rc, r, (const char *)g_ctx_v.app_root,
             (g_ctx_v.flags & CTX_FLAG_LIBRARY) != 0);
+        say("after-pick %d", e->library(&list));
     }
     say("profile %s", g_selected);
     if (rc == 0) {
@@ -405,5 +438,6 @@ int main(int argc, char **argv)
         say("mount-after %s", g_mounted_id ? g_mount_at : "none");
     }
     say("session %d", usb_session_open());
+    say("session-flag %d", (g_ctx_v.flags & CTX_FLAG_USB_SESSION) != 0); /* what outlives ext_unplace */
     return 0;
 }
