@@ -431,6 +431,13 @@ The capabilities and attributes come from the executable's signed authentication
 
 A PS5 doesn't apply this cap to PS4 software, which is why SWRR gets the whole 4.5 GiB there.
 
+**Jak X is capped the same way.** Jak X (CUSA07992 with the 1.04 update, the other PS2 Classic ghostldr can run in, through UltraC0re) was measured on the same 12.50 Pro the same way:
+- its credentials are SWRR's, the same capability and attribute bits;
+- the games' pool limit is 2560 MiB, with 2154 MiB in use at its intro;
+- its budget allows 5888 MiB.
+
+So a different PS2 Classic host doesn't help on a PS4. On a PS5, Jak X runs in Pro mode with 5120 MiB ([jakx.md](jakx.md)), but on a PS4 Pro the 2.5 GiB pool limit applies to it too.
+
 ## What is verified
 
 - From the log and SWRR's executable:
