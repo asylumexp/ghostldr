@@ -15,6 +15,7 @@ int fmt(char *buf, size_t size, const char *fmt, ...);
 #define CAT_INCOMPLETE 1u
 #define CAT_LEGACY 2u
 #define CAT_BAD 4u /* a library's game that can't be booted (note: why) */
+#define CAT_DUP 8u /* a library's second copy of a game (note: which one --title boots) */
 enum { FILE_ICON, FILE_PIC, FILE_SFO, FILE_PIC0, NFILES };
 #define NAME_SFO 1      /* where a title's display name came from (docs/selector.md, "Names") */
 #define NAME_PROFILE 2
@@ -28,6 +29,8 @@ struct cat_title {
     char prof_name[128]; /* the title's profile (run.py's bundle, REC_NAME) */
     char meta_name[128]; /* <prefix>META's, written at install time (--name, the store's ...) */
     char cat_name[128];  /* GFSCATALOG's, written at install time */
+    char sfo_id[16];     /* param.sfo's TITLE_ID and CONTENT_ID, once read: game dump or homebrew */
+    char content_id[48];
     u8 name_src;         /* NAME_* of name; 0: none (the ID is shown) */
     u64 total, cap;
     u32 containers, flags;
@@ -61,6 +64,7 @@ struct plat {
     int library;          /* root is a folder of games: lib lists them (docs/usb.md) */
     const struct lib_title *lib;
     int catalogue;        /* GFSCATALOG present; else the legacy index */
+    int ps4;              /* ctx flag CTX_FLAG_PS4: game dumps are marked (ui_set_platform) */
     char legacy[16];      /* GFSINDEX or GHOSTIDX */
     char root[256];
     u32 mounts, umounts;

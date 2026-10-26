@@ -45,17 +45,6 @@ static int clip(const surface *s, int *x, int *y, int *w, int *h)
     return *w > 0 && *h > 0;
 }
 
-void draw_fill(surface *s, int x, int y, int w, int h, u32 argb)
-{
-    if (!clip(s, &x, &y, &w, &h))
-        return;
-    for (int j = 0; j < h; j++) {
-        u32 *p = row(s, y + j) + x;
-        for (int i = 0; i < w; i++)
-            p[i] = argb;
-    }
-}
-
 void draw_rect_blend(surface *s, int x, int y, int w, int h, u32 argb)
 {
     u32 t = A(argb);
@@ -142,9 +131,9 @@ static inline u32 sample(const surface *s, s32 fx, s32 fy)
     return lerp32(lerp32(a, b, tx), lerp32(c, d, tx), ty);
 }
 
-/* src scaled to dw x dh at (dx, dy), blended with its alpha times alpha/256;
- * columns left of clip_x0 are not drawn */
-void draw_scale(surface *dst, int dx, int dy, int dw, int dh, const surface *src, int alpha, int clip_x0)
+/* src scaled to dw x dh at (dx, dy), blended with its alpha times alpha/256
+ * and its colour times bright/256; columns left of clip_x0 are not drawn */
+void draw_scale(surface *dst, int dx, int dy, int dw, int dh, const surface *src, int alpha, int bright, int clip_x0)
 {
     if (dw <= 0 || dh <= 0 || !src->px)
         return;
@@ -159,14 +148,14 @@ void draw_scale(surface *dst, int dx, int dy, int dw, int dh, const surface *src
         y1 = surf_y1(dst);
     if (x0 >= x1 || y0 >= y1)
         return;
-    u32 ga = (u32)clampi(alpha, 0, 256);
+    u32 ga = (u32)clampi(alpha, 0, 256), br = (u32)clampi(bright, 0, 256);
     int exact = dw == src->w && dh == src->h;
     s32 sx = (s32)(((s64)src->w << 16) / dw), sy = (s32)(((s64)src->h << 16) / dh);
     for (int y = y0; y < y1; y++) {
         u32 *d = row(dst, y);
         s32 fy = (y - dy) * sy + sy / 2 - 0x8000;
         const u32 *srow = src->px + (u64)(y - dy) * (u64)src->stride;
-        if (exact && ga == 256) { /* opaque art at its own size: a copy (fast path for the focused tile) */
+        if (exact && ga == 256 && br == 256) { /* opaque art at its own size: a copy (the focused tile) */
             int opaque = 1;
             for (int x = x0; x < x1 && opaque; x++)
                 opaque = A(srow[x - dx]) == 255;
@@ -177,6 +166,8 @@ void draw_scale(surface *dst, int dx, int dy, int dw, int dh, const surface *src
         }
         for (int x = x0; x < x1; x++) {
             u32 c = exact ? srow[x - dx] : sample(src, (x - dx) * sx + sx / 2 - 0x8000, fy);
+            if (br < 256)
+                c = (c & 0xFF000000u) | (scale32(c, br) & 0xFFFFFFu);
             u32 t = A(c);
             t += t >> 7;
             t = t * ga >> 8;
@@ -239,58 +230,171 @@ void draw_cover(surface *dst, const surface *src)
     }
 }
 
-/* A soft ring around the rectangle, towards rgb (glow) or black (shadow):
- * strength alpha/256 at the edge, fading out over radius. */
-static void ring(surface *s, int x, int y, int w, int h, int radius, int alpha, u32 rgb, int light)
+/* Signed distance from (px, py) to a rounded rectangle centred at (cx, cy),
+ * half extents hw x hh, corner radius r: negative inside. */
+static inline float rr_dist(float px, float py, float cx, float cy, float hw, float hh, float r)
 {
-    if (radius <= 0 || alpha <= 0)
+    float qx = (px < cx ? cx - px : px - cx) - (hw - r), qy = (py < cy ? cy - py : py - cy) - (hh - r);
+    if (qx > 0 && qy > 0)
+        return __builtin_sqrtf(qx * qx + qy * qy) - r;
+    return (qx > qy ? qx : qy) - r;
+}
+
+/* coverage 0..256 of a pixel whose centre is d outside an edge */
+static inline u32 cover(float d) { return d <= -0.5f ? 256 : d >= 0.5f ? 0 : (u32)((0.5f - d) * 256.0f); }
+
+/* A soft ring around the rounded rectangle (corner radius cr), towards rgb
+ * (glow) or black (shadow): strength alpha/256 at the edge, fading out over
+ * radius.  Beside the straight edges the distance is one subtraction; only
+ * the corners need a square root. */
+static void ring(surface *s, int x, int y, int w, int h, int cr, int radius, int alpha, u32 rgb, int light)
+{
+    if (radius <= 0 || alpha <= 0 || w <= 0 || h <= 0)
         return;
-    int lut[96];
+    int lut[97];
     if (radius > 95)
         radius = 95;
+    cr = clampi(cr, 0, (w < h ? w : h) / 2);
     for (int d = 0; d <= radius; d++) {
         int f = 256 - d * 256 / radius;
         lut[d] = alpha * f / 256 * f / 256;
     }
-    for (int yy = y - radius; yy < y + h + radius; yy++) {
-        if (yy < surf_y0(s) || yy >= surf_y1(s))
-            continue;
-        int dy = yy < y ? y - yy : yy >= y + h ? yy - (y + h - 1) : 0;
+    lut[radius] = 0;
+    float cx = (float)x + (float)w * 0.5f, cy = (float)y + (float)h * 0.5f, hw = (float)w * 0.5f, hh = (float)h * 0.5f;
+    int y0 = clampi(y - radius, surf_y0(s), surf_y1(s)), y1 = clampi(y + h + radius, surf_y0(s), surf_y1(s));
+    int x0 = clampi(x - radius, 0, s->w), x1 = clampi(x + w + radius, 0, s->w);
+    int sx0 = clampi(x + cr, x0, x1), sx1 = clampi(x + w - cr, x0, x1); /* the straight part of the top and bottom */
+    for (int yy = y0; yy < y1; yy++) {
         u32 *p = row(s, yy);
-        for (int xx = x - radius; xx < x + w + radius; xx++) {
-            if (xx < 0 || xx >= s->w)
-                continue;
-            int dx = xx < x ? x - xx : xx >= x + w ? xx - (x + w - 1) : 0;
-            if (!dx && !dy) {
-                xx = x + w - 1; /* skip the inside */
-                continue;
+        int dy = yy < y ? y - 1 - yy : yy >= y + h ? yy - (y + h) : -1; /* whole pixels outside, -1 inside */
+        int full = yy >= y + cr && yy < y + h - cr;                       /* the shape spans [x, x + w) */
+        for (int xx = x0; xx < x1; xx++) {
+            int d;
+            if (full) {
+                if (xx >= x && xx < x + w) {
+                    xx = x + w - 1; /* skip the inside */
+                    continue;
+                }
+                d = xx < x ? x - 1 - xx : xx - (x + w);
+            } else if (dy >= 0 && xx >= sx0 && xx < sx1) {
+                d = dy;
+            } else {
+                float f = rr_dist((float)xx + 0.5f, (float)yy + 0.5f, cx, cy, hw, hh, (float)cr);
+                if (f <= 0)
+                    continue;
+                d = (int)f;
             }
-            int d2 = dx * dx + dy * dy;
-            if (d2 >= radius * radius)
+            if (d >= radius)
                 continue;
-            int d = (int)__builtin_sqrtf((float)d2);
-            int a = lut[d < radius ? d : radius];
+            int a = lut[d];
             p[xx] = light ? over(p[xx], rgb, (u32)a) : scale32(p[xx], (u32)(256 - a));
         }
     }
 }
 
-void draw_shadow(surface *s, int x, int y, int w, int h, int radius, int alpha)
+void draw_shadow(surface *s, int x, int y, int w, int h, int cr, int radius, int alpha)
 {
-    ring(s, x, y, w, h, radius, alpha, 0, 0);
+    ring(s, x, y, w, h, cr, radius, alpha, 0, 0);
 }
 
-void draw_halo(surface *s, int x, int y, int w, int h, int radius, int alpha, u32 rgb)
+void draw_halo(surface *s, int x, int y, int w, int h, int cr, int radius, int alpha, u32 rgb)
 {
-    ring(s, x, y, w, h, radius, alpha, rgb, 1);
+    ring(s, x, y, w, h, cr, radius, alpha, rgb, 1);
 }
 
-void draw_frame(surface *s, int x, int y, int w, int h, int t, u32 argb)
+/* A filled rounded rectangle, anti-aliased, blended by argb's alpha. */
+void draw_rrect(surface *s, int x, int y, int w, int h, int r, u32 argb)
 {
-    draw_rect_blend(s, x - t, y - t, w + 2 * t, t, argb);
-    draw_rect_blend(s, x - t, y + h, w + 2 * t, t, argb);
-    draw_rect_blend(s, x - t, y, t, h, argb);
-    draw_rect_blend(s, x + w, y, t, h, argb);
+    u32 a = A(argb);
+    a += a >> 7;
+    if (w <= 0 || h <= 0 || !a)
+        return;
+    r = clampi(r, 0, (w < h ? w : h) / 2);
+    float cx = (float)x + (float)w * 0.5f, cy = (float)y + (float)h * 0.5f, hw = (float)w * 0.5f, hh = (float)h * 0.5f;
+    int y0 = clampi(y, surf_y0(s), surf_y1(s)), y1 = clampi(y + h, surf_y0(s), surf_y1(s));
+    int x0 = clampi(x, 0, s->w), x1 = clampi(x + w, 0, s->w);
+    for (int yy = y0; yy < y1; yy++) {
+        u32 *p = row(s, yy);
+        int e = yy < y + r || yy >= y + h - r ? r : 0; /* columns at each end with their own coverage */
+        for (int xx = x0; xx < x1; xx++) {
+            u32 t = a;
+            if (xx < x + e || xx >= x + w - e)
+                t = cover(rr_dist((float)xx + 0.5f, (float)yy + 0.5f, cx, cy, hw, hh, (float)r)) * a >> 8;
+            if (t)
+                p[xx] = over(p[xx], argb, t);
+        }
+    }
+}
+
+/* The outline of a rounded rectangle, t pixels wide inside its edge.  Only
+ * the corners need their coverage worked out per pixel. */
+void draw_rring(surface *s, int x, int y, int w, int h, int r, int t, u32 argb)
+{
+    u32 a = A(argb);
+    a += a >> 7;
+    if (w <= 0 || h <= 0 || t <= 0 || !a)
+        return;
+    r = clampi(r, 0, (w < h ? w : h) / 2);
+    int ri = r > t ? r - t : 0, inner = w > 2 * t && h > 2 * t, e = (r > t ? r : t) + 1;
+    float cx = (float)x + (float)w * 0.5f, cy = (float)y + (float)h * 0.5f, hw = (float)w * 0.5f, hh = (float)h * 0.5f;
+    int y0 = clampi(y, surf_y0(s), surf_y1(s)), y1 = clampi(y + h, surf_y0(s), surf_y1(s));
+    int x0 = clampi(x, 0, s->w), x1 = clampi(x + w, 0, s->w);
+    for (int yy = y0; yy < y1; yy++) {
+        u32 *p = row(s, yy);
+        if (yy >= y + e && yy < y + h - e) { /* beside the straight sides: t pixels at each end */
+            for (int xx = x0; xx < x1; xx++) {
+                if (xx == x + t && x + w - t > xx)
+                    xx = x + w - t;
+                p[xx] = over(p[xx], argb, a);
+            }
+            continue;
+        }
+        int band = yy < y + t || yy >= y + h - t; /* between the corners, all of the top or bottom, or nothing */
+        for (int xx = x0; xx < x1; xx++) {
+            u32 c = a;
+            if (xx < x + e || xx >= x + w - e) {
+                float px = (float)xx + 0.5f, py = (float)yy + 0.5f;
+                u32 co = cover(rr_dist(px, py, cx, cy, hw, hh, (float)r));
+                u32 ci = inner ? cover(rr_dist(px, py, cx, cy, hw - (float)t, hh - (float)t, (float)ri)) : 0;
+                c = (co > ci ? co - ci : 0) * a >> 8;
+            } else if (!band) {
+                xx = x + w - e - 1;
+                continue;
+            }
+            if (c)
+                p[xx] = over(p[xx], argb, c);
+        }
+    }
+}
+
+/* Corners cut round (alpha) in a picture of its own, such as a tile. */
+void draw_round_corners(surface *s, int r)
+{
+    r = clampi(r, 0, (s->w < s->h ? s->w : s->h) / 2);
+    float cx = (float)s->w * 0.5f, cy = (float)s->h * 0.5f;
+    for (int y = 0; y < s->h; y++) {
+        if (y == r && s->h - r > r)
+            y = s->h - r; /* only the rows with corners */
+        u32 *p = row(s, y);
+        for (int x = 0; x < s->w; x++) {
+            if (x == r && s->w - r > r)
+                x = s->w - r;
+            u32 c = cover(rr_dist((float)x + 0.5f, (float)y + 0.5f, cx, cy, cx, cy, (float)r));
+            p[x] = (A(p[x]) * c >> 8) << 24 | (p[x] & 0xFFFFFFu);
+        }
+    }
+}
+
+/* Every pixel's colour towards argb's by its alpha; each keeps its own alpha. */
+void draw_wash(surface *s, u32 argb)
+{
+    u32 t = A(argb);
+    t += t >> 7;
+    for (int y = 0; y < s->h; y++) {
+        u32 *p = row(s, y);
+        for (int x = 0; x < s->w; x++)
+            p[x] = (p[x] & 0xFF000000u) | (lerp32(p[x], argb, t) & 0xFFFFFFu);
+    }
 }
 
 /* ---- anti-aliased shapes for the button symbols (small, per-pixel distance) ---- */
@@ -338,44 +442,43 @@ void draw_line(surface *s, float x0, float y0, float x1, float y1, float w, u32 
             plot(s, x, y, argb, w * 0.5f + 0.5f - seg_dist((float)x + 0.5f, (float)y + 0.5f, x0, y0, x1, y1));
 }
 
-void draw_round_rect(surface *s, float x, float y, float w, float h, float r, float stroke, u32 argb)
+/* A warning sign: a triangle with round corners in fill, an exclamation
+ * mark in ink; size wide, centred on (cx, cy). */
+void draw_warning(surface *s, float cx, float cy, float size, u32 fill, u32 ink)
 {
-    float cx = x + w * 0.5f, cy = y + h * 0.5f, hx = w * 0.5f - r, hy = h * 0.5f - r;
-    int py0 = (int)(y - 1), py1 = (int)(y + h + 1);
-    if (py0 < surf_y0(s))
-        py0 = surf_y0(s);
-    if (py1 >= surf_y1(s))
-        py1 = surf_y1(s) - 1;
-    for (int py = py0; py <= py1; py++)
-        for (int px = (int)(x - 1); px <= (int)(x + w + 1); px++) {
-            float qx = (float)px + 0.5f - cx, qy = (float)py + 0.5f - cy;
-            qx = (qx < 0 ? -qx : qx) - hx, qy = (qy < 0 ? -qy : qy) - hy;
-            float ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0, in = qx > qy ? qx : qy;
-            float d = sqrtf_(ox * ox + oy * oy) + (in < 0 ? in : 0) - r; /* < 0 inside */
-            float e = d + stroke * 0.5f;
-            plot(s, px, py, argb, stroke > 0 ? stroke * 0.5f + 0.5f - (e < 0 ? -e : e) : 0.5f - d);
+    float hgt = size * 0.866f, top = cy - hgt * 0.5f, bot = cy + hgt * 0.5f;
+    /* the corners are rounded by drawing the triangle shrunk by rr towards its
+     * incentre, then everything within rr of it */
+    float inr = hgt / 3.0f, rr = size * 0.08f, k = (inr - rr) / inr, iy = bot - inr;
+    float ax = cx, ay = iy + (top - iy) * k, bx = cx + size * 0.5f * k, by = iy + (bot - iy) * k, qx = cx - size * 0.5f * k;
+    int x0 = (int)(cx - size * 0.5f) - 1, x1 = (int)(cx + size * 0.5f) + 2;
+    int y0 = (int)top - 1, y1 = (int)bot + 2;
+    for (int y = y0 < surf_y0(s) ? surf_y0(s) : y0; y < y1 && y < surf_y1(s); y++)
+        for (int x = x0; x < x1; x++) {
+            float px = (float)x + 0.5f, py = (float)y + 0.5f;
+            float d = seg_dist(px, py, ax, ay, bx, by), d2 = seg_dist(px, py, bx, by, qx, by),
+                  d3 = seg_dist(px, py, qx, by, ax, ay);
+            d = d2 < d ? d2 : d, d = d3 < d ? d3 : d;
+            /* inside: on the inner side of all three edges */
+            int in = py <= by && (bx - ax) * (py - ay) - (by - ay) * (px - ax) >= 0 &&
+                     (ax - qx) * (py - by) - (ay - by) * (px - qx) >= 0;
+            plot(s, x, y, fill, 0.5f - ((in ? -d : d) - rr));
         }
+    float bw = size * 0.095f;
+    draw_line(s, cx, top + hgt * 0.36f, cx, top + hgt * 0.63f, bw, ink);
+    draw_disc(s, cx, top + hgt * 0.79f, bw * 0.62f, 0, ink);
 }
 
-void draw_triangle_outline(surface *s, float cx, float cy, float r, float w, u32 argb)
+/* ghostldr's mark: a little ghost, size wide, centred on (cx, cy). */
+void draw_ghost(surface *s, int cx, int cy, int size, u32 body, u32 eyes)
 {
-    float ax = cx, ay = cy - r, bx = cx + r * 0.866f, by = cy + r * 0.5f, qx = cx - r * 0.866f;
-    for (int y = (int)(cy - r - w - 1); y <= (int)(cy + r + w + 1); y++)
-        for (int x = (int)(cx - r - w - 1); x <= (int)(cx + r + w + 1); x++) {
-            float fx = (float)x + 0.5f, fy = (float)y + 0.5f;
-            float d = seg_dist(fx, fy, ax, ay, bx, by), d2 = seg_dist(fx, fy, bx, by, qx, by),
-                  d3 = seg_dist(fx, fy, qx, by, ax, ay);
-            if (d2 < d)
-                d = d2;
-            if (d3 < d)
-                d = d3;
-            plot(s, x, y, argb, w * 0.5f + 0.5f - d);
-        }
-}
-
-void draw_square_outline(surface *s, float cx, float cy, float r, float w, u32 argb)
-{
-    draw_round_rect(s, cx - r, cy - r, 2 * r, 2 * r, 0.5f, w, argb);
+    int r = size / 2, hy = cy - size / 8, by = cy + size * 3 / 8 - r / 3;
+    draw_disc(s, (float)cx, (float)hy, (float)r, 0, body);
+    draw_rrect(s, cx - r, hy, 2 * r, by - hy, 0, body);
+    for (int i = -1; i <= 1; i++) /* the hem */
+        draw_disc(s, (float)cx + (float)(i * 2 * r) / 3.0f, (float)by, (float)r / 3.0f, 0, body);
+    draw_disc(s, (float)cx - (float)r * 0.36f, (float)hy + (float)r * 0.12f, (float)size * 0.085f, 0, eyes);
+    draw_disc(s, (float)cx + (float)r * 0.36f, (float)hy + (float)r * 0.12f, (float)size * 0.085f, 0, eyes);
 }
 
 /* ---- generated art (no images from the console needed) ---- */
@@ -396,27 +499,36 @@ static inline u32 rgbf(float r, float g, float b)
            (u32)clampi((int)b, 0, 255);
 }
 
-/* A deep gradient in the title's colour with soft diagonal light bands and a
- * glow towards the top right, in the spirit of the PS4's default theme
- * (drawn here: nothing is taken from the console). */
+/* A deep, dark backdrop lit in the title's colour: a broad glow from the
+ * top right, a fainter one in a neighbouring hue from the bottom left, and
+ * soft diagonal light bands, in the spirit of the consoles' own themes
+ * (drawn here: nothing is taken from the console).  A little noise keeps
+ * the dark gradients from banding. */
 void draw_generated_bg(surface *s, u32 tint)
 {
     float tr = (float)R(tint), tg = (float)G(tint), tb = (float)B(tint);
+    float hr = tg * 0.55f + tb * 0.45f, hg = tb * 0.55f + tr * 0.45f, hb = tr * 0.55f + tg * 0.45f; /* the next hue */
+    float aspect = (float)s->w / (float)s->h;
     for (int y = 0; y < s->h; y++) {
         u32 *p = row(s, y);
         float fy = (float)y / (float)s->h;
         for (int x = 0; x < s->w; x++) {
             float fx = (float)x / (float)s->w;
-            float base = 0.30f - 0.20f * (fx * 0.35f + fy * 0.65f); /* 0.30 top left .. 0.10 bottom right */
-            float band = 0.5f + 0.5f * sinturn(fx * 0.9f - fy * 0.55f + 0.15f);
-            band = band * band * band * 0.16f;
-            float band2 = 0.5f + 0.5f * sinturn(fx * 1.7f - fy * 0.9f + 0.62f);
-            band2 = band2 * band2 * band2 * band2 * 0.07f;
-            float gx = fx - 0.78f, gy = fy - 0.18f;
-            float glow = 1.0f - (gx * gx * 1.6f + gy * gy * 2.4f);
-            glow = glow > 0 ? glow * glow * 0.26f : 0;
-            float k = base + band + band2 + glow;
-            p[x] = rgbf(tr * k + 18 * (band + glow), tg * k + 22 * (band + glow), tb * k + 30 * (band + glow));
+            float gx = (fx - 0.80f) * aspect, gy = fy - 0.10f;
+            float g1 = 1.0f - (gx * gx + gy * gy) * 0.55f;
+            g1 = g1 > 0 ? g1 * g1 * g1 : 0;
+            float lx = (fx - 0.08f) * aspect, ly = fy - 1.05f;
+            float g2 = 1.0f - (lx * lx + ly * ly) * 0.9f;
+            g2 = g2 > 0 ? g2 * g2 : 0;
+            float band = 0.5f + 0.5f * sinturn(fx * 0.8f - fy * 0.5f + 0.18f);
+            band = band * band * band * band * 0.10f;
+            float band2 = 0.5f + 0.5f * sinturn(fx * 1.6f - fy * 0.85f + 0.6f);
+            band2 = band2 * band2 * band2 * band2 * band2 * band2 * 0.05f;
+            float k = 0.10f + 0.62f * g1 + band + band2, k2 = 0.30f * g2;
+            u32 h = (u32)x * 2654435761u ^ (u32)y * 2246822519u;
+            float n = (float)((h >> 13) & 255) / 255.0f - 0.5f; /* dither */
+            p[x] = rgbf(tr * k + hr * k2 + 8 + 26 * (band + band2) + n, tg * k + hg * k2 + 10 + 30 * (band + band2) + n,
+                        tb * k + hb * k2 + 16 + 36 * (band + band2) + n);
         }
     }
 }

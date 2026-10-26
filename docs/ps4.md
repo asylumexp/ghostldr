@@ -312,6 +312,7 @@ budget: PS4: CUSA11456 needs about 1592 MiB more direct memory than this PS4 let
 **What it means.**
 - **Ghost of Tsushima can't run in SWRR on a PS4.** It needs about 3.9 GiB, 1.6 GiB more than SWRR may have. Nothing inside SWRR raises a budget the kernel sets. The boot now stops before Ghost starts, as above.
 - **Smaller titles may fit.** A title without a memory plan is told what the PS4 hands out: about 2.4 GiB, less ghostldr's reserve and the title's flexible memory.
+- **The game selector warns.** On a PS4 it greys every game's dump with a warning sign, and Cross on one asks first, with No selected ([selector.md](selector.md#on-a-ps4)). Homebrew isn't marked.
 - **A PS4 on 12.02 is within Lapse's range** (the kernel exploit covers PS4 firmware up to 12.02). A jailbroken PS4 runs PS4 games directly, without SWRR or ghostldr.
 
 

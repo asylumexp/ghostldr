@@ -213,8 +213,10 @@ static void sfo_names(struct plat *P, struct cat_title *c, const u8 *sfo, s64 n)
     }
     if (!c->sfo_name[0])
         sfo_get(sfo, (u64)n, "TITLE", c->sfo_name, sizeof(c->sfo_name), NULL);
+    sfo_get(sfo, (u64)n, "TITLE_ID", c->sfo_id, sizeof(c->sfo_id), NULL);
+    sfo_get(sfo, (u64)n, "CONTENT_ID", c->content_id, sizeof(c->content_id), NULL);
     if (!c->id[0])
-        sfo_get(sfo, (u64)n, "TITLE_ID", c->id, sizeof(c->id), NULL);
+        strlcpy(c->id, c->sfo_id, sizeof(c->id));
     if (!c->version[0])
         sfo_get(sfo, (u64)n, "APP_VER", c->version, sizeof(c->version), NULL);
 }
@@ -274,7 +276,7 @@ int cat_load(struct sel *S, struct plat *P, int n)
             strlcpy(c->path, l->path, sizeof(c->path));
             strlcpy(c->note, l->note, sizeof(c->note));
             c->dir_len = l->dir_len < sizeof(c->path) ? l->dir_len : 0;
-            c->flags = l->flags & LIB_TITLE_BAD ? CAT_BAD : 0;
+            c->flags = (l->flags & LIB_TITLE_BAD ? CAT_BAD : 0) | (l->flags & LIB_TITLE_DUP ? CAT_DUP : 0);
             c->indexed = 1;
             read_sfo(S, P, i);
             profile_name(P, c);

@@ -3,7 +3,8 @@
   - preview: the UI code (ui.c, draw.c, font.c, meta.c) built natively
     against a fake catalogue renders its scenes to PNG; every partial redraw
     is checked against a whole one; a meta.bin from host/gfs_meta.py is read
-    and its QOI pictures decoded by the module's own code.
+    and its QOI pictures decoded by the module's own code; as on a PS4, game
+    dumps are marked and ask before they boot, homebrew isn't.
   - selector_host: the core's real src/sel.c and the real selector.bin run as
     x86-64 (Rosetta on Apple silicon) against a fake console whose save data
     is a directory tree built here in ghostfs's formats: a v0.1 install
@@ -12,6 +13,7 @@
     and a broken libSceFont, a bad CRC.  Each run must give back every block
     of direct memory, close VideoOut and every file, unload the modules it
     loaded, unmount every container and leave the module image cleared.
+    On a fake PS4 (CTX_FLAG_PS4) a game's dump boots only after a Yes.
 
     python3 -m unittest discover -s ghostldr/tests
 
@@ -169,6 +171,20 @@ class Selector(unittest.TestCase):
         m.backdrop, m.backdrop_source = gm.decode_image(art(0, "pic1.png")), gm.ART_STORE
         (cls.multi / "G00003META").mkdir()
         (cls.multi / "G00003META/meta.bin").write_bytes(gm.build(m))
+        # a PS4's titles: homebrew by its ID, a game's dump, and homebrew with a
+        # game-like ID that its param.sfo's CONTENT_ID gives away
+        cls.ps4saves = t / "saves-ps4"
+        cat = []
+        for tid, prefix, cid, a in (("BREW00083", "G00083", "", 2),
+                                    ("CUSA00001", "G00001", "UP0001-CUSA00001_00-STARFALLODYSSEY0", 1),
+                                    ("CUSA00009", "G00009", "IV0000-CUSA00009_00-HOMEBREW00000000", 4)):
+            files = {"eboot.bin": b"\1" * 5000, "sce_sys/icon0.png": art(a, "icon0.png")}
+            if cid:
+                files["sce_sys/param.sfo"] = param_sfo([("CONTENT_ID", cid), ("TITLE", tid), ("TITLE_ID", tid)])
+            total, count = pack_title(cls.ps4saves, prefix, tid, files, 200 << 10, prefix + "INDEX")
+            cat.append({"id": tid, "prefix": prefix, "index": prefix + "INDEX", "name": "", "version": "01.00",
+                        "total": total, "containers": count, "flags": 0})
+        catalogue(cls.ps4saves, cat)
         # an app root (dev setups: no ghostfs)
         cls.approot = t / "approot"
         (cls.approot / "sce_sys").mkdir(parents=True)
@@ -236,6 +252,54 @@ class Selector(unittest.TestCase):
         for name in ("usb-copy", "usb-bad", "usb-why", "usb-bad-info"):
             self.assertGreater((self.shots / f"preview-{name}.png").stat().st_size, 10000, name)
 
+    def preview_run(self, *args: str) -> str:
+        p = subprocess.run([str(self.preview), "--font", str(FONT), "--out", str(self.shots), "--prefix", "preview-",
+                            "--user", "Tester", "--verify", *args], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertRegex(p.stderr, r"verify: 0 of \d+ partial frames differ")
+        return p.stderr
+
+    def test_preview_ps4(self) -> None:
+        """On a PS4 a game's dump is marked and Cross asks first, No selected: Cross on No and
+        Circle go back, Yes boots it.  Homebrew isn't marked.  On a PS5 the same Cross boots."""
+        out = self.preview_run("--scene", "ps4", "--ps4")
+        self.assertEqual(out.count("PS4: asking before title 0 (CUSA11456)"), 3)
+        self.assertEqual(out.count("PS4: No for title 0 (CUSA11456)"), 2)
+        self.assertIn("PS4: Yes for title 0 (CUSA11456): booting it", out)
+        self.assertIn("boot title 0 (CUSA11456) at 9", out)               # only after the Yes
+        for name in ("ps4-home", "ps4-ask", "ps4-no", "ps4-homebrew", "ps4-homebrew-info", "ps4-info",
+                     "ps4-ask-panel", "ps4-ask-yes"):
+            self.assertGreater((self.shots / f"preview-{name}.png").stat().st_size, 10000, name)
+        out = self.preview_run("--scene", "ps4", "--prefix", "preview-ps5-")
+        self.assertNotIn("PS4:", out)
+        self.assertIn("boot title 0 (CUSA11456) at 1", out)                # the first Cross
+
+    def test_preview_long_names(self) -> None:
+        """A name too long for a line takes two, then an ellipsis; in the panel, three."""
+        self.preview_run("--scene", "long", "--start", "8", "--ps4")
+        for name in ("long", "long-info"):
+            self.assertGreater((self.shots / f"preview-{name}.png").stat().st_size, 10000, name)
+
+    def test_dump_or_homebrew(self) -> None:
+        """The rule the selector marks titles by on a PS4 (sfo.c title_is_dump)."""
+        cases = [(("CUSA11456", "", ""), "dump"),                          # a retail ID
+                 (("PLAS12345", "", ""), "dump"),
+                 (("cusa00900", "", ""), "dump"),                          # from a folder's name
+                 (("GHOST", "CUSA11456", ""), "dump"),                     # --title over param.sfo's
+                 (("", "", "EP9000-CUSA00207_00-BLOODBORNE000000"), "dump"),
+                 (("CUSA11456", "CUSA11456", "UP9000-CUSA11456_00-GHOSTOFTSUSHIMA0"), "dump"),
+                 (("BREW00083", "BREW00083", "IV0000-BREW00083_00-HELLOWORLD000000"), "homebrew"),
+                 (("CUSA99999", "CUSA99999", "IV0000-CUSA99999_00-HOMEBREW00000000"), "homebrew"),  # its publisher
+                 (("HELLO_WORLD", "", ""), "homebrew"),                    # an OpenOrbis module name
+                 (("LAPY20001", "", ""), "homebrew"),
+                 (("NPXS20001", "", ""), "homebrew"),                      # not a game
+                 (("CUSA1145", "", ""), "homebrew"),                       # too short
+                 (("CUSA114567", "", ""), "homebrew"),                     # too long
+                 (("", "", ""), "homebrew")]
+        for args, want in cases:
+            p = subprocess.run([str(self.preview), "--is-dump", *args], capture_output=True, text=True)
+            self.assertEqual(p.stdout.strip(), want, args)
+
     def test_meta_art(self) -> None:
         """A meta.bin from gfs_meta.py, read and decoded by the module's code."""
         sys.path.insert(0, str(ROOT / "ghostldr/host"))
@@ -283,6 +347,26 @@ class Selector(unittest.TestCase):
         self.assertIn("title 0: CUSA11456 'Ghost of Tsushima' (name profile) , 0 MiB, index GFSINDEX", out)
         self.assertIn("'Test Title (English)' 02.18", out)
 
+    def test_ps4_dumps_ask_first(self) -> None:
+        """The real module on a PS4: dumps marked, homebrew not (one only once its param.sfo is
+        read), Cross on a dump asks, No and Circle go back, Yes boots it."""
+        if not self.host:
+            self.skipTest("no way to build and run x86-64 code here")
+        env = dict(os.environ, SEL_SHOTS="3600:ask,6600:yes", SEL_PROFILES=str(self.bundle))
+        p = subprocess.run([str(self.host), "ps4", str(SEL_BIN), hex(zlib.crc32(SEL_BIN.read_bytes())),
+                            str(self.ps4saves), str(self.shots)], capture_output=True, text=True, env=env, timeout=300)
+        out = p.stdout
+        self.assertEqual(p.returncode, 0, out + p.stderr)
+        self.assertNotIn("FAILED", out)
+        self.assertIn("a PS4: game dumps are marked and ask before they boot", out)
+        self.assertRegex(out, r"title 0: BREW00083 .*, homebrew")
+        self.assertRegex(out, r"title 1: CUSA00001 .*, a game's dump")
+        self.assertIn("title 2 (CUSA00009): homebrew, by its param.sfo (CUSA00009, IV0000-CUSA00009_00-", out)
+        self.assertEqual(out.count("PS4: asking before title 1 (CUSA00001)"), 3)
+        self.assertEqual(out.count("PS4: No for title 1 (CUSA00001)"), 2)
+        self.assertIn("PS4: Yes for title 1 (CUSA00001): booting it", out)
+        self.assertIn("Cross on title 1 (CUSA00001)", out)
+
     def test_one_title_is_not_shown(self) -> None:
         out = self.run_host("skip")
         self.assertNotIn("selector:", out)  # the core closes the socket without loading the module
@@ -294,6 +378,7 @@ class Selector(unittest.TestCase):
         self.assertIn("title 2 (CUSA00003): G00003META: 'Harbor Lights at Dusk'", out)
         self.assertIn("title 0 (CUSA00001): index G00001INDEX", out)
         self.assertIn("title 1: CUSA00002 'Neon Drift (from its profile)' (name profile)", out)  # over the catalogue's
+        self.assertNotIn("PS4:", out)                                   # a PS5: no question
 
     def test_app_root(self) -> None:
         out = self.run_host("approot")
