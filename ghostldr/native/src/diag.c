@@ -552,101 +552,114 @@ COLD static void diag_headers(void)
 }
 
 /* ---- 9. PS4: the compiler process's memory ----
- * SWRR's budget on a 12.02 PS4 is 2560 MiB, exactly 4608 - 2048, and the
- * compiler process joins the same budget (SceSysCore, the seventh report).
- * If it holds the other 2 GiB, possibly in another direct memory container
- * this process can't see, that is the cut.  Its libkernel is this one's at
- * another base: the delta comes from the stubs both have, and libkernel
- * functions are called there by jit_call with their outputs in the shared
- * scratch.  Read-only, except direct memory taken there in pieces and
- * released at once, as here. */
+ * SWRR's budget on a PS4 is 2560 MiB, exactly 4608 - 2048, and the compiler
+ * process is SWRR's local process.  If the compiler has a budget of its own,
+ * memory it allocates is not SWRR's.  Direct memory is ioctls on
+ * /dev/dmem<container> (libkernel 9.60: allocate 0xc0288001 {start, end,
+ * len, align, type} -> phys, release 0x80108002 {phys, len}, size
+ * 0x4008800a, largest free block 0xc0208016 {start, end, align, -> len}).
+ * Only system calls through the compiler's own stubs: libkernel's functions
+ * there (sceKernelGetDirectMemorySize, which initialises its dmem state
+ * first) never came back on a 9.60 PS4.  Everything taken is released. */
+#define DMEM_SIZE 0x4008800aUL
+#define DMEM_AVAIL 0xc0208016UL
+#define DMEM_ALLOC 0xc0288001UL
+#define DMEM_RELEASE 0x80108002UL
+#define SYS_open_ 5
+#define SYS_ioctl_ 54
+#define SYS_dmem_container_ 586
+
+COLD static s64 csys(u64 num, u64 a1, u64 a2, u64 a3)
+{
+    return (s64)jit_call(g_ctx->jit_syscall, num, a1, a2, a3, 0, 0, 0);
+}
+
 COLD static void diag_compiler_memory(void)
 {
-    u64 tsize = 0;
-    const u8 *text = lk_text(&tsize);
-    sysfn m20 = text ? lk_stub(text, tsize, 20) : NULL, m232 = text ? lk_stub(text, tsize, 232) : NULL;
-    u64 c20 = jit_sys_stub(20), c232 = jit_sys_stub(232);
-    if (!m20 || !m232 || !c20 || !c232) {
-        logf("diag: compiler memory: no stubs to place its libkernel (here %lx %lx, there %lx %lx)", (u64)m20,
-             (u64)m232, c20, c232);
+    if (!jit_sys_stub(SYS_open_) || !jit_sys_stub(SYS_ioctl_) || !jit_sys_stub(SYS_dmem_container_)) {
+        logf("diag: compiler memory: no compiler stubs for open/ioctl/dmem_container (%lx %lx %lx): not measured",
+             jit_sys_stub(SYS_open_), jit_sys_stub(SYS_ioctl_), jit_sys_stub(SYS_dmem_container_));
         return;
     }
-    u64 delta = c232 - (u64)m232;
-    logf("diag: compiler memory: libkernel there = here + %lx (getpid's stubs give %lx)", delta, c20 - (u64)m20);
-    if (c20 - (u64)m20 != delta) {
-        logf("diag: compiler memory: the stubs disagree: nothing called there");
-        return;
-    }
-#define THERE(name) ((u64)lk(name) ? (u64)lk(name) + delta : 0)
     u64 out = g_ctx->oob_scratch + 0x71000; /* compiler-visible scratch, past jitrpc.c's */
-    u64 f_size = THERE("sceKernelGetDirectMemorySize"), f_avail = THERE("sceKernelAvailableDirectMemorySize");
-    u64 f_query = THERE("sceKernelDirectMemoryQuery"), f_alloc = THERE("sceKernelAllocateDirectMemory");
-    u64 f_rel = THERE("sceKernelReleaseDirectMemory"), f_flex = THERE("sceKernelAvailableFlexibleMemorySize");
-    u64 f_cflex = THERE("sceKernelConfiguredFlexibleMemorySize");
-#undef THERE
-    u64 size = f_size ? jit_call(f_size, 0, 0, 0, 0, 0, 0, 0) : 0;
-    logf("diag: compiler memory: direct memory size there %lu MiB", size >> 20);
-    if (!size || size > 0x200000000) {
-        logf("diag: compiler memory: implausible size: nothing more called there");
+    volatile u64 *o = (volatile u64 *)out;
+    logf("diag: compiler memory: dmem_container(-1) there");
+    s64 cont = csys(SYS_dmem_container_, (u64)-1, 0, 0);
+    logf("diag: compiler memory: container %ld; opening /dev/dmem%ld there", cont, cont);
+    if (cont < 0 || cont > 2)
         return;
-    }
-    memset((void *)out, 0, 0x100);
-    u32 rc = f_avail ? (u32)jit_call(f_avail, 0, 0, size, 0x4000, out, out + 8, 0) : ~0u;
-    logf("diag: compiler memory: largest free block there %lu MiB at %lx (rc %x)", *(u64 *)(out + 8) >> 20,
-         *(u64 *)out, rc);
-    /* its own direct memory allocations, as sceKernelDirectMemoryQuery walks them */
-    u64 total = 0, off = 0;
-    for (u32 i = 0; f_query && i < 64; i++) {
-        memset((void *)out, 0, 0x100);
-        if ((u32)jit_call(f_query, 0, off, 1 /* find next */, out, 24, 0, 0) != 0)
-            break;
-        u64 st = *(u64 *)out, en = *(u64 *)(out + 8);
-        if (en <= st || en <= off)
-            break;
-        logf("diag: compiler memory:   allocated %lx-%lx (%lu MiB) type %d", st, en, (en - st) >> 20,
-             *(s32 *)(out + 16));
-        total += en - st;
-        off = en;
-    }
-    logf("diag: compiler memory: %lu MiB of direct memory allocated there", total >> 20);
-    for (u32 k = 0; k < 2; k++) {
-        u64 fn = k ? f_cflex : f_flex;
-        memset((void *)out, 0, 16);
-        rc = fn ? (u32)jit_call(fn, 0, out, 0, 0, 0, 0, 0) : ~0u;
-        logf("diag: compiler memory: flexible memory %s there %lu MiB (rc %x)", k ? "configured" : "available",
-             *(u64 *)out >> 20, rc);
-    }
-    /* what the kernel hands out there: pieces taken, then all released */
-    struct hole {
+    char *path = (char *)(out + 0x100);
+    memcpy(path, "/dev/dmem0", 11);
+    path[9] = (char)('0' + cont);
+    s64 fd = csys(SYS_open_, (u64)path, 2 /* O_RDWR */, 0);
+    logf("diag: compiler memory: open -> %ld", fd);
+    if (fd < 0)
+        return;
+    memset((void *)out, 0, 0x40);
+    s64 r = csys(SYS_ioctl_, (u64)fd, DMEM_SIZE, out);
+    u64 size = o[0];
+    logf("diag: compiler memory: its direct memory is %lu MiB (rc %ld)", size >> 20, r);
+    memset((void *)out, 0, 0x40);
+    o[0] = 0, o[1] = size, o[2] = 0x200000;
+    r = csys(SYS_ioctl_, (u64)fd, DMEM_AVAIL, out);
+    logf("diag: compiler memory: largest free block there %lu MiB at %lx (rc %ld)", o[3] >> 20, o[0], r);
+    u64 here_before = budget_allocatable(0);
+    /* what the kernel hands out there: the largest piece it grants, halving
+     * down to 2 MiB, again and again; all released below */
+    struct {
         u64 s, len;
-    } got[32];
+    } got[48];
     u32 n = 0;
-    u64 sum = 0;
-    while (f_alloc && f_rel && f_avail && n < ARRAY_SIZE(got)) {
-        memset((void *)out, 0, 0x20);
-        if ((u32)jit_call(f_avail, 0, 0, size, 0x200000, out, out + 8, 0) != 0)
-            break;
-        u64 len = ALIGN_DOWN(*(u64 *)(out + 8), 0x200000);
-        while (len >= 0x200000 && (u32)jit_call(f_alloc, 0, 0, size, len, 0x200000, 0, out + 16) != 0)
+    u64 sum = 0, len = size && size < 0x200000000UL ? size : 0x120000000UL;
+    while (n < ARRAY_SIZE(got) && len >= 0x200000) {
+        memset((void *)out, 0, 0x40);
+        o[0] = 0, o[1] = size, o[2] = len, o[3] = 0x200000, o[4] = 0; /* type 0 */
+        r = csys(SYS_ioctl_, (u64)fd, DMEM_ALLOC, out);
+        if (r < 0) {
             len = ALIGN_DOWN(len / 2, 0x200000);
-        if (len < 0x200000)
-            break;
-        got[n++] = (struct hole){*(u64 *)(out + 16), len};
+            continue;
+        }
+        got[n].s = o[0], got[n].len = len;
         sum += len;
+        if (n < 8)
+            logf("diag: compiler memory:   allocated there %lx-%lx (%lu MiB)", o[0], o[0] + len, len >> 20);
+        n++;
     }
-    for (u32 i = 0; i < n; i++)
-        jit_call(f_rel, 0, got[i].s, got[i].len, 0, 0, 0, 0);
-    logf("diag: compiler memory: the kernel hands out %lu MiB more direct memory there; here %lu MiB", sum >> 20,
-         budget_allocatable(0) >> 20);
+    /* here, while the compiler holds that: a shared budget hands out less */
+    u64 here_held = budget_allocatable(0);
+    logf("diag: compiler memory: the kernel handed out %lu MiB there; here %lu MiB before, %lu MiB while it holds "
+         "that",
+         sum >> 20, here_before >> 20, here_held >> 20);
+    /* can this process map memory the compiler allocated? */
+    if (n) {
+        void *va = NULL;
+        int mrc = K.map_direct(&va, 0x200000, PROT_READ | PROT_WRITE, 0, (off_t)got[0].s, 0x200000);
+        u64 seen = 0;
+        if (mrc == 0) {
+            *(volatile u64 *)va = 0x5753525243524f53ULL;
+            seen = *(volatile u64 *)va;
+            K.munmap(va, 0x200000);
+        }
+        logf("diag: compiler memory: its phys %lx mapped here -> %x at %p%s", got[0].s, mrc, va,
+             mrc ? "" : seen == 0x5753525243524f53ULL ? ", written and read back" : ", NOT writable");
+    }
+    for (u32 i = 0; i < n; i++) {
+        o[0] = got[i].s, o[1] = got[i].len;
+        r = csys(SYS_ioctl_, (u64)fd, DMEM_RELEASE, out);
+        if (r < 0)
+            logf("diag: compiler memory: release of %lx (%lu MiB) there -> %ld", got[i].s, got[i].len >> 20, r);
+    }
+    csys(6 /* close */, (u64)fd, 0, 0);
+    logf("diag: compiler memory: released; here %lu MiB now", budget_allocatable(0) >> 20);
     /* the locked-memory budget sysctls games read */
     int (*sbn)(const char *, void *, size_t *, const void *, size_t) = lk("sysctlbyname");
     static const char *const names[] = {"vm.budgets.mlock_avail", "vm.budgets.mlock_total"};
     for (u32 i = 0; sbn && i < ARRAY_SIZE(names); i++) {
         u64 v = 0;
-        size_t len = sizeof(v);
-        int r = sbn(names[i], &v, &len, NULL, 0);
-        logf("diag: compiler memory: %s = %lx (%lu MiB), %lu bytes: rc %d errno %d", names[i], v, v >> 20, (u64)len,
-             r, r ? *K.errno_fn() : 0);
+        size_t vlen = sizeof(v);
+        int rr = sbn(names[i], &v, &vlen, NULL, 0);
+        logf("diag: compiler memory: %s = %lx (%lu MiB), %lu bytes: rc %d errno %d", names[i], v, v >> 20, (u64)vlen,
+             rr, rr ? *K.errno_fn() : 0);
     }
 }
 

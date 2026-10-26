@@ -157,12 +157,13 @@ end
 -- "mov rax, N; mov r10, rcx; syscall" (Luac0re: "PS4 requires valid syscall
 -- wrapper"); getpid's with another number in rax stopped the compiler.  The
 -- compiler's wrapper for each number the core and the extension call there
--- (getpid, write, close, sendmsg, munmap, socket, clock_gettime), as
+-- (getpid, write, close, sendmsg, munmap, socket, clock_gettime; open, ioctl
+-- and dmem_container for the diagnostic's direct memory checks), as
 -- (number, address) pairs ended by a zero number.  Luac0re's table covers
 -- its first 128 KiB of libkernel; the rest of the text is searched here, in
 -- this process's copy, at the same offset.  Each wrapper's bytes are
 -- checked in the compiler.  0 on a PS5.
-local COMPILER_SYSCALLS = {0x14, 0x4, 0x6, 0x1c, 0x49, 0x61, 0xe8}
+local COMPILER_SYSCALLS = {0x14, 0x4, 0x6, 0x1c, 0x49, 0x61, 0xe8, 0x5, 0x36, 0x24a}
 local function stub_ok(w, num)
     return jit_read64(w) == (0xC0C748 | (num << 24) | (0x49 << 56))
         and (jit_read64(w + 7) & 0xFFFFFFFFFF) == 0x050FCA8949

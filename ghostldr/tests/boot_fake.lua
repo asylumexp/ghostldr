@@ -64,7 +64,7 @@ else
     -- Luac0re's table: wrappers in the first 128 KiB of libkernel (no clock_gettime here)
     LIBKERNEL_BASE, JIT_LIBKERNEL_BASE = 0x810000000, 0x800060000
     jit_syscall.syscall_wrapper = {}
-    for i, num in ipairs({0x14, 0x1c, 0x4, 0x6, 0x49, 0x61}) do
+    for i, num in ipairs({0x14, 0x1c, 0x4, 0x6, 0x49, 0x61, 0x5, 0x36, 0x24a}) do
         jit_syscall.syscall_wrapper[num] = JIT_LIBKERNEL_BASE + 0xC0 + i * 0x40
         wrapper(JIT_LIBKERNEL_BASE + 0xC0 + i * 0x40, num)
     end
