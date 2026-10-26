@@ -117,8 +117,8 @@ HINTS = [
      "`python3 ghostldr.py check` on the computer shows what the PS5 finds on the drive and what is wrong"),
     # a PS4 lets SWRR allocate about 2.5 GiB of direct memory in all (budget.c, docs/ps4.md)
     ("than this PS4 lets SWRR allocate: not started",
-     "a PS4 lets SWRR use only about 2.5 GiB of memory (a PS4 game gets 4.5 GiB). That is the same on every "
-     "PS4 measured, a Pro and firmware 9.60 to 12.50 included, and nothing inside SWRR raises it. This game "
+     "a PS4 lets SWRR use only about 2.5 GiB of memory (a PS4 game gets 4.5 GiB): its kernel caps PS2 Classics "
+     "when they start (firmware 9.60 to 12.50, a Pro included), and nothing inside SWRR raises it. This game "
      "needs more, so it can't run in SWRR on a PS4 (docs/ps4.md). On a PS5, SWRR gets the whole 4.5 GiB"),
     ("more direct memory than this console hands out",
      "a PS4 lets SWRR use only about 2.5 GiB of memory; this game may stop when it asks for the rest "

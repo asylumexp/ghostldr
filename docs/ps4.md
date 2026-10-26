@@ -1,6 +1,6 @@
 # ghostldr on a PS4
 
-Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe). The third (v0.6.0) got one check further, then the compiler process died: ghostldr had sent every system call through getpid's libkernel stub, which a PS4 refuses. See [The third report](#the-third-report-the-compiler-died-at-its-first-clock_gettime). The fourth (v0.6.1) passed every check, placed Ghost and ran it for about 3 seconds, until the PS4 refused Ghost's texture streaming pool: see [The fourth report](#the-fourth-report-ghost-ran-until-its-streaming-pool-was-refused). The fifth (v0.6.2) measured the PS4's limit: SWRR may allocate 2480 MiB more, about 1.6 GiB less than Ghost needs, and Ghost stopped at a black screen once that ran out: see [The fifth report](#the-fifth-report-a-black-screen-ghost-ran-out-of-the-ps4s-memory). The sixth (v0.6.3) showed that this is SWRR's whole budget on a PS4, 2.5 GiB, so Ghost can't run there: see [The sixth report](#the-sixth-report-swrrs-budget-on-a-ps4-is-25-gib). The seventh traced where that limit is set: a kernel sysctl, most likely written by SceSysCore for PS2 Classics; see [The seventh report](#the-seventh-report-where-the-25-gib-is-set). The eighth measured the same 2.5 GiB on a 9.60 PS4 and on a 12.50 PS4 Pro, and ruled out the compiler process, memory pools and the other direct memory devices as a way past it: see [The eighth report](#the-eighth-report-the-same-25-gib-on-960-1250-and-a-pro).
+Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe). The third (v0.6.0) got one check further, then the compiler process died: ghostldr had sent every system call through getpid's libkernel stub, which a PS4 refuses. See [The third report](#the-third-report-the-compiler-died-at-its-first-clock_gettime). The fourth (v0.6.1) passed every check, placed Ghost and ran it for about 3 seconds, until the PS4 refused Ghost's texture streaming pool: see [The fourth report](#the-fourth-report-ghost-ran-until-its-streaming-pool-was-refused). The fifth (v0.6.2) measured the PS4's limit: SWRR may allocate 2480 MiB more, about 1.6 GiB less than Ghost needs, and Ghost stopped at a black screen once that ran out: see [The fifth report](#the-fifth-report-a-black-screen-ghost-ran-out-of-the-ps4s-memory). The sixth (v0.6.3) showed that this is SWRR's whole budget on a PS4, 2.5 GiB, so Ghost can't run there: see [The sixth report](#the-sixth-report-swrrs-budget-on-a-ps4-is-25-gib). The seventh traced where that limit is set: a kernel sysctl, most likely written by SceSysCore for PS2 Classics; see [The seventh report](#the-seventh-report-where-the-25-gib-is-set). The eighth measured the same 2.5 GiB on a 9.60 PS4 and on a 12.50 PS4 Pro, and ruled out the compiler process, memory pools and the other direct memory devices as a way past it: see [The eighth report](#the-eighth-report-the-same-25-gib-on-960-1250-and-a-pro). The ninth found what enforces it: the kernel caps PS2 Classics at 2.5 GiB when they start, from their signed executable, and nothing a game can do changes it; see [The ninth report](#the-ninth-report-the-kernel-caps-ps2-classics-at-25-gib).
 
 **Status: experimental.** Everything below was worked out from the logs, Luac0re's source and SWRR's executable. On a 12.02 PS4, Ghost's code has run, but no title has reached its title screen yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
 
@@ -378,7 +378,7 @@ census: 1283 MiB of direct memory allocated
 - type 1: 1792 MiB;
 - type 2, system: 684 MiB.
 
-So a game's budget starts far above what SWRR may allocate, and SWRR's 2.5 GiB is applied after that, by the kernel or the system process that starts SWRR.
+So a game's budget starts far above what SWRR may allocate. The 2.5 GiB is the kernel's limit for all games together, set when SWRR starts: see [the ninth report](#the-ninth-report-the-kernel-caps-ps2-classics-at-25-gib).
 
 **What it means.** From inside SWRR on a stock PS4, nothing raises it:
 - the budget calls are refused;
@@ -387,6 +387,49 @@ So a game's budget starts far above what SWRR may allocate, and SWRR's 2.5 GiB i
 - pools and the other devices draw on the same budget or none.
 
 A title gets what is left of the 2.5 GiB once ghostldr has released the emulator's memory, about 2.4 GiB. Ghost of Tsushima needs about 3.9 GiB, so it stops before it starts, with a hint from `run.py` that says why.
+
+## The ninth report: the kernel caps PS2 Classics at 2.5 GiB
+
+Read on a jailbroken 12.50 PS4 Pro during development only, with SWRR (EU) running, from the kernel's live state and its code. Nothing ghostldr does needs or uses this.
+
+**SWRR's own budget isn't the limit.** The budget its process belongs to allows 5888 MiB of direct memory, the default for games; it had 1283 MiB in use, the same 1283 MiB SWRR holds.
+
+**The limit is the kernel's pool for games.** Besides each budget, the kernel keeps one direct memory pool per process type, with a limit and a usage, and every allocation of a game process is charged to the games' pool:
+
+| | Games (type 0) | Type 1 | System (type 2) |
+|---|---|---|---|
+| Direct memory limit, SWRR running | **2560 MiB** | 1792 MiB | 684 MiB |
+| Direct memory limit, GTA V running | **4608 MiB** | 1792 MiB | 684 MiB |
+| In use (SWRR running) | 1283 MiB | 0 | 472 MiB |
+
+So SWRR may allocate 2560 − 1283 = 1277 MiB more, which is exactly what it gets.
+
+**Who sets it, and from what.** When an application's main process starts (`kern_exec.c`), the kernel sets the games' pool limit from that process's credentials:
+- **2560 MiB** if the credentials carry one capability bit and one attribute bit. SWRR's do; a normal game's (GTA V's) don't.
+- **768 MiB** for another attribute bit.
+- **Otherwise the whole 4608 MiB** range.
+
+SWRR's credentials compared with GTA V's on the same console:
+
+| | Authority ID | Capabilities | Attributes |
+|---|---|---|---|
+| SWRR's eboot | `0x3100000000000002` | `2000038000000000 200000000000ff00` | `40004000c0800000` |
+| SWRR's compiler | `0x3100000000000002` | `2000038000000000 400000000000ff00` | `40004000c0800000` |
+| GTA V's eboot | `0x3100000000000001` | `2000038000000000 000000000000ff00` | `4000400040000000` |
+
+The capabilities and attributes come from the executable's signed authentication info, which Sony signs with the title: SWRR's marks it as a PS2 Classic.
+
+**Nothing afterwards raises it.**
+- The kernel keeps the value set at the start. Every later recomputation of the pool, on a Pro-mode or memory-state change, keeps the limit at or below it.
+- The only other way to change it is the write-only sysctl `kern.dmem.game_budget_limit` ("Set game budget limit"). Its handler requires a system process's capability, which neither SWRR nor its compiler has, and it never goes above the limit the console allows.
+- No system module of 12.50 calls `sceKernelSetGameDirectMemoryLimit`. Two statically linked copies in `mini-syscore.elf` and `SceSysAvControl.elf` have no callers, so the setting appears to be left for development consoles.
+
+**So, on a stock PS4, SWRR's 2.5 GiB is final:**
+- the cap is set by the kernel when SWRR starts, from SWRR's signed executable;
+- a game can neither change its credentials nor write the setting;
+- what it may still use is what the kernel left: about 2.4 GiB for a title once ghostldr has released the emulator's memory.
+
+A PS5 doesn't apply this cap to PS4 software, which is why SWRR gets the whole 4.5 GiB there.
 
 ## What is verified
 
@@ -407,6 +450,7 @@ A title gets what is left of the 2.5 GiB once ghostldr has released the emulator
   - `run.py probe --diag`'s flags.
 - On a 12.02 PS4, with v0.6.3: SWRR's direct memory budget is about 2.5 GiB, and memory released from SWRR counts against it (the sixth report).
 - On a 9.60 PS4 and a 12.50 PS4 Pro (base mode): the same 2.5 GiB; the compiler process can't open its direct memory device; memory pools draw on the same budget (the eighth report).
+- On a 12.50 PS4 Pro, from the kernel: the games' direct memory pool limit is 2560 MiB while SWRR runs and 4608 MiB while GTA V runs; it is set when the application's main process starts, from its credentials (the ninth report).
 - On a 12.02 PS4, with v0.6.1 (a boot of Ghost from saved data, the fourth report):
   - the compiler checks, each system call through its own stub;
   - the buffer probes: the EE and IOP buffers written past 16 KiB, VU0 and VU1 past 32 KiB, and the small area;
@@ -432,8 +476,7 @@ A title gets what is left of the 2.5 GiB once ghostldr has released the emulator
 ## What is not verified
 
 - Firmware other than 9.60, 12.02 and 12.50.
-- SWRR's own budget object: its direct memory limit, and where it is lowered from the type-0 default. Only kernel access can read it.
-- Who writes `kern.dmem.game_budget_limit` for SWRR, and from what. Not ShellCore and not SceSysCore (12.02, read statically): neither contains the name or imports `sceKernelSetGameDirectMemoryLimit`, and both copy the kernel's budget limits unchanged. So the kernel decides, or another process does. The only per-title input found on the way is ShellCore's title workaround database (`sceWorkaroundCtlGetTitleWorkaroundInfo`), which SceSysCore passes to the kernel with `sceKernelSetAppInfo`; whether it causes the cut isn't known. SWRR's compiler process joins SWRR's own budget, so whatever it holds counts against the same 2.5 GiB.
+- That a base PS4's kernel sets the games' pool the same way: the kernel was read only on a 12.50 Pro. The base PS4s measured (9.60, 12.02) give SWRR the same 2560 MiB.
 - How much new JIT memory a PS4 allows. The extension's 384 KiB block worked; a 13.60 PS5 allows 768 KiB in all. The PS4 compiler process's flexible memory was 248.1 of 249.6 MiB. A 25 MiB fallback block is very unlikely to work.
 - That no other SWRR thread uses the released buffers on a PS4. None did in the 3 s Ghost ran.
 - That Luac0re's thread cancels work on a PS4.
