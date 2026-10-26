@@ -9,6 +9,8 @@ There are two ways to get a game to the PS5:
 
 Steps 1 to 4 below take the USB drive way. [The saved-data way](#the-saved-data-way) replaces steps 3 and 4. Every command is `python3 ghostldr.py` and a word: `doctor`, `copy`, `check`, `boot`, `logs` or `install` (`python3 ghostldr.py --help` lists them, `python3 ghostldr.py boot --help` explains one).
 
+Once a game is on the drive (or installed), starting it needs no Python and nothing serving files from the computer: [two files sent with `nc`](#boot-with-no-computer), from a computer or a phone, boot it.
+
 ## What you need
 
 - **A PS5 with *Star Wars Racer Revenge*, USA (CUSA03474) or Europe (CUSA03492).** Luac0re 2.4b must already work on it: its Remote Lua Loader starts when you open HALL OF FAME. Both regions work the same way; play each game from the same region every time, since US and EU SWRR keep separate saved data (and so separate progress).
@@ -164,6 +166,63 @@ The data lands in SWRR's saved data under the signed-in user, as 58 entries: `GH
    With no game on a USB drive in the PS5 it boots the installed ones; `boot --installed` skips the drive.
 
 Everything else is as in step 4: the preflight line, the first boot, the log and `GHOSTSAVE`. **Every later session:** close SWRR, start it again, open HALL OF FAME, and run the same command. The install is only needed once per PSN user.
+
+## Boot with no computer
+
+`ghostldr.py boot` builds the bootstrap on the computer and serves the PS5 two files while it starts. The release page also has the same boot as three files that need none of that: no Python, no firewall rules, no program left running. Anything that can send a file over TCP will do: `nc` on macOS or Linux, or a payload-sender app on a phone or on Windows.
+
+| File | What it is |
+|---|---|
+| `ghostldr.lua` | The bootstrap, with ghostldr's core, the title profiles and the defaults in it. Sent to Luac0re's loader. |
+| `ghostldr-ext.bin` | Boots a game: ghostldr's extension (every HLE family and the NID table, plus the ELF loader, the FTP server and the USB drive support) and the game selector. |
+| `ghostldr-elfldr.bin` | Starts the [ELF loader](elfldr.md) instead: only what it needs, about 110 KB. |
+
+`ghostldr.lua` takes only a `.bin` from the same release: download them together, and check them with `SHA256SUMS.txt` as in step 1.
+
+1. **Start Luac0re** as in step 2: SWRR, the right half of the touchpad at PRESS START, then **OPTIONS → HALL OF FAME**, until the loader listens on port 9026. Plug in the USB drive with the games, if you use one ([step 3](#3-copy-the-game-to-the-usb-drive)).
+2. **Send the bootstrap.** `CONSOLE` is the PS5's address (**Settings → Network → Connection Status → View Connection Status**):
+
+   ```bash
+   nc CONSOLE 9026 < ghostldr.lua
+   ```
+
+   Luac0re's dialog on the TV now shows ghostldr's prompt, with the PS5's address:
+
+   ```
+   ghostldr 236824efa5f1862e
+
+   Send ghostldr-ext.bin (games)
+   or ghostldr-elfldr.bin (ELF loader)
+   to 192.168.1.123:9021
+
+   Waiting 5 minutes
+   ```
+
+   It listens on TCP 9021, the port the PS5 scene uses for ELF loaders, which is free on a stock console. On a jailbroken PS5 whose own ELF loader has 9021 already, it takes **9022** and says `(9021 is taken)`. The same goes into a notification. Whatever happens next shows in that dialog too: what was received, a refusal and why, the ELF loader's port, the way back to Luac0re's loader.
+3. **Send the bundle** to that port within five minutes:
+
+   ```bash
+   nc CONSOLE 9021 < ghostldr-ext.bin
+   ```
+
+   It boots as `python3 ghostldr.py boot` does: the games on a USB drive in the PS5 first, else the ones installed in SWRR's saved data, with the game selector on the TV when there is more than one, and the FTP server on port 1212 while the game runs. `nc` then shows the console's log, as `ghostldr.py boot` does, starting with:
+
+   ```
+   ghostldr: received ghostldr-ext.bin (2823146 bytes, build …) from 192.168.1.23 on TCP 9021
+   ghostldr: booting: the games on a USB drive in the PS5, else the installed ones; the log follows here …
+   [ghostldr 96] ghostldr core at 0x9009d8000, ctx flags 4bc000000201002
+   ```
+
+   Press Ctrl+C when you've seen enough: that stops the log, not the game. A payload-sender app that closes the connection right after sending works too; the game starts all the same, and only the log is lost.
+
+That's all. Every later session: close SWRR, start it again, open HALL OF FAME, and send the same two files.
+
+- **Ports:** the bundle goes to 9021, or 9022 when 9021 is taken. The ELF loader that `ghostldr-elfldr.bin` starts listens on the next port after the bundle's: 9022 on a stock console, 9023 on a jailbroken one. Both are on the TV, on the connection and in a notification.
+- **Nothing arrives in five minutes:** `ghostldr.lua` closes its port and gives SWRR back to Luac0re's loader untouched, and the TV says so above Luac0re's own text; send it again.
+- **Anything else on that port is refused,** with the reason and what it expected on the TV, on its connection and in a notification, and `ghostldr.lua` keeps waiting for the right file: an ELF (send `ghostldr-elfldr.bin` first), a Lua script (that goes to 9026), a bundle that arrived cut short, or one from another release: `ghostldr-ext.bin is from another build (…) than this ghostldr.lua (…): send ghostldr.lua and ghostldr-ext.bin from the same release`.
+- **What it doesn't do:** it takes `ghostldr.py boot`'s defaults and no options: no `--title` (the selector asks when there are several games), no `--folder`, no memory knobs, and no preflight check against your dump. A title profile written on your computer isn't in it; the release's own profiles are. For any of that, use `ghostldr.py boot`.
+- **On a PS4** the full bundle boots as on a PS5 (from saved data; [ps4.md](ps4.md)); the ELF loader's is refused, since the ELF loader needs a PS5, and the TV says to send `ghostldr-ext.bin` instead. In Jak X with UltraC0re, send `ghostldr.lua` to 8888 instead of 9026; that is untested, and `ghostldr.py boot` is the tested way there.
+- **Which `nc`:** Luac0re's loader runs a script once its connection ends. macOS's `nc` ends it after the file by itself; on Linux add `-N` to the first command (`nc -N CONSOLE 9026 < ghostldr.lua`), or `-q 0` with the traditional netcat, or the command waits until you press Ctrl+C. The bundle needs neither: `ghostldr.lua` reads its length from its header. On Windows, use a payload-sender app, or `nc` in WSL.
 
 ## Names and pictures in the game selector (optional)
 

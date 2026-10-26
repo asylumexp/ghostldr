@@ -6,7 +6,43 @@ A payload gets SWRR's userland privileges and nothing more. There is no kernel m
 
 ## Start it
 
-You need the same setup as for a game: SWRR with Luac0re's Remote Lua Loader listening on TCP 9026 ([using-the-release.md](using-the-release.md)), and this repository or a release on the computer. Then:
+You need SWRR with Luac0re's Remote Lua Loader listening on TCP 9026, as for a game ([using-the-release.md](using-the-release.md)).
+
+### With nothing but nc
+
+The release page has `ghostldr.lua` and `ghostldr-elfldr.bin` ([using-the-release.md](using-the-release.md#boot-with-no-computer)). Send the first to Luac0re's loader and the second to the port it opens, where `CONSOLE` is the PS5's address (on Linux, `nc -N` for the first: Luac0re runs a script once its connection ends):
+
+```bash
+nc CONSOLE 9026 < ghostldr.lua
+nc CONSOLE 9021 < ghostldr-elfldr.bin
+```
+
+The second connection stays open and shows the loader's log, including the port payloads go to:
+
+```
+ghostldr: received ghostldr-elfldr.bin (110241 bytes, build …) from 192.168.1.23 on TCP 9021
+ghostldr: starting the ELF loader on TCP 9022: send payloads with nc 192.168.1.123 9022 < payload.elf; send "quit" there to give SWRR back to Luac0re's loader
+…
+[ghostldr 96] elfldr: listening on TCP 9022 (send an ELF: nc <ps5> 9022 < payload.elf)
+```
+
+The ports, which the TV (in Luac0re's dialog), the log and the PS5's notifications also give:
+
+| | Stock console | Jailbroken (its own ELF loader has 9021) |
+|---|---|---|
+| `ghostldr.lua` | 9026, Luac0re's loader | 9026 |
+| `ghostldr-elfldr.bin` | 9021 | 9022 |
+| payloads | 9022 | 9023 |
+
+The payload port is the first free one after the bundle's: it is never the bundle's own, so a bundle sent twice isn't taken for a payload, and on a stock console 9021 stays the port to send ghostldr's files to. Payload-sender apps work for all three sends; the log of the second is lost if the app closes the connection, but the loader starts all the same.
+
+`ghostldr-elfldr.bin` holds only what the ELF loader needs: the extension's code for payloads (the kernel, module, file, homebrew, thread-specific data and libc families, entry for entry as in the full extension) and none of a game's, no game selector, no FTP server and no NID table. It is about 110 KB where `ghostldr-ext.bin` is 2.8 MB, and takes 128 KiB of new JIT memory instead of 432 KiB. An ELF names its imports, and those are found by name, so payloads link as before. A SELF or create-fself's OELF names them by NID only, and finding SWRR's functions for those needs the NID table: this loader refuses them (`a SELF or an OELF names its imports by NID only, and this ELF loader has no NID table`). Send the ELF `ld.lld` wrote, as recommended below anyway, or use `run.py elfldr`.
+
+`quit` ends the loader as below; the bundle's connection then closes and Luac0re's loader takes scripts again.
+
+### With run.py
+
+With this repository or a release on the computer:
 
 ```bash
 python3 ghostldr/host/run.py elfldr
@@ -151,11 +187,11 @@ It must be position-independent x86-64 (`ET_DYN`), with code and writable data i
 - **No killing a payload.** `exit()` can't stop other threads, so a payload whose threads never end keeps its JIT object until SWRR restarts.
 - **Signal handlers** are ghostldr's: a payload must not install its own for SIGSEGV, SIGBUS, SIGILL or SIGFPE.
 - **Graphics and the controller** aren't what the loader is for: Luac0re's loader dialog stays on screen and SWRR keeps its display. A payload may still try.
-- **A PS5 and Luac0re in SWRR only.** On a PS4, or Jak X with UltraC0re, `run.py elfldr` refuses.
+- **A PS5 and Luac0re in SWRR only.** On a PS4, or Jak X with UltraC0re, `run.py elfldr` refuses, and `ghostldr.lua` refuses `ghostldr-elfldr.bin`.
 
 ## How it works
 
-`run.py elfldr` sends ghostldr's core with the context flag `CTX_FLAG_ELFLDR` and the port. The core fetches the extension (it carries the NID table and the HLE families), places it, and calls its ELF loader (`ghostldr/native/ext/src/elfldr.c`, `elfldr_sys.c`, `payload.c`), which serves on the boot thread until told to quit.
+`run.py elfldr` sends ghostldr's core with the context flag `CTX_FLAG_ELFLDR` and the port; `ghostldr.lua` does the same once it has taken `ghostldr-elfldr.bin` ([architecture.md](architecture.md#two-file-boot)). The core fetches the extension (`run.py` serves the full one, with the NID table; the bundle carries `ext-elfldr.bin`), places it, and calls its ELF loader (`ghostldr/native/ext/src/elfldr.c`, `elfldr_sys.c`, `payload.c`), which serves on the boot thread until told to quit.
 
 - **Executable memory.** Each payload takes one of the emulator's JIT objects (never the IPU object that holds the core). Its code is written through the compiler process at the object's end, and the whole object is mapped read-execute in a range reserved for the payload above 0x10_0000_0000, so that the code ends where the payload's data begins. The data is direct memory mapped right after the view. When the payload finishes, the view, the data and the range go back, and the object is free for the next payload. Nothing is ever writable and executable at once.
 - **Imports** bind as a game's do (the extension, then the core's overrides, then SWRR's modules by name), with a few of the loader's own first: `_exit`, `exit`, `abort` and `raise` end the thread; `socket`, `__sys_socketex` and `sceNetSocket` fall back to the compiler; `accept` and `close` keep track of sockets; `mmap`, `munmap` and the flexible-memory calls use direct memory. Imports that are found nowhere bind to a stub that logs the call and returns 0; the first line lists them.

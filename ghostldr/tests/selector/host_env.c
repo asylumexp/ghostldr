@@ -21,7 +21,9 @@
  *           badcrc  sel.c refuses a module with the wrong CRC
  *
  * Environment: SEL_SHOTS="ms:name,..." saves what is on the screen at each
- * time as OUT_DIR/MODE-name.png.
+ * time as OUT_DIR/MODE-name.png.  SEL_BUNDLE=1: the module comes in memory,
+ * as the release's ghostldr.lua passes it (CTX_FLAG_BUNDLE), and sel.c must
+ * unmap it whether it runs it or not.
  */
 #include "sel_api.h"
 
@@ -187,8 +189,16 @@ static int k_map_direct(void **addr, size_t len, int prot, int flags, off_t phys
     return (int)0x80020016;
 }
 
+static u8 *g_bundle_sel; /* SEL_BUNDLE: the module in "flexible memory" */
+static u64 g_bundle_len;
+static int g_bundle_unmapped;
+
 static int k_munmap(void *addr, size_t len)
 {
+    if (g_bundle_sel && addr == g_bundle_sel && len == g_bundle_len && !g_bundle_unmapped) {
+        g_bundle_unmapped = 1;
+        return 0;
+    }
     for (int i = 0; i < g_nblocks; i++)
         if (g_blocks[i].va == (u64)addr && g_blocks[i].len == len && !g_blocks[i].unmapped) {
             sys_unmap(addr, len);
@@ -679,8 +689,19 @@ int main(int argc, char **argv)
     a->gfs_active = gfs_active, a->gfs_mount = gfs_mount, a->gfs_umount = gfs_umount;
 
     u64 size = (u64)sys_file_size(argv[2]);
-    cx->sel_fd = (u64)sys_open(argv[2]); /* the "socket": sel.c closes it */
-    g_opens++;
+    const char *in_mem = sys_getenv("SEL_BUNDLE");
+    if (in_mem && *in_mem) { /* the release's ghostldr.lua: the module where it received it */
+        int fd = sys_open(argv[2]);
+        g_bundle_len = (size + 0x3FFF) & ~0x3FFFull;
+        g_bundle_sel = sys_map(g_bundle_len);
+        check(fd >= 0 && sys_read(fd, g_bundle_sel, size) == (s64)size, "the module read for the bundle");
+        sys_close(fd);
+        cx->sel_fd = (u64)g_bundle_sel;
+        cx->flags |= CTX_FLAG_BUNDLE;
+    } else {
+        cx->sel_fd = (u64)sys_open(argv[2]); /* the "socket": sel.c closes it */
+        g_opens++;
+    }
     cx->sel_size = size;
     cx->sel_crc = sys_strtoul(argv[3]) ^ (str_eq(g_mode, "badcrc") ? 1 : 0);
     char title[16];
@@ -723,6 +744,8 @@ int main(int argc, char **argv)
     check(g_mounts == g_umounts && mounted_now() == 0, "every save container unmounted");
     check(g_max_mounted <= 1, "at most one container mounted at a time");
     check(g_opens == g_closes, "every file closed");
+    if (g_bundle_sel)
+        check(g_bundle_unmapped && (s64)cx->sel_fd == -1, "the bundle's module taken and unmapped");
     int clean = 1;
     if (g_region)
         for (u64 i = 0; i < REGION_SIZE; i++)

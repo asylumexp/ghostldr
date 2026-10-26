@@ -164,6 +164,7 @@ def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int],
     if layout["__data_start"] != text_size:
         raise SystemExit(f"core data must start at the text page boundary ({text_size:#x})")
     header = "\n".join([
+        'GHOSTLDR_MODE = "connect"',      # ghostldr.lua: the extension and selector from here, the log over UDP
         f'GHOSTLDR_CORE_HEX = "{core.hex()}"',
         f"GHOSTLDR_TEXT_SIZE = {text_size:#x}",
         f"GHOSTLDR_IMAGE_SIZE = {layout['__image_end']:#x}",
@@ -559,6 +560,21 @@ def elfldr(args, listener: LogListener | None) -> int:
     return 0
 
 
+def boot_flags(args) -> int:
+    """The boot context's flags for probe and boot (native/include/ghost.h);
+    the release's ghostldr.lua takes `run.py boot`'s defaults (mkbundle.py)."""
+    release = args.mode == "boot" and not args.keep_host_memory
+    return (1 if args.mode == "probe" else 0) | (2 if release else 0) \
+        | (4 if args.snap or args.count_imports or args.profile else 0) | (16 if args.profile else 0) \
+        | (8 if args.count_imports else 0) | (32 if args.force_title_ready else 0) \
+        | (64 if args.ext_jit else 0) | (128 if args.dialog_cancel else 0) | (256 if args.ime_fixed_name else 0) \
+        | (512 if args.keep_remote_play else 0) | (1024 if args.boot_start_modules else 0) \
+        | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0) \
+        | (16384 if args.diag else 0) | (65536 if args.no_auto_memory else 0) \
+        | (131072 if args.auto_memory else 0) | (524288 if args.forget_memory else 0) \
+        | (args.ftp_port << 48 if args.mode == "boot" else 0)
+
+
 LOADER_HELP = ("start SWRR, click the right half of the touchpad at PRESS START, then OPTIONS -> HALL OF FAME "
                "(Luac0re's loader listens on 9026 until a game starts), or Jak X with UltraC0re (8888); "
                "after a game has run, close SWRR and start it again first")
@@ -686,16 +702,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(f"--no-build needs {', '.join(map(str, missing))}")
         else:
             build_core()
-        release = args.mode == "boot" and not args.keep_host_memory
-        flags = (1 if args.mode == "probe" else 0) | (2 if release else 0) | (4 if args.snap or args.count_imports or args.profile else 0) \
-            | (16 if args.profile else 0) \
-            | (8 if args.count_imports else 0) | (32 if args.force_title_ready else 0) \
-            | (64 if args.ext_jit else 0) | (128 if args.dialog_cancel else 0) | (256 if args.ime_fixed_name else 0) \
-            | (512 if args.keep_remote_play else 0) | (1024 if args.boot_start_modules else 0) \
-            | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0) \
-            | (16384 if args.diag else 0) | (65536 if args.no_auto_memory else 0) \
-            | (131072 if args.auto_memory else 0) | (524288 if args.forget_memory else 0) \
-            | (args.ftp_port << 48 if args.mode == "boot" else 0)
+        flags = boot_flags(args)
         knobs = {"gpu_heap": args.gpu_heap_mib, "slack": args.slack_mib, "pool1": args.pool1_mib,
                  "cpu_heap": args.cpu_heap_mib}
         ext = EXT.read_bytes() if args.mode == "boot" else b""

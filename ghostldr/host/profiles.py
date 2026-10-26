@@ -654,6 +654,17 @@ def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = (),
     return data
 
 
+def release_bundle() -> bytes:
+    """GHOSTLDR_PROFILE_HEX of the release's ghostldr.lua (tools/mkbundle.py):
+    every profile in ghostldr/data/titles and the generic default, from the
+    repository alone: nothing of this computer's packs, dumps or drives."""
+    titles = known_titles()
+    data = b"".join(compile_blob(load(t)) for t in titles) + compile_blob(load(None)) + b"\0" * 8
+    if len(data) > MAX_BUNDLE:
+        raise ProfileError(f"{len(titles)} profiles take {len(data)} bytes (at most {MAX_BUNDLE})")
+    return data
+
+
 # ---- command line ----
 
 def starter(src: Path) -> dict:

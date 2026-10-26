@@ -4,7 +4,8 @@
  * and leaves nothing behind (interface: sel_api.h).
  *
  *  - The blob comes over the TCP socket ghostldr.lua connected (ctx sel_fd)
- *    into the compiler-visible staging buffer: no allocation.
+ *    into the compiler-visible staging buffer: no allocation.  From a bundle
+ *    (CTX_FLAG_BUNDLE) it is copied there from where ghostldr.lua received it.
  *  - Its image (read-only code and data, no relocations) is copied through
  *    the compiler into the emulator's JIT code buffer, where the title's
  *    modules are placed afterwards.
@@ -35,21 +36,27 @@ COLD int sel_run(bool show, char title[16])
     if (c->size < __builtin_offsetof(struct boot_ctx, sel_crc) + 8 || (s64)c->sel_fd < 0)
         return -1;
     int fd = (int)c->sel_fd;
+    /* a bundle (CTX_FLAG_BUNDLE): ghostldr.lua's copy, unmapped here */
+    const u8 *mem = (c->flags & CTX_FLAG_BUNDLE) ? (const u8 *)c->sel_fd : NULL;
     c->sel_fd = (u64)-1;
-    if (!show) { /* the title is known: no need for the module */
-        K.close(fd);
-        return -1;
-    }
     u64 n = c->sel_size, got = 0, lo = 0, hi = 0;
     u8 *b = (u8 *)c->staging;
     const struct sel_blob *h = (const void *)b;
-    while (n <= c->staging_size && got < n) {
-        ssize_t r = K.read(fd, b + got, n - got);
-        if (r <= 0)
-            break;
-        got += (u64)r;
+    if (mem) {
+        if (show && n <= c->staging_size)
+            memcpy(b, mem, got = n);
+        K.munmap((void *)mem, ALIGN_UP(n, 0x4000));
+    } else {
+        while (show && n <= c->staging_size && got < n) {
+            ssize_t r = K.read(fd, b + got, n - got);
+            if (r <= 0)
+                break;
+            got += (u64)r;
+        }
+        K.close(fd);
     }
-    K.close(fd);
+    if (!show) /* the title is known: no need for the module */
+        return -1;
     /* mksel.py checked the image; the CRC proves this is that file */
     if (got != n || crc32(b, n) != (u32)c->sel_crc || h->magic != SEL_BLOB_MAGIC || h->abi != GHOST_ABI ||
         h->header_size + (u64)h->image_size != n || arena_init() || arena_code_region(&lo, &hi)) {

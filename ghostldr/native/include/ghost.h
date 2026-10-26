@@ -51,8 +51,8 @@ struct boot_ctx {
     /* PS4: the compiler's libkernel syscall stubs, (number, address) u64
      * pairs ended by a zero number (ghostldr.lua; jit_call); 0 on a PS5 */
     u64 jit_sysw;
-    u64 log_fd;            /* UDP socket from the loader's create_socket() */
-    u64 log_addr;          /* sockaddr_in (16 bytes) of the log server */
+    u64 log_fd;            /* UDP socket from the loader's create_socket(), or the bundle's TCP connection */
+    u64 log_addr;          /* sockaddr_in (16 bytes) of the log server; 0: log_fd is a connection (log.c) */
     /* compiler-process RPC (jitrpc.c): the compiler's base, then the chain
      * parts of the loader that runs us */
     u64 jit_base;
@@ -117,8 +117,7 @@ const char *strrchr_c(const char *s, int c);
 int vfmt(char *buf, size_t size, const char *fmt, __builtin_va_list ap);
 int fmt(char *buf, size_t size, const char *fmt, ...);
 
-/* ---- logging (log.c) ---- */
-void log_init(struct boot_ctx *ctx);
+/* ---- logging (log.c): to ctx->log_fd, read on each line ---- */
 void logf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void log_hex(const char *tag, const void *p, size_t n);
 
@@ -627,7 +626,8 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
  * 262144 the app root is a library, 65536 no automatic memory plan, 131072
  * the automatic plan even over a manual one, 524288 forget the learned
  * memory plan (automem.c), 1048576 the USB storage session is open
- * (approot.c); bits 48-63 hold the FTP server's port
+ * (approot.c) or the ELF loader, 2097152 the extension came in a bundle;
+ * bits 32-47 hold the ELF loader's port, bits 48-63 the FTP server's
  * (CTX_FTP_PORT) */
 #define CTX_FLAG_NO_AUTO_MEM 65536      /* plan-free titles keep the plain budget (run.py --no-auto-memory) */
 #define CTX_FLAG_AUTO_MEM 131072        /* the automatic plan instead of a profile's manual one (run.py --auto-memory) */
@@ -644,6 +644,13 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 #define CTX_FTP_PORT(flags) ((u32)((flags) >> 48)) /* the FTP server's TCP port (run.py --ftp-port; 0: none) */
 #define CTX_FLAG_ELFLDR 1048576 /* no title: serve the ELF loader (run.py elfldr, docs/elfldr.md) */
 #define CTX_ELFLDR_PORT(flags) ((u32)((flags) >> 32) & 0xFFFF) /* its TCP port (run.py elfldr --port) */
+/* The release's ghostldr.lua received a bundle (ghostldr-ext.bin or
+ * ghostldr-elfldr.bin, docs/architecture.md "Two-file boot"): ext_fd and
+ * sel_fd hold the addresses of the extension and the selector in flexible
+ * memory it mapped (each ALIGN_UP(size, 16 KiB); the core unmaps what it
+ * takes and sets the field to -1), and log_fd is the bundle's TCP
+ * connection with log_addr 0 (log.c). */
+#define CTX_FLAG_BUNDLE 2097152
 int ghost_elfldr(void);   /* boot.c */
 int ext_elfldr(void);     /* ext.c: the extension's ELF loader; returns when told to quit */
 static inline bool is_ps4(void) { return (g_ctx->flags & CTX_FLAG_PS4) != 0; }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every installer, and SHA256SUMS.txt beside them.
+"""Every installer, the two-file boot's files, and SHA256SUMS.txt beside them.
 
     python3 tools/package/build_all.py [--out DIR] [--no-make] [--only macos,windows,deb,appimage]
 
@@ -11,11 +11,15 @@ Builds the prebuilt loader files first (make -s in ghostldr/native) unless
     ghostldr_<version>_all.deb                    build_deb.py
     ghostldr-<version>-x86_64.AppImage            build_appimage.py
     ghostldr-<version>-aarch64.AppImage
+    ghostldr.lua, ghostldr-ext.bin, ghostldr-elfldr.bin
+                                                  a boot with nothing but nc (ghostldr/tools/mkbundle.py,
+                                                  docs/using-the-release.md), from the same build
 """
 
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -27,6 +31,25 @@ import build_windows  # noqa: E402
 import common as C  # noqa: E402
 
 KINDS = ("macos", "windows", "deb", "appimage")
+TWO_FILE = ("ghostldr.lua", "ghostldr-ext.bin", "ghostldr-elfldr.bin")
+
+
+def two_file_boot(out: Path) -> list[Path]:
+    """The two-file boot's files from build/ghostldr (the Makefile makes them
+    with the core), copied to the release folder and checked for anything of
+    this computer's."""
+    src = C.REPO / "build/ghostldr"
+    missing = [n for n in TWO_FILE if not (src / n).is_file()]
+    if missing:
+        C.die(f"build/ghostldr is missing {', '.join(missing)}: run `make -s` in ghostldr/native")
+    out.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for n in TWO_FILE:
+        shutil.copyfile(src / n, out / n)
+        copied.append(out / n)
+    C.check_nothing_personal(copied)
+    C.log(f"two-file boot: {', '.join(f'{p.name} ({p.stat().st_size} bytes)' for p in copied)}")
+    return copied
 
 
 def main() -> int:
@@ -36,6 +59,7 @@ def main() -> int:
     ap.add_argument("--only", default=",".join(KINDS), help=f"comma-separated, from {', '.join(KINDS)}")
     ap.add_argument("--epoch", type=int, default=None, help="timestamp for the AppImages (SOURCE_DATE_EPOCH)")
     args = ap.parse_args()
+    args.out = args.out.resolve()
     args.arch = None
     kinds = [k.strip() for k in args.only.split(",") if k.strip()]
     unknown = set(kinds) - set(KINDS)
@@ -48,7 +72,7 @@ def main() -> int:
         C.log("building the prebuilt loader files (make -s in ghostldr/native)")
         C.run(["make", "-s", "-C", C.REPO / "ghostldr/native"])
 
-    built = []
+    built = two_file_boot(args.out)
     if "macos" in kinds:
         built.append(build_macos.build(args))
     if "windows" in kinds:

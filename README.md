@@ -15,7 +15,8 @@ You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your o
 - **Bloodborne 1.09** (CUSA00900) reaches gameplay, with its large executable spread over several JIT buffers and no memory plan yet.
 - **OpenOrbis homebrew** runs ([details](docs/compatibility.md#homebrew)).
 - **An FTP server on the PS5** while a game runs, to put more games onto the drive in it ([docs/ftp.md](docs/ftp.md)).
-- **An ELF loader** without a game: send OpenOrbis or freestanding ELF payloads to TCP 9021 (`nc`), and their output comes back on the connection. Userland only, no kernel exploit ([docs/elfldr.md](docs/elfldr.md)).
+- **An ELF loader** without a game: send OpenOrbis or freestanding ELF payloads to it with `nc`, and their output comes back on the connection. Userland only, no kernel exploit ([docs/elfldr.md](docs/elfldr.md)).
+- **A boot with no computer:** two files sent with `nc` or a payload-sender app start a game or the ELF loader, with nothing on the computer serving files ([below](#boot-with-no-computer)).
 - **Other games** boot as far as their imports and memory allow.
 - **PS4 consoles** are experimental: Ghost's code runs on a 12.02 PS4, but SWRR's memory budget there is 2.5 GiB, so Ghost doesn't fit and stops before it starts. Games load from saved data there, not from a USB drive ([docs/ps4.md](docs/ps4.md)).
 - **Jak X instead of SWRR** (EU CUSA07992 1.04, with [UltraC0re](https://github.com/matem6/UltraC0re)) is experimental: Ghost plays there, in its PS4 Pro mode, from its own install in Jak X's save data ([docs/jakx.md](docs/jakx.md)).
@@ -53,6 +54,17 @@ python3 ghostldr.py install /path/to/CUSA11456/app0
 Then restart SWRR, start Luac0re again, and `python3 ghostldr.py boot`: with no game on a drive, it boots the installed ones.
 
 The computer's firewall must let Python receive on UDP 18194 and TCP 18195–18196.
+
+### Boot with no computer
+
+No Python, no tools, and nothing on the computer serving files during the boot: the release page also has `ghostldr.lua`, `ghostldr-ext.bin` and `ghostldr-elfldr.bin`. With Luac0re's loader listening, send two files with `nc` (or a payload-sender app), where `CONSOLE` is the PS5's address:
+
+```bash
+nc CONSOLE 9026 < ghostldr.lua
+nc CONSOLE 9021 < ghostldr-ext.bin
+```
+
+The first opens TCP 9021 on the PS5 and waits five minutes for the second; a jailbroken console's own ELF loader already has 9021, so there it opens 9022. The TV says which, with the PS5's address, in the dialog where Luac0re shows its own text, and then what happened. The second boots a game as `ghostldr.py boot` does: one on a USB drive in the PS5, else an installed one, with the game selector when there are several. Its log comes back on the same connection. Send `ghostldr-elfldr.bin` instead to start the [ELF loader](docs/elfldr.md). The three files must come from the same release. [docs/using-the-release.md](docs/using-the-release.md#boot-with-no-computer) has the details.
 
 ## Documentation
 

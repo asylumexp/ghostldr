@@ -4,6 +4,8 @@
  *
  * run.py serves the blob over TCP; ghostldr.lua connects a socket to it and
  * passes the socket, the blob's size and its CRC-32 in the boot context.
+ * The release's ghostldr.lua receives it in a bundle instead and passes its
+ * address (CTX_FLAG_BUNDLE).
  *
  *   ext_fetch      first thing in ghost_boot: read the blob into direct
  *                  memory and verify it.  The core's only NID -> name table
@@ -224,28 +226,38 @@ int ext_fetch(void)
 {
     struct boot_ctx *c = g_ctx;
     bool have = c->size >= __builtin_offsetof(struct boot_ctx, ext_crc) + 8;
-    int fd = have ? (int)(s64)c->ext_fd : -1;
+    s64 src = have ? (s64)c->ext_fd : -1;
+    int fd = (int)src;
     u64 size = have ? c->ext_size : 0;
-    if (fd < 0 || !size) {
+    if (src < 0 || !size) {
         logf("ext: no extension from the computer (socket %d, %lu bytes). build/ghostldr/ext.bin holds the "
              "NID table, so the boot stops here, before the title is touched: run.py serves it over TCP",
              fd, size);
         return -1;
     }
     c->ext_fd = (u64)-1; /* consumed */
+    g_blob_size = size;
+    /* a bundle (CTX_FLAG_BUNDLE): ghostldr.lua received the blob into
+     * flexible memory, which is the core's to unmap from here on */
+    bool mem = (c->flags & CTX_FLAG_BUNDLE) != 0;
+    if (mem)
+        g_blob = (u8 *)src, g_blob_flex = true;
     if (size < sizeof(struct ext_blob) || size > EXT_MAX_BLOB) {
         logf("ext: implausible size %lu", size);
-        K.close(fd);
+        if (mem)
+            ext_release();
+        else
+            K.close(fd);
         return -1;
     }
-    g_blob_size = size;
-    g_blob = blob_alloc(size);
+    if (!mem)
+        g_blob = blob_alloc(size);
     if (!g_blob) {
         logf("ext: no memory for %lu bytes", size);
         K.close(fd);
         return -1;
     }
-    u64 got = 0;
+    u64 got = mem ? size : 0;
     while (got < size) {
         u64 want = size - got < 0x100000 ? size - got : 0x100000;
         ssize_t n = K.read(fd, g_blob + got, want);
@@ -257,7 +269,8 @@ int ext_fetch(void)
         }
         got += (u64)n;
     }
-    K.close(fd);
+    if (!mem)
+        K.close(fd);
     u32 crc = crc32(g_blob, size);
     if (crc != (u32)c->ext_crc) {
         logf("ext: CRC-32 %08x, expected %08x: the blob is corrupt", crc, (u32)c->ext_crc);

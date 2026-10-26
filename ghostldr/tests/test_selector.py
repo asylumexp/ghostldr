@@ -264,11 +264,11 @@ class Selector(unittest.TestCase):
         self.assertGreater((self.shots / "meta-single.png").stat().st_size, 10000)
 
     # ---- the real module through the core's loader ----
-    def run_host(self, mode: str, shots: str = "") -> str:
+    def run_host(self, mode: str, shots: str = "", in_memory: bool = False) -> str:
         if not self.host:
             self.skipTest("no way to build and run x86-64 code here")
         saves = self.multi if mode == "multi" else self.approot if mode == "approot" else self.legacy
-        env = dict(os.environ, SEL_SHOTS=shots, SEL_PROFILES=str(self.bundle))
+        env = dict(os.environ, SEL_SHOTS=shots, SEL_PROFILES=str(self.bundle), SEL_BUNDLE="1" if in_memory else "")
         crc = hex(zlib.crc32(SEL_BIN.read_bytes()))
         p = subprocess.run([str(self.host), mode, str(SEL_BIN), crc, str(saves), str(self.shots)],
                            capture_output=True, text=True, env=env, timeout=300)
@@ -313,6 +313,17 @@ class Selector(unittest.TestCase):
     def test_bad_crc(self) -> None:
         out = self.run_host("badcrc")
         self.assertIn("sel: no usable selector", out)
+
+    def test_from_a_bundle(self) -> None:
+        """The release's ghostldr.lua passes the module in memory (CTX_FLAG_BUNDLE):
+        it runs as from the socket, and its memory goes back either way."""
+        out = self.run_host("multi", in_memory=True)
+        self.assertIn("Cross on title 2 (CUSA00003)", out)
+        self.assertIn("ok the bundle's module taken and unmapped", out)
+        out = self.run_host("skip", in_memory=True)
+        self.assertNotIn("selector:", out)
+        self.assertIn("ok the bundle's module taken and unmapped", out)
+        self.assertIn("sel: no usable selector", self.run_host("badcrc", in_memory=True))
 
 
 if __name__ == "__main__":

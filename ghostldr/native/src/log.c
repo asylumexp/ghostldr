@@ -1,20 +1,37 @@
-/* Logging: one UDP datagram per line to the host log server (Luac0re's
- * log_server.py protocol), mirrored to the kernel debug output when present. */
+/* Logging: one send per line, mirrored to the kernel debug output when present.
+ *
+ *  - ctx->log_addr set (run.py): a UDP datagram to that address, the host's
+ *    log server (Luac0re's log_server.py protocol);
+ *  - log_addr 0: log_fd is the TCP connection a bundle came on (the release's
+ *    ghostldr.lua, CTX_FLAG_BUNDLE), so whoever sent it with nc reads the log.
+ *    ghostldr.lua sets SO_NOSIGPIPE and a send timeout on it.  A send that
+ *    finds the connection gone (EPIPE, ECONNRESET, ENOTCONN, ECONNABORTED)
+ *    or the sender no longer reading (EAGAIN: the send timeout) ends it: the
+ *    core closes it and sets log_fd to -1.  An fd that is not a socket of
+ *    ours any more (EBADF, ENOTSOCK: the title closed it) is only let go,
+ *    never closed; EINTR is retried; anything else costs only that line.
+ *
+ * log_fd is read for each line, so ghostldr.lua can take the connection back
+ * (log_fd -1) once the core has returned. */
 #include "ghost.h"
-
-static int g_log_fd = -1;
-static const void *g_log_addr;
-
-void log_init(struct boot_ctx *ctx)
-{
-    g_log_fd = (int)ctx->log_fd;
-    g_log_addr = (const void *)ctx->log_addr;
-}
 
 static void emit(const char *line, size_t n)
 {
-    if (g_log_fd >= 0 && g_log_addr && K.sendto)
-        K.sendto(g_log_fd, line, n, 0, g_log_addr, 16);
+    struct boot_ctx *c = g_ctx;
+    u64 fd = c->log_fd;
+    const void *to = (const void *)c->log_addr;
+    for (int tries = 0; (s64)fd >= 0 && K.sendto && tries < 3; tries++) {
+        if (K.sendto((int)fd, line, n, 0, to, to ? 16 : 0) >= 0 || to)
+            break;
+        int e = K.errno_fn ? *K.errno_fn() : 0;
+        if (e == 4 /* EINTR */)
+            continue;
+        bool gone = e == 32 || e == 54 || e == 57 || e == 53 || e == 35, lost = e == 9 || e == 38;
+        if ((gone || lost) &&
+            __atomic_compare_exchange_n(&c->log_fd, &fd, (u64)-1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) && gone)
+            K.close((int)fd);
+        break;
+    }
     if (K.debug_out)
         K.debug_out(0, line);
 }

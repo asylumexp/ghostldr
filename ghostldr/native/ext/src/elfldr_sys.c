@@ -484,6 +484,16 @@ static u64 el_resolve(void *ctx, struct module *m, const char *name, bool weak, 
 
 /* ---- the JIT objects ---- */
 
+/* Whether names can be found for NIDs: the extension's NID table.  The ELF
+ * loader's own bundle (ghostldr-elfldr.bin) carries none: an ELF names its
+ * imports, which is all it needs. */
+static bool have_names(void)
+{
+    char nid[12];
+    compute_nid("sceKernelUsleep", nid);
+    return nid_to_name(nid) != NULL;
+}
+
 int el_init(char *why, unsigned n)
 {
     u64 st[8], en[8];
@@ -525,8 +535,9 @@ int el_init(char *why, unsigned n)
     size_t avail = 0, flex = 0;
     K.avail_direct(0, (off_t)K.direct_size(), 0x4000, &start, &avail);
     K.avail_flex(&flex);
-    logf("elfldr: %u JIT objects for payloads; free memory: %lu MiB direct (largest block), %lu MiB flexible", usable,
-         (u64)avail >> 20, (u64)flex >> 20);
+    logf("elfldr: %u JIT objects for payloads; free memory: %lu MiB direct (largest block), %lu MiB flexible%s",
+         usable, (u64)avail >> 20, (u64)flex >> 20,
+         have_names() ? "" : "; no NID table: ELFs only, not SELFs or OELFs");
     return 0;
 }
 
@@ -642,6 +653,12 @@ int el_load(const unsigned char *buf, unsigned long len, unsigned id, int conn, 
     int rc = -1;
     if (pl_parse(m, file, len, &p->info, info, n) != 0)
         goto out;
+    if (p->info.sce && !have_names()) { /* its imports are NIDs: SWRR's functions are found by name */
+        fmt(info, n, "a SELF or an OELF names its imports by NID only, and this ELF loader has no NID table "
+                     "(ghostldr-elfldr.bin leaves it out): send the ELF ld.lld wrote, before create-fself, or "
+                     "start the loader with run.py elfldr");
+        goto out;
+    }
     keep_libs(p);
     /* the smallest free JIT object its code fits, past the object's header */
     int best = -1;
