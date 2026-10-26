@@ -324,6 +324,11 @@ struct module {
     u8 fingerprint[20];                   /* DT_SCE_FINGERPRINT */
     u64 tls_offset;            /* static TLS: image at thread pointer - tls_offset (tls.c); 0: dynamic */
     struct bx_state *bx;       /* code in whole emulator JIT objects (bigexec.c); NULL: in the arena */
+    /* a payload of the ELF loader (ext/src/elfldr_sys.c, docs/elfldr.md):
+     * its threads' TLS blocks hold its own image only, and it is finished
+     * once none of them runs (tls.c) */
+    bool payload;
+    volatile s32 live_threads;
 };
 
 /* struct module.start_state */
@@ -520,6 +525,7 @@ int module_relocate(struct module *m);
 int module_finish(struct module *m);
 struct module *module_open(const char *path, bool is_main); /* read and parse; not in g_modules yet */
 void module_publish(struct module *m);                       /* handle, TLS id, append to g_modules */
+void module_unpublish(struct module *m);                     /* out of g_modules again (its struct stays valid) */
 struct module *module_load_runtime(const char *path, int *err); /* a title prx after boot (SCE error in *err) */
 int module_write_text(struct module *m);
 void stubs_flush(void);
@@ -556,6 +562,14 @@ int ghost_thread_start(void *real, void *thr, const void *attr, void *(*fn)(void
 bool module_has_tpoff(const struct module *m);
 void tls_thread_exit(void);   /* a title thread ends: its TLS blocks go back */
 u64 tls_thunk(u64 fn);        /* fn behind a stub that gives the calling thread its TLS block */
+/* ELF loader payloads (docs/elfldr.md): every thread's static TLS block is
+ * size bytes, whoever's thread it is; a thread started for owner (and the
+ * threads it starts) gets owner's image and counts in its live_threads */
+void tls_static_reserve(u64 size, u64 align);
+struct module *tls_owner(void); /* the payload the calling thread belongs to, or NULL */
+int payload_thread_start(struct module *owner, void *thr, const void *attr, void *(*fn)(void *), void *arg,
+                         const char *name);
+extern void (*g_payload_fault)(struct module *owner, int sig, u64 rip, u64 addr); /* crash.c: a payload thread faulted */
 void rpc_lock(void);          /* one user of the compiler-process RPC at a time (loader.c) */
 void rpc_unlock(void);
 void tls_ensure_thread(void);
@@ -590,6 +604,17 @@ struct bx_range {
 };
 u32 bx_code(const struct module *m, const struct bx_range **runs); /* its code runs (TLS patching) */
 bool bx_in_view(const struct module *m, u64 addr);                 /* executable: in one of its views */
+/* One of the emulator's JIT objects (home, size): the compiler's base
+ * descriptor of it (fd), an RX alias of it here (rx; mapped whole with
+ * sceKernelMmap MAP_FIXED, it shows the object anywhere) and where the
+ * compiler writes it (wr: its home).  jit_objects_find fills those of the
+ * objects in want (bit i: o[i]); 0, or -1 when some are missing. */
+struct jit_obj {
+    u64 home, size;
+    u64 wr;
+    int fd, rx;
+};
+int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 
 /* ---- runtime extension (ext.c; interface in ghost_api.h) ---- */
 #define CTX_FLAG_EXT_JIT 64 /* place the extension in a new JIT block (run.py --ext-jit) */
@@ -614,6 +639,10 @@ bool bx_in_view(const struct module *m, u64 addr);                 /* executable
 #define CTX_FLAG_JAKX 32768            /* UltraC0re in Jak X, not Luac0re in SWRR (ghostldr.lua) */
 #define CTX_FLAG_LIBRARY 262144        /* set by the core: app_root is a folder of title folders (the selector reads it) */
 #define CTX_FTP_PORT(flags) ((u32)((flags) >> 48)) /* the FTP server's TCP port (run.py --ftp-port; 0: none) */
+#define CTX_FLAG_ELFLDR 1048576 /* no title: serve the ELF loader (run.py elfldr, docs/elfldr.md) */
+#define CTX_ELFLDR_PORT(flags) ((u32)((flags) >> 32) & 0xFFFF) /* its TCP port (run.py elfldr --port) */
+int ghost_elfldr(void);   /* boot.c */
+int ext_elfldr(void);     /* ext.c: the extension's ELF loader; returns when told to quit */
 static inline bool is_ps4(void) { return (g_ctx->flags & CTX_FLAG_PS4) != 0; }
 static inline bool is_jakx(void) { return (g_ctx->flags & CTX_FLAG_JAKX) != 0; }
 

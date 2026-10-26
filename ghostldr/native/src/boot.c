@@ -26,6 +26,26 @@ static void *ghost_main_thread(void *unused)
     return NULL;
 }
 
+/* No title: the extension's ELF loader serves payloads until it is told to
+ * quit (docs/elfldr.md).  It needs the NID table and the extension's code,
+ * placed as for a title; then the call returns to Luac0re's loader with the
+ * extension's JIT block given back. */
+int ghost_elfldr(void)
+{
+    crash_install();
+    if (is_ps4()) {
+        logf("elfldr: a PS5 only (its executable memory comes from views of the emulator's JIT objects)");
+        return -9;
+    }
+    if (ext_fetch() != 0)
+        return -7;
+    int rc = arena_init() != 0 || ext_start() != 0 ? -8 : ext_elfldr();
+    g_payload_fault = NULL;
+    ext_abandon();
+    logf("elfldr: back to the Lua loader (%d)", rc);
+    return rc;
+}
+
 int ghost_boot(void)
 {
     const char *root = (const char *)g_ctx->app_root;

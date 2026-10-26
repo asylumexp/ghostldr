@@ -112,6 +112,20 @@ extern const struct ghost_api *G HIDDEN;
 #define appfs_register G->appfs_register
 #define gfs_use_saves G->gfs_use_saves
 #define jit_recv_fd G->jit_recv_fd
+#define module_parse G->module_parse
+#define resolve_import G->resolve_import
+#define module_publish G->module_publish
+#define module_unpublish G->module_unpublish
+#define unresolved_stub G->unresolved_stub
+#define stubs_flush G->stubs_flush
+#define rpc_lock G->rpc_lock
+#define rpc_unlock G->rpc_unlock
+#define tls_static_reserve G->tls_static_reserve
+#define tls_owner G->tls_owner
+#define payload_thread_start G->payload_thread_start
+#define arena_buffers G->arena_buffers
+#define jit_objects_find G->jit_objects_find
+#define g_payload_fault (*G->payload_fault)
 
 /* the extension's own tables (ext_main.c): the function registered for an
  * import of nid from lib (NULL: any library), and a library's policy */

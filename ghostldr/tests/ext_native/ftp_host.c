@@ -272,6 +272,7 @@ void fv_sclose(int fd)
 
 const char *fv_home(void) { return g_home; }
 
+#ifndef FTP_HOST_NO_MAIN /* elfldr_host.c takes the environment only */
 int main(int argc, char **argv)
 {
     if (argc < 3) {
@@ -303,3 +304,4 @@ int main(int argc, char **argv)
         ;
     return 0;
 }
+#endif

@@ -233,6 +233,11 @@ u64 stub_alloc_code(const u8 *code, u32 len)
 
 u64 unresolved_stub(const char *lib, const char *nid, const char *modname, s64 ret, bool denied)
 {
+    if (g_stubs && (g_ctx->flags & CTX_FLAG_ELFLDR)) /* one per import for all payloads: the area is small */
+        for (u32 i = 0; i < g_nstubs; i++)
+            if (!g_count_target[i] && g_stubs[i].ret == ret && g_stubs[i].denied == denied &&
+                strcmp(g_stubs[i].nid, nid) == 0 && strcmp(g_stubs[i].lib, lib) == 0)
+                return g_stub_base + i * STUB_SIZE;
     if (!stubs_ready())
         return 0;
     u32 idx = g_nstubs++;

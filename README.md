@@ -15,6 +15,7 @@ You need a PS5 with SWRR (US CUSA03474 or EU CUSA03492) and Luac0re 2.4b, your o
 - **Bloodborne 1.09** (CUSA00900) reaches gameplay, with its large executable spread over several JIT buffers and no memory plan yet.
 - **OpenOrbis homebrew** runs ([details](docs/compatibility.md#homebrew)).
 - **An FTP server on the PS5** while a game runs, to put more games onto the drive in it ([docs/ftp.md](docs/ftp.md)).
+- **An ELF loader** without a game: send OpenOrbis or freestanding ELF payloads to TCP 9021 (`nc`), and their output comes back on the connection. Userland only, no kernel exploit ([docs/elfldr.md](docs/elfldr.md)).
 - **Other games** boot as far as their imports and memory allow.
 - **PS4 consoles** are experimental: Ghost's code runs on a 12.02 PS4, but SWRR's memory budget there is 2.5 GiB, so Ghost doesn't fit and stops before it starts. Games load from saved data there, not from a USB drive ([docs/ps4.md](docs/ps4.md)).
 - **Jak X instead of SWRR** (EU CUSA07992 1.04, with [UltraC0re](https://github.com/matem6/UltraC0re)) is experimental: Ghost plays there, in its PS4 Pro mode, from its own install in Jak X's save data ([docs/jakx.md](docs/jakx.md)).
@@ -65,6 +66,7 @@ The computer's firewall must let Python receive on UDP 18194 and TCP 18195–181
 - [Compatibility](docs/compatibility.md): other games, homebrew, profiles, reading the log.
 - [Game selector](docs/selector.md): the picker for several games, on a drive or installed.
 - [FTP server](docs/ftp.md): the console's files over FTP while a title runs.
+- [ELF loader](docs/elfldr.md): run ELF payloads in SWRR without a game, and build them.
 - [Web manager](docs/manager.md): save backup and restore from a browser.
 - [Host tooling](docs/host-tooling.md): `run.py doctor`, the boot preflight, the stub report.
 - [ghostfs](docs/ghostfs-catalogue.md): container names and the title catalogue.

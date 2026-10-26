@@ -32,6 +32,7 @@ struct gthread {
     void **dtv;           /* blocks by module id - 0x1000 */
     u32 ndtv;
     struct gthread *next; /* free list */
+    struct module *owner; /* the ELF loader's payload whose thread it is, or NULL */
 };
 
 static struct module *g_main;
@@ -147,7 +148,9 @@ COLD static struct gthread *block_get(void)
     return gt;
 }
 
-COLD static struct gthread *thread_block_new(void)
+/* A payload's thread gets that payload's image only (payloads share the
+ * static block's offsets); any other thread every image but payloads'. */
+COLD static struct gthread *thread_block_new(struct module *owner)
 {
     struct gthread *gt = block_get();
     if (!gt)
@@ -155,8 +158,9 @@ COLD static struct gthread *thread_block_new(void)
     u8 *gt_addr = (u8 *)gt;
     memset(gt_addr - g_static_size, 0, g_static_size); /* a reused block keeps its last owner's values */
     for (struct module *m = g_modules; m; m = m->next)
-        if (m->tls_offset && m->tls_filesz)
+        if (m->tls_offset && m->tls_filesz && (owner ? m == owner : !m->payload))
             memcpy(gt_addr - m->tls_offset, (void *)(m->base + m->tls_vaddr), m->tls_filesz);
+    gt->owner = owner;
     if (gt->dtv)
         memset(gt->dtv, 0, gt->ndtv * sizeof(*gt->dtv));
     gt->magic = GTHREAD_MAGIC;
@@ -164,14 +168,30 @@ COLD static struct gthread *thread_block_new(void)
     return gt;
 }
 
-void tls_ensure_thread(void)
+static void tls_ensure_owned(struct module *owner)
 {
     u64 cur = fs_slot_get();
     if (cur && is_ours(cur))
         return;
-    struct gthread *gt = thread_block_new();
+    struct gthread *gt = thread_block_new(owner);
     if (gt)
         fs_slot_set((u64)gt);
+}
+
+void tls_ensure_thread(void) { tls_ensure_owned(NULL); }
+
+struct module *tls_owner(void)
+{
+    u64 cur = fs_slot_get();
+    return cur && is_ours(cur) ? ((struct gthread *)cur)->owner : NULL;
+}
+
+/* the ELF loader (no title): every block has room for size bytes of TLS */
+COLD void tls_static_reserve(u64 size, u64 align)
+{
+    g_static_align = align < 16 ? 16 : align;
+    g_static_size = ALIGN_UP(size, g_static_align);
+    g_host_tls_get_addr = host_dlsym((u32)g_ctx->libkernel_handle, "__tls_get_addr");
 }
 
 /* A title thread ends (its function returned, or pthread_exit): its blocks
@@ -195,11 +215,15 @@ COLD void tls_thread_exit(void)
             g_dyn_free[slot] = b;
         }
     }
+    struct module *owner = gt->owner;
     gt->self = NULL;
+    gt->owner = NULL;
     gt->next = g_free;
     g_free = gt;
     spin_unlock(&g_lock);
     fs_slot_set(0);
+    if (owner) /* the payload is finished once this reaches 0 (ext/src/elfldr_sys.c) */
+        __atomic_fetch_sub(&owner->live_threads, 1, __ATOMIC_RELEASE);
 }
 
 struct tls_index {
@@ -276,6 +300,7 @@ void *tls_get_addr(void *arg)
 struct tramp {
     void *(*fn)(void *);
     void *arg;
+    struct module *owner;
 };
 
 /* the title libc's thread-exit hook (_sceKernelSetThreadDtors, from its
@@ -286,11 +311,14 @@ void tls_set_thread_dtors(void (*fn)(void)) { g_thread_dtors = fn; }
 __attribute__((force_align_arg_pointer)) static void *thread_tramp(void *p)
 {
     struct tramp t = *(struct tramp *)p;
-    tls_ensure_thread();
+    tls_ensure_owned(t.owner);
+    bool counted = t.owner && tls_owner() == t.owner; /* else no block: tls_thread_exit cannot count it */
     void *r = t.fn(t.arg);
     if (g_thread_dtors)
         g_thread_dtors();
     tls_thread_exit();
+    if (t.owner && !counted)
+        __atomic_fetch_sub(&t.owner->live_threads, 1, __ATOMIC_RELEASE);
     return r;
 }
 
@@ -370,14 +398,20 @@ static volatile u32 g_nthreads;
 /* A title thread through real, a host creation function with
  * scePthreadCreate's arguments (POSIX pthread_create ignores the name):
  * it starts in the trampoline, which gives it its TLS block. */
-COLD int ghost_thread_start(void *real, void *thr, const void *attr, void *(*fn)(void *), void *arg, const char *name)
+COLD static int thread_start(struct module *owner, void *real, void *thr, const void *attr, void *(*fn)(void *),
+                             void *arg, const char *name)
 {
     struct tramp *t = arena_alloc(sizeof(*t));
     t->fn = fn;
     t->arg = arg;
+    t->owner = owner;
+    if (owner)
+        __atomic_fetch_add(&owner->live_threads, 1, __ATOMIC_ACQ_REL);
     int rc = ((int (*)(void *, const void *, void *(*)(void *), void *, const char *))real)(thr, attr, thread_tramp,
                                                                                           t, name);
     if (rc != 0) {
+        if (owner)
+            __atomic_fetch_sub(&owner->live_threads, 1, __ATOMIC_RELEASE);
         logf("thread create %s failed %x", name ? name : "?", rc);
         return rc;
     }
@@ -387,6 +421,18 @@ COLD int ghost_thread_start(void *real, void *thr, const void *attr, void *(*fn)
         g_title_threads[i].name = arena_strdup(name ? name : "?");
     }
     return rc;
+}
+
+/* the creating thread's payload owns the new one */
+int ghost_thread_start(void *real, void *thr, const void *attr, void *(*fn)(void *), void *arg, const char *name)
+{
+    return thread_start(tls_owner(), real, thr, attr, fn, arg, name);
+}
+
+int payload_thread_start(struct module *owner, void *thr, const void *attr, void *(*fn)(void *), void *arg,
+                         const char *name)
+{
+    return thread_start(owner, (void *)K.pthread_create, thr, attr, fn, arg, name);
 }
 
 int ghost_thread_create(void *thr, const void *attr, void *(*fn)(void *), void *arg, const char *name)

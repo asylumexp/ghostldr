@@ -47,16 +47,9 @@
 /* compiler-visible out parameters (jitrpc.c's private scratch: 0x300-0x30f is free) */
 #define OUT(off) (g_ctx->oob_scratch + 0x70000 + 0x300 + (off))
 
-struct bx_obj {
-    u64 home, size;
-    u64 wr; /* where the compiler writes it (its RW alias, at home) */
-    int fd; /* the compiler's base descriptor */
-    int rx; /* an RX alias, here */
-};
-
 struct bx_state {
     struct bx_layout lay;
-    struct bx_obj obj[BX_MAX_OBJS]; /* the candidates, largest first */
+    struct jit_obj obj[BX_MAX_OBJS]; /* the candidates, largest first */
     u32 nobj, nruns, nforbid;
     struct bx_range runs[BX_MAX_RUNS], forbid[BX_MAX_FORBID];
 };
@@ -75,16 +68,15 @@ COLD static void close_compiler(int fd)
         jit_call(g_ctx->jit_syscall, SYS_close, (u64)fd, 0, 0, 0, 0, 0);
 }
 
-/* Each used object's base descriptor in the compiler (it takes an RW alias;
- * mapped, that lands at the object's home: which object it is), and an RX
- * alias of it here.  Only objects of a used size get an RW alias; one that
- * turns out not to be used stays mapped at its home in the compiler, where
- * the compiler maps that object anyway. */
-COLD static int find_objects(struct bx_state *s)
+/* Each wanted object's base descriptor in the compiler (it takes an RW
+ * alias; mapped, that lands at the object's home: which object it is), and
+ * an RX alias of it here.  Only objects of a wanted size get an RW alias; one
+ * that turns out not to be wanted stays mapped at its home in the compiler,
+ * where the compiler maps that object anyway.  Also the ELF loader's
+ * (ext/src/elfldr_sys.c). */
+COLD int jit_objects_find(struct jit_obj *o, u32 n, u32 want)
 {
-    u32 want = 0, have = 0;
-    for (u32 v = 0; v < s->lay.nviews; v++)
-        want |= 1u << s->lay.view[v].obj;
+    u32 have = 0;
     for (int fd = 0; fd < 1024 && have != want; fd++) {
         *(volatile u64 *)OUT(0) = (u64)-1;
         if ((int)jit_call(g_ctx->jit_shm_alias, 0, (u64)fd, PROT_READ | PROT_EXEC, OUT(0), 0, 0, 0) != 0)
@@ -94,8 +86,8 @@ COLD static int find_objects(struct bx_state *s)
         u8 st[0x78];
         u64 size = rx >= 0 && K.fstat(rx, st) == 0 ? *(u64 *)(st + 0x48) : 0, at = 0;
         bool sized = false;
-        for (u32 i = 0; i < s->nobj; i++)
-            sized |= ((want & ~have) >> i & 1) && s->obj[i].size == size;
+        for (u32 i = 0; i < n; i++)
+            sized |= ((want & ~have) >> i & 1) && o[i].size == size;
         if (sized) {
             *(volatile u64 *)OUT(0) = (u64)-1;
             if ((int)jit_call(g_ctx->jit_shm_alias, 0, (u64)fd, PROT_READ | PROT_WRITE, OUT(0), 0, 0, 0) == 0) {
@@ -104,8 +96,8 @@ COLD static int find_objects(struct bx_state *s)
                 if ((int)jit_call(g_ctx->jit_shm_map, 0, (u64)rw_c, PROT_READ | PROT_WRITE, OUT(8), 0, 0, 0) == 0)
                     at = *(volatile u64 *)OUT(8);
             }
-            for (u32 i = 0; i < s->nobj; i++)
-                if (((want & ~have) >> i & 1) && s->obj[i].size == size && s->obj[i].home == at)
+            for (u32 i = 0; i < n; i++)
+                if (((want & ~have) >> i & 1) && o[i].size == size && o[i].home == at)
                     j = (int)i;
         }
         close_compiler(rw_c); /* its mapping stays */
@@ -114,7 +106,7 @@ COLD static int find_objects(struct bx_state *s)
                 K.close(rx);
             continue;
         }
-        s->obj[j].fd = fd, s->obj[j].rx = rx, s->obj[j].wr = at;
+        o[j].fd = fd, o[j].rx = rx, o[j].wr = at;
         have |= 1u << j;
         logf("bigexec: compiler descriptor %d is the %lu MiB JIT object at %lx (RX alias here: %d)", fd, size / MiB,
              at, rx);
@@ -122,6 +114,14 @@ COLD static int find_objects(struct bx_state *s)
     if (have != want)
         logf("bigexec: only %x of the JIT objects %x found among the compiler's descriptors", have, want);
     return have == want ? 0 : -1;
+}
+
+COLD static int find_objects(struct bx_state *s)
+{
+    u32 want = 0;
+    for (u32 v = 0; v < s->lay.nviews; v++)
+        want |= 1u << s->lay.view[v].obj;
+    return jit_objects_find(s->obj, s->nobj, want);
 }
 
 /* addr is in one of the module's JIT views: the only executable part of it */
@@ -174,7 +174,7 @@ COLD int bx_prepare(void)
         u32 at = s->nobj++;
         for (; at && s->obj[at - 1].size < en[i] - st[i]; at--)
             s->obj[at] = s->obj[at - 1];
-        s->obj[at] = (struct bx_obj){st[i], en[i] - st[i], 0, -1, -1};
+        s->obj[at] = (struct jit_obj){st[i], en[i] - st[i], 0, -1, -1};
     }
     for (u32 i = 0; i < s->nobj; i++)
         sizes[i] = s->obj[i].size, total += sizes[i];
@@ -188,7 +188,7 @@ COLD int bx_prepare(void)
         return -1;
     }
     for (u32 v = 0; v < s->lay.nviews; v++) {
-        const struct bx_obj *o = &s->obj[s->lay.view[v].obj];
+        const struct jit_obj *o = &s->obj[s->lay.view[v].obj];
         logf("bigexec: %s: +%lx-+%lx executable: the %lu MiB JIT object at %lx", big->name, s->lay.view[v].off,
              s->lay.view[v].off + (s64)o->size, o->size / MiB, o->home);
     }
@@ -253,7 +253,7 @@ COLD int bx_place(struct module *m)
     }
     m->base = (u64)va - (u64)lo;
     for (u32 v = 0; v < s->lay.nviews; v++) {
-        const struct bx_obj *o = &s->obj[s->lay.view[v].obj];
+        const struct jit_obj *o = &s->obj[s->lay.view[v].obj];
         u64 at = m->base + (u64)s->lay.view[v].off;
         void *res = NULL;
         rc = K.mmap((void *)at, o->size, PROT_READ | PROT_EXEC, MAP_SHARED | MAP_FIXED, o->rx, 0, &res);
@@ -307,7 +307,7 @@ COLD int bx_write_text(struct module *m, const u8 *text)
     struct bx_state *s = m->bx;
     s64 end = (s64)m->text_size;
     for (u32 v = 0; v < s->lay.nviews; v++) {
-        const struct bx_obj *o = &s->obj[s->lay.view[v].obj];
+        const struct jit_obj *o = &s->obj[s->lay.view[v].obj];
         /* [off, a) before the segment, [a, b) in it, [b, top) after it */
         s64 off = s->lay.view[v].off, top = off + (s64)o->size, a = off < 0 ? 0 : off, b = top < end ? top : end;
         if (a > top)

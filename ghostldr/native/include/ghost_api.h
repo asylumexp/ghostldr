@@ -141,6 +141,27 @@ struct ghost_api {
      * (jitrpc.c; < 0 on errors).  The compiler keeps its own copy.  Like
      * jit_call, only from the boot thread: the calls share one channel. */
     int (*jit_recv_fd)(int compiler_fd);
+    /* the ELF loader (ext/src/elfldr_sys.c, docs/elfldr.md): Orbis modules
+     * parsed and their imports resolved as a title's are, published while
+     * they run; the RPC lock around every compiler call once payloads run
+     * (their sockets come from the compiler too); payload TLS and threads
+     * (tls.c); the emulator's JIT objects (arena.c, bigexec.c); and the
+     * crash handler's hook for a payload thread that faults (crash.c) */
+    int (*module_parse)(struct module *m, u8 *file, u64 size);
+    u64 (*resolve_import)(struct module *m, const char *encoded, bool weak, int kind);
+    void (*module_publish)(struct module *m);
+    void (*module_unpublish)(struct module *m);
+    u64 (*unresolved_stub)(const char *lib, const char *nid, const char *modname, s64 ret, bool denied);
+    void (*stubs_flush)(void);
+    void (*rpc_lock)(void);
+    void (*rpc_unlock)(void);
+    void (*tls_static_reserve)(u64 size, u64 align);
+    struct module *(*tls_owner)(void);
+    int (*payload_thread_start)(struct module *owner, void *thr, const void *attr, void *(*fn)(void *), void *arg,
+                                const char *name);
+    u32 (*arena_buffers)(u64 *start, u64 *end, u32 max);
+    int (*jit_objects_find)(struct jit_obj *o, u32 n, u32 want);
+    void (**payload_fault)(struct module *owner, int sig, u64 rip, u64 addr);
 };
 
 /* A provider of the title's files other than ghostfs: the extension's usbfs
@@ -230,6 +251,10 @@ struct ext_exports {
      * stop short (the FTP server starts here: ftp_sys.c).  The core checks
      * size before calling it. */
     void (*title_starting)(void);
+    /* No title (ctx CTX_FLAG_ELFLDR): the ELF loader serves payloads on the
+     * boot thread until a client tells it to quit (ext/src/elfldr.c).  The
+     * core checks size before calling it. */
+    int (*elfldr_main)(void);
 };
 
 typedef const struct ext_exports *(*ext_init_fn)(const struct ghost_api *api);

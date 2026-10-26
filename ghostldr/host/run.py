@@ -6,6 +6,7 @@ answers (--loader-port to choose).
     python3 ghostldr/host/run.py probe            # core probe (flags=1)
     python3 ghostldr/host/run.py probe --diag     # PS4 diagnostic: boots nothing (docs/ps4.md)
     python3 ghostldr/host/run.py boot             # load and start the title
+    python3 ghostldr/host/run.py elfldr           # no title: run ELF payloads sent to TCP 9021
     python3 ghostldr/host/run.py logs             # only listen for UDP logs
     python3 ghostldr/host/run.py doctor           # check this host + console
 
@@ -26,6 +27,11 @@ While the title runs, the console serves FTP on TCP 1212 (--ftp-port; 0:
 none; docs/ftp.md): any FTP client, any user and password.  Clients start on
 the USB drive when one is plugged in, so titles can go onto it over the
 network while a game is running.
+
+run.py elfldr boots no title: the console serves an ELF loader on TCP 9021
+(--elfldr-port) until a client sends "quit" (docs/elfldr.md).  Send payloads
+with `nc PS5 9021 < payload.elf` or ghostldr/host/elf_send.py; their output
+comes back on the same connection.
 
 A boot first runs a preflight coverage check when a local app0 and the
 NID name table are staged: if imports would bind to stubs (which return
@@ -63,6 +69,8 @@ LOG_PORT = 18194
 EXT_PORT = LOG_PORT + 1   # TCP
 SEL_PORT = LOG_PORT + 2   # TCP
 FTP_PORT = 1212           # the console's FTP server (TCP; docs/ftp.md); not ftpsrv's 2121
+ELFLDR_PORT = 9021        # the console's ELF loader (TCP; docs/elfldr.md)
+CTX_FLAG_ELFLDR = 1 << 20  # native/include/ghost.h; the port goes in bits 32-47
 LUA_MAX = 500 * 1024      # Luac0re's and UltraC0re's remote Lua loaders read at most this much
 NAMES = ROOT / "build/nid/known_names.txt"
 
@@ -454,9 +462,57 @@ def doctor(args) -> int:
     return 1 if any(s == "FAIL" for s, _, _ in rows) else 0
 
 
+def elfldr(args, listener: LogListener | None) -> int:
+    """No title: the console serves the ELF loader (docs/elfldr.md) until a
+    client sends "quit"; this keeps showing its log until Ctrl+C."""
+    if args.no_build:
+        missing = [p.relative_to(ROOT) for p in (CORE, LAYOUT, EXT) if not p.exists()]
+        if missing:
+            raise SystemExit(f"--no-build needs {', '.join(map(str, missing))}")
+    else:
+        build_core()
+    ext = EXT.read_bytes()
+    ext_server = ExtServer(ext)
+    ext_server.start()
+    print(f"serving the extension ({len(ext)} bytes) on TCP {EXT_PORT}", flush=True)
+    flags = CTX_FLAG_ELFLDR | (args.elfldr_port << 32)
+    payload = build_payload(flags, local_ip_for(args.host), "/app0", {}, ext)
+    try:   # a jailbroken console's own elfldr (ps5-payload-dev) has 9021 already
+        socket.create_connection((args.host, args.elfldr_port), timeout=2).close()
+        raise SystemExit(f"something already listens on {args.host}:{args.elfldr_port} (a jailbroken console's "
+                         f"elfldr?): pick another port with --elfldr-port")
+    except OSError:
+        pass
+    port = args.loader_port or loader_port(args.host)
+    if LOADERS.get(port) != "Luac0re":
+        raise SystemExit(f"elfldr needs Luac0re's loader in SWRR (TCP 9026); {args.host}:{port} is "
+                         f"{LOADERS.get(port, 'another loader')}")
+    print(f"sending {len(payload)} bytes of Lua to {args.host}:{port}", flush=True)
+    send_lua(args.host, payload, port)
+    if not ext_server.sent.wait(60):
+        print(f"extension: the console did not fetch it (is TCP {EXT_PORT} open in this computer's firewall?)",
+              flush=True)
+    deadline = time.time() + 60
+    while listener and time.time() < deadline and not any("elfldr: listening" in ln or "elfldr: back to" in ln
+                                                           for ln in listener.lines):
+        time.sleep(0.5)
+    print(f"send payloads: nc {args.host} {args.elfldr_port} < payload.elf   "
+          f"(or: python3 ghostldr/host/elf_send.py payload.elf); \"quit\" stops it", flush=True)
+    if listener:
+        try:
+            if args.wait is None:
+                while True:
+                    time.sleep(3600)
+            time.sleep(args.wait)
+        except KeyboardInterrupt:
+            pass
+        listener.stop.set()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["probe", "boot", "logs", "lua", "doctor"])
+    parser.add_argument("mode", choices=["probe", "boot", "elfldr", "logs", "lua", "doctor"])
     parser.add_argument("--no-build", action="store_true",
                         help="use the prebuilt core in build/ghostldr (from a release) instead of running make")
     parser.add_argument("--keep-host-memory", action="store_true",
@@ -524,6 +580,8 @@ def main() -> int:
     parser.add_argument("--ftp-port", type=int, default=FTP_PORT,
                         help=f"the console's FTP server while the title runs (default {FTP_PORT}; 0: none; "
                              "docs/ftp.md)")
+    parser.add_argument("--elfldr-port", type=int, default=ELFLDR_PORT,
+                        help=f"elfldr: the console's TCP port for payloads (default {ELFLDR_PORT}; docs/elfldr.md)")
     parser.add_argument("--file", type=Path, help="raw Lua file for mode=lua")
     parser.add_argument("--loader-port", type=int, default=0,
                         help="the console's Lua loader: 9026 Luac0re (SWRR), 8888 UltraC0re (Jak X); "
@@ -532,6 +590,8 @@ def main() -> int:
     args = parser.parse_args()
     if not 0 <= args.ftp_port <= 65535:
         raise SystemExit(f"--ftp-port {args.ftp_port}: a TCP port, or 0 for no FTP server")
+    if not 0 < args.elfldr_port <= 65535:
+        raise SystemExit(f"--elfldr-port {args.elfldr_port}: a TCP port")
     if args.diag and args.mode != "probe":
         raise SystemExit("--diag goes with probe: run.py probe --diag")
     if args.app_root.startswith("usb:") and not args.app_root.startswith("usb:/"):
@@ -547,6 +607,8 @@ def main() -> int:
         listener.start()
     else:
         print(f"recorder (pid {recorder}) is logging to build/ghostldr/run.log", flush=True)
+    if args.mode == "elfldr":
+        return elfldr(args, listener)
     drive_titles = usb_titles(args.app_root, args.usb_drive)
     if args.mode in ("probe", "boot"):
         if args.mode == "boot":

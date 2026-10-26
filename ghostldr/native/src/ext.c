@@ -464,6 +464,17 @@ int ext_start(void)
     return 0;
 }
 
+/* the ELF loader (ext/src/elfldr.c): runs until a client tells it to quit */
+int ext_elfldr(void)
+{
+    if (!g_exp || g_exp->size < __builtin_offsetof(struct ext_exports, elfldr_main) + sizeof(void *) ||
+        !g_exp->elfldr_main) {
+        logf("elfldr: this extension has no ELF loader");
+        return -10;
+    }
+    return g_exp->elfldr_main();
+}
+
 void ext_boot_done(void)
 {
     logf("ext: %u imports bound to the extension; NID table freed (%lu KiB), %u names kept for run-time loads",

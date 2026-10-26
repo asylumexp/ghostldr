@@ -24,6 +24,7 @@ A map of the repository, for reading or changing the code. To run ghostldr, star
 - **ghostfs:** serves the chosen title's `/app0` from SWRR's save containers ([ghostfs-catalogue.md](ghostfs-catalogue.md)).
 - **USB drives and folders of titles:** `--app-root usb:/ghostldr` (or a dev folder of `<TITLE>/app0` folders). The extension decides before the title's modules load (`ext/src/approot.c`): the system's AutoMounter mounts the drive into SWRR's sandbox, and the title's folder there becomes `/app0` (read-write) ([usb.md](usb.md)).
 - **FTP server:** while a title runs, the extension serves FTP on TCP 1212 (`ext/src/ftp.c`, `ftp_sys.c`), starting clients on the USB drive ([ftp.md](ftp.md)).
+- **ELF loader:** with no title (`run.py elfldr`), the extension runs ELF payloads sent to TCP 9021, each from a view of one of the emulator's JIT objects (`ext/src/elfldr.c`, `elfldr_sys.c`, `payload.c`; [elfldr.md](elfldr.md)).
 - **Game selector:** loads, runs and clears the selector module before the title (`sel.c`).
 - **Diagnostics:** a crash handler and watchdog, and a PS4 diagnostic (`run.py probe --diag`, [ps4.md](ps4.md)).
 
@@ -31,7 +32,7 @@ A map of the repository, for reading or changing the code. To run ghostldr, star
 
 In `ghostldr/host/`:
 
-- **`run.py`:** build the core, send it, and log the run. `run.py doctor` checks the setup ([host-tooling.md](host-tooling.md)).
+- **`run.py`:** build the core, send it, and log the run. `run.py doctor` checks the setup ([host-tooling.md](host-tooling.md)). `run.py elfldr` starts the ELF loader instead of a title, and **`elf_send.py`** sends it a payload and shows its output ([elfldr.md](elfldr.md)).
 - **`gfs_pack.py`, `gfs_install.py`:** lay out and install titles side by side, checking free space and resuming interrupted installs (`--list`, `--remove TITLE`). `gfs_pack.py --usb DRIVE` puts a title on a USB drive instead.
 - **`usb_drive.py`:** list, check and remove the titles on a USB drive, mounted on the computer or plugged into the console (through ghostldr's FTP server, or a jailbroken PS5's) ([usb.md](usb.md)).
 - **`profiles.py`:** check and inspect title profiles. **`capture_order.py`:** turn a boot log into a title's file open order.
@@ -62,9 +63,10 @@ They run offline:
 - the homebrew families, built for the computer;
 - the app roots against a fake core and a fake libSceUsbStorage; the selector's library listing; the drive tools, also through a fake FTP server; the FTP server built for the computer and driven by real clients (`test_ftp.py`, [ftp.md](ftp.md#tests)); the optional USB storage stack (`make USB_RAW=1`) against exFAT, FAT32 and FAT16 images made with macOS's tools, read raw and through a fake USB drive that misbehaves on purpose (`test_usb.py`, [usb.md](usb.md#tests));
 - the import report against a synthetic title;
+- the ELF loader: its payload formats, relocations and refusals, and its service over real sockets with a fake loader (`test_elfldr.py`, [elfldr.md](elfldr.md#tests));
 - the game selector: screenshots of its UI, and the built `selector.bin` against a fake console.
 
-`ghostldr/tests/homebrew/` is a small test homebrew; building it needs the OpenOrbis toolchain.
+`ghostldr/tests/homebrew/` is a small test homebrew; building it needs the OpenOrbis toolchain. `ghostldr/tests/elfldr/` holds the ELF loader's sample payloads.
 
 The build doesn't need a game dump. With your CUSA11456 v2.18 dump in `build/ghost/app0/` (git ignores it), `ghostldr/tools/check_ext.py` also checks that the extension resolves its imports as before.
 
