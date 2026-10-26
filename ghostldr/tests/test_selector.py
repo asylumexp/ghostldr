@@ -226,6 +226,16 @@ class Selector(unittest.TestCase):
         for name in ("home", "moving", "fallbacks", "cjk", "toast", "info", "launching"):
             self.assertGreater((self.shots / f"preview-{name}.png").stat().st_size, 10000, name)
 
+    def test_preview_usb_games(self) -> None:
+        """Games on a USB drive: a second copy's folder and note, a folder that can't start and why."""
+        p = subprocess.run([str(self.preview), "--font", str(FONT), "--out", str(self.shots), "--scene", "usb",
+                            "--usb", "--prefix", "preview-", "--verify"], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertRegex(p.stderr, r"verify: 0 of \d+ partial frames differ")
+        self.assertNotIn("boot title", p.stderr)                       # Cross on a folder that can't start
+        for name in ("usb-copy", "usb-bad", "usb-why", "usb-bad-info"):
+            self.assertGreater((self.shots / f"preview-{name}.png").stat().st_size, 10000, name)
+
     def test_meta_art(self) -> None:
         """A meta.bin from gfs_meta.py, read and decoded by the module's code."""
         sys.path.insert(0, str(ROOT / "ghostldr/host"))

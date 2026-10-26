@@ -14,6 +14,7 @@ int fmt(char *buf, size_t size, const char *fmt, ...);
  * where its art is once its index has been read. */
 #define CAT_INCOMPLETE 1u
 #define CAT_LEGACY 2u
+#define CAT_BAD 4u /* a library's game that can't be booted (note: why) */
 enum { FILE_ICON, FILE_PIC, FILE_SFO, FILE_PIC0, NFILES };
 #define NAME_SFO 1      /* where a title's display name came from (docs/selector.md, "Names") */
 #define NAME_PROFILE 2
@@ -36,6 +37,10 @@ struct cat_title {
     u8 indexed; /* 0 not yet, 1 read, 2 failed */
     u8 meta_state; /* <prefix>META: 0 not read yet, 1 read (meta), 2 none */
     struct meta_info meta;
+    /* a library's game (struct lib_title): its app0, its folder's length, a note */
+    char path[256];
+    u32 dir_len;
+    char note[96];
 };
 
 struct sysfont;
@@ -53,7 +58,8 @@ struct plat {
     struct cat_title *cat;
     int ncat;
     int ghostfs;          /* titles in save containers; else one title at root */
-    int library;          /* root is a folder of title folders, <ID>/app0 (docs/usb.md) */
+    int library;          /* root is a folder of games: lib lists them (docs/usb.md) */
+    const struct lib_title *lib;
     int catalogue;        /* GFSCATALOG present; else the legacy index */
     char legacy[16];      /* GFSINDEX or GHOSTIDX */
     char root[256];

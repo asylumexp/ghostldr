@@ -4,7 +4,7 @@ While a title runs, ghostldr serves FTP from inside SWRR on TCP 1212. It needs n
 
 ## Connecting
 
-Use any FTP client in passive mode, the usual default: FileZilla, WinSCP, Cyberduck, `curl`, and ghostldr's own `gfs_pack.py --usb ftp://...` and `usb_drive.py`. Python's `ftplib`, `curl` and ghostldr's tools were used to test it.
+Use any FTP client in passive mode, the usual default: FileZilla, WinSCP, Cyberduck, `curl`, and ghostldr's own `ghostldr.py copy`/`check` (`ps5` or `ftp://...`), `gfs_pack.py --usb ftp://...` and `usb_drive.py`. Python's `ftplib`, `curl` and ghostldr's tools were used to test it.
 
 | Setting | Value |
 |---|---|
@@ -44,14 +44,14 @@ The drive is read-write, through the PS5's own exFAT (or FAT32) driver: upload, 
 With a title running from anywhere (a USB drive or SWRR's save containers), from the computer:
 
 ```bash
-python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0 --usb ftp://CONSOLE:1212/ghostldr_usb
-python3 ghostldr/host/usb_drive.py list ftp://CONSOLE:1212/ghostldr_usb
+python3 ghostldr.py copy /path/to/CUSA12345/app0 ps5
+python3 ghostldr.py check ps5
 ```
 
-It sends 8 files at once over 8 connections (`--jobs`). Then restart SWRR and boot the new title from the drive ([usb.md](usb.md)):
+`ps5` is `ftp://<the PS5>:1212/ghostldr_usb`; `--folder "My Games/New Game"` puts the game in any folder on the drive. It sends 8 files at once over 8 connections (`--jobs`), then checks the copy. `check` lists the games the PS5 will find on the drive. Then restart SWRR and boot the new title from the drive ([usb.md](usb.md)):
 
 ```bash
-python3 ghostldr/host/run.py boot --app-root usb:/ghostldr --title CUSA12345
+python3 ghostldr.py boot CUSA12345
 ```
 
 ## How fast
@@ -66,7 +66,7 @@ Measured on a stock 13.60 PS5 with Ghost of Tsushima running from the drive (a U
 
 - **The network sets the pace.** Writing 256 MiB to the drive took 1.4 s of a 10 s upload, and reading it 0.2 s of a download. Downloads grow with connections because each connection waits for the network round trip; a faster network does better.
 - **A whole title:** PS4-Xplorer (79 files, 70 MiB) went on in 4 s with `gfs_pack.py --usb`, against 12 s through a jailbroken console's ftpsrv.
-- **Big folders are slow to add files to**, whichever server is used: the console's exFAT adds files to a folder of 20,000 entries at about 10 a second ([usb.md](usb.md#putting-titles-on-a-drive)).
+- **Big folders are slow to add files to**, whichever server is used: the console's exFAT adds files to a folder of 20,000 entries at about 10 a second ([usb.md](usb.md#copying-games-onto-the-drive)).
 
 ## Options
 

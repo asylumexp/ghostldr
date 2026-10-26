@@ -26,49 +26,45 @@ Download the [latest release](https://github.com/asylumexp/ghostldr/releases/lat
 
 Prefer not to use a terminal? The [desktop app](app/README.md) walks through the same steps: find the console, check the setup, copy a game to a USB drive (or install it into SWRR's saved data), and play. The release page has an installer for macOS, Windows and Linux with Python included, and the release zip has it in `app/` (with Python 3.11+).
 
-Quick start, from the release folder: start Luac0re in SWRR until its loader listens on port 9026, then check the setup.
+Quick start, from the release folder. Copy your dump to an exFAT USB drive plugged into the computer (any folder name works; [docs/usb.md](docs/usb.md) says what goes on the drive):
 
 ```bash
-python3 ghostldr/host/run.py doctor
+python3 ghostldr.py copy /path/to/CUSA11456/app0
 ```
 
-Copy your dump to an exFAT USB drive plugged into the computer (here mounted at `/Volumes/MYDRIVE`):
+Plug the drive into the PS5, start SWRR, click the right half of the touchpad at PRESS START, then OPTIONS → HALL OF FAME until Luac0re's loader listens on port 9026. Check the setup once, then boot:
 
 ```bash
-python3 ghostldr/host/gfs_pack.py --src /path/to/app0 --usb /Volumes/MYDRIVE
-```
-
-Plug the drive into the PS5, restart SWRR, start Luac0re again, and boot:
-
-```bash
-python3 ghostldr/host/run.py boot --app-root usb:/ghostldr --no-build
-```
-
-No drive? Install the game into SWRR's saved data instead, once per title (about 40 minutes for Ghost), from the SWRR region you will play in:
-
-```bash
-python3 ghostldr/host/gfs_pack.py --src /path/to/app0
+python3 ghostldr.py doctor
 ```
 
 ```bash
-python3 ghostldr/host/gfs_install.py
+python3 ghostldr.py boot
 ```
 
-Then restart SWRR, start Luac0re again, and boot with `python3 ghostldr/host/run.py boot --no-build`.
+With several games on the drive, the game selector shows them on the TV; `boot CUSA11456` (or `boot ghost`) starts one straight away. `python3 ghostldr.py check` shows what the PS5 will find on a drive, and `python3 ghostldr.py --help` lists every command.
+
+No drive? Install the game into SWRR's saved data instead, once per title (about 40 minutes for Ghost), from the SWRR region you will play in, with the loader listening:
+
+```bash
+python3 ghostldr.py install /path/to/CUSA11456/app0
+```
+
+Then restart SWRR, start Luac0re again, and `python3 ghostldr.py boot`: with no game on a drive, it boots the installed ones.
 
 The computer's firewall must let Python receive on UDP 18194 and TCP 18195–18196.
 
 ## Documentation
 
 - [Using the release](docs/using-the-release.md): download to gameplay, step by step.
-- [USB drives](docs/usb.md): games on a USB drive, the recommended way.
+- [USB drives](docs/usb.md): games on a USB drive, the recommended way: what goes on the drive, copying, checking.
 - [Ghost on a stock PS5](docs/ghost-on-stock-ps5.md): the same from source, with more troubleshooting.
 - [Compatibility](docs/compatibility.md): other games, homebrew, profiles, reading the log.
 - [Game selector](docs/selector.md): the picker for several games, on a drive or installed.
 - [FTP server](docs/ftp.md): the console's files over FTP while a title runs.
 - [ELF loader](docs/elfldr.md): run ELF payloads in SWRR without a game, and build them.
 - [Web manager](docs/manager.md): save backup and restore from a browser.
-- [Host tooling](docs/host-tooling.md): `run.py doctor`, the boot preflight, the stub report.
+- [Host tooling](docs/host-tooling.md): `ghostldr.py`'s commands, `run.py doctor`, the boot preflight, the stub report.
 - [ghostfs](docs/ghostfs-catalogue.md): container names and the title catalogue.
 - [PS4](docs/ps4.md): status and the diagnostic to run.
 - [Jak X](docs/jakx.md): ghostldr in Jak X with UltraC0re, and what differs from SWRR.

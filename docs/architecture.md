@@ -22,7 +22,7 @@ A map of the repository, for reading or changing the code. To run ghostldr, star
 - **Memory:** a stable direct-memory budget every title gets without a plan ([Memory without a plan](compatibility.md#memory-without-a-plan)), per-title memory plans (Ghost's fits its ~5 GiB plan into SWRR's 4.5 GiB), and allocations scattered over the free holes.
 - **Title profiles:** the title's memory plan, save size, app parameters and HLE rules, as data, bound to its executable's build ([Write a profile](compatibility.md#5-write-a-profile)).
 - **ghostfs:** serves the chosen title's `/app0` from SWRR's save containers ([ghostfs-catalogue.md](ghostfs-catalogue.md)).
-- **USB drives and folders of titles:** `--app-root usb:/ghostldr` (or a dev folder of `<TITLE>/app0` folders). The extension decides before the title's modules load (`ext/src/approot.c`): the system's AutoMounter mounts the drive into SWRR's sandbox, and the title's folder there becomes `/app0` (read-write) ([usb.md](usb.md)).
+- **USB drives and folders of games:** `--app-root auto` (the default: a drive's games, else the installed ones), `usb:/` or `usb:/FOLDER` (or a dev folder of games). The extension decides before the title's modules load (`ext/src/approot.c`): the system's AutoMounter mounts the drive into SWRR's sandbox, the games on it are found by their contents in folders of any name, and the chosen game's folder becomes `/app0` (read-write) ([usb.md](usb.md)).
 - **FTP server:** while a title runs, the extension serves FTP on TCP 1212 (`ext/src/ftp.c`, `ftp_sys.c`), starting clients on the USB drive ([ftp.md](ftp.md)).
 - **ELF loader:** with no title (`run.py elfldr`), the extension runs ELF payloads sent to TCP 9021, each from a view of one of the emulator's JIT objects (`ext/src/elfldr.c`, `elfldr_sys.c`, `payload.c`; [elfldr.md](elfldr.md)).
 - **Game selector:** loads, runs and clears the selector module before the title (`sel.c`).
@@ -34,7 +34,8 @@ In `ghostldr/host/`:
 
 - **`run.py`:** build the core, send it, and log the run. `run.py doctor` checks the setup ([host-tooling.md](host-tooling.md)). `run.py elfldr` starts the ELF loader instead of a title, and **`elf_send.py`** sends it a payload and shows its output ([elfldr.md](elfldr.md)).
 - **`gfs_pack.py`, `gfs_install.py`:** lay out and install titles side by side, checking free space and resuming interrupted installs (`--list`, `--remove TITLE`). `gfs_pack.py --usb DRIVE` puts a title on a USB drive instead.
-- **`usb_drive.py`:** list, check and remove the titles on a USB drive, mounted on the computer or plugged into the console (through ghostldr's FTP server, or a jailbroken PS5's) ([usb.md](usb.md)).
+- **`usb_drive.py`:** find the games on a USB drive as the console does, copy (with a check afterwards), check and remove them, on a drive mounted on the computer or plugged into the console (through ghostldr's FTP server, or a jailbroken PS5's) ([usb.md](usb.md)).
+- **`ghostldr.py`** (the repository's top folder): the everyday commands, `doctor`, `copy`, `check`, `boot`, `logs` and `install`, over the tools above ([host-tooling.md](host-tooling.md#ghostldrpy)).
 - **`profiles.py`:** check and inspect title profiles. **`capture_order.py`:** turn a boot log into a title's file open order.
 - **`manager.py`:** start the web manager on the PS5 ([manager.md](manager.md)).
 - **`resign_save.py`:** make a Luac0re save for another PSN account, for the SWRR region it runs on (US or EU). It patches the save over FTP, so it needs a jailbroken console.
@@ -61,7 +62,7 @@ They run offline:
 - the core's profile, memory-budget, ghostfs and module-loading code, built for the computer;
 - the extension loader, run on the built `ext.bin`;
 - the homebrew families, built for the computer;
-- the app roots against a fake core and a fake libSceUsbStorage; the selector's library listing; the drive tools, also through a fake FTP server; the FTP server built for the computer and driven by real clients (`test_ftp.py`, [ftp.md](ftp.md#tests)); the optional USB storage stack (`make USB_RAW=1`) against exFAT, FAT32 and FAT16 images made with macOS's tools, read raw and through a fake USB drive that misbehaves on purpose (`test_usb.py`, [usb.md](usb.md#tests));
+- the app roots against a fake core and a fake libSceUsbStorage, and the computer's search for games agreeing with the console's on one folder tree (`test_usb_games.py`); the selector's library listing; the drive tools and `ghostldr.py`, also through a fake FTP server; the FTP server built for the computer and driven by real clients (`test_ftp.py`, [ftp.md](ftp.md#tests)); the optional USB storage stack (`make USB_RAW=1`) against exFAT, FAT32 and FAT16 images made with macOS's tools, read raw and through a fake USB drive that misbehaves on purpose (`test_usb.py`, `test_usb_games.py`, [usb.md](usb.md#tests));
 - the import report against a synthetic title;
 - the ELF loader: its payload formats, relocations and refusals, and its service over real sockets with a fake loader (`test_elfldr.py`, [elfldr.md](elfldr.md#tests));
 - the game selector: screenshots of its UI, and the built `selector.bin` against a fake console.

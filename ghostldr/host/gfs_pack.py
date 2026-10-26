@@ -23,8 +23,9 @@ the boot group first, then the traced files, then the rest by its groups.
     python3 ghostldr/host/gfs_pack.py --src DIR --usb ftp://PS5:2121/mnt/usb0   # one plugged into a jailbroken PS5
 
 With --usb the title is not packed into containers: its app0 is copied to
-<DRIVE>/ghostldr/<TITLE>/app0 with its prefix file and meta.bin beside it
-(usb_drive.py), for run.py boot --app-root usb:/ghostldr.
+<DRIVE>/ghostldr/<TITLE>/app0 (or --folder's) with its prefix file and
+meta.bin beside it, and checked (usb_drive.py).  ghostldr.py copy does the
+same with a progress bar.
 
 The title comes from --title, else sce_sys/param.sfo, else the profile whose
 eboot fingerprint matches, else (OpenOrbis homebrew) the eboot's module name.
@@ -254,27 +255,54 @@ def index_header(count: int, entries: int, total: int, names_off: int, names_siz
     return header + b"\0" * (HEADER_SIZE - len(header))
 
 
-def to_usb(args, src: Path, title: str, prefix: str, prof: dict) -> int:
+def to_usb(args, src: Path, title: str, prefix: str, prof: dict, on_progress=None) -> int:
     """--usb: the title's folder on the drive (usb_drive.py)."""
     name = args.name
     if not name and not prof.get("name") and not titles.param_sfo(src).get("TITLE") and titles.homebrew_toolchain(src):
         name = titles.eboot_module_name(src)
     try:
         info = usb_drive.put_title(src, args.usb, title, prefix, prof, name, args.icon, args.backdrop, args.fetch_art,
-                                   args.art_dir, args.refetch, jobs=args.jobs, progress=args.progress)
+                                   args.art_dir, args.refetch, jobs=args.jobs, progress=args.progress,
+                                   folder=args.folder, on_progress=on_progress, verify=args.verify)
     except (usb_drive.DriveError, gm.ArtError) + ftplib.all_errors as e:
         raise SystemExit(str(e))
     print(f"selector: {info['summary']}")
     print(f"{title}: {info['files']} files, {info['total'] / 2**30:.2f} GiB in {info['folder']} ({info['fs']}): "
           f"{info['copied']} copied, {info['kept']} already there, {info['removed']} removed; progress goes to "
           f"{prefix}SAVE on the console")
+    print(f"checked: {info['verified']}")
     fit, line = exec_fit.check(src, title)
     print(line)
-    print(f"boot it with: python3 ghostldr/host/run.py boot --app-root {usb_drive.APP_ROOT} --title {title}")
+    print(f"boot it with: python3 ghostldr.py boot {title}")
     return 0
 
 
-def main() -> int:
+def resolve(src: Path, title: str | None = None, prefix: str | None = None) -> tuple[str, str, dict]:
+    """The dump's title ID, save prefix and profile: --title's, else
+    param.sfo's, else the profile matching its eboot, else (homebrew) its
+    module name; --prefix's, else the profile's, else G + the ID's digits."""
+    if not (src / "eboot.bin").is_file():
+        raise SystemExit(f"{src}: no eboot.bin (point --src at the title's app0)")
+    given = title
+    title = titles.normalize_title(given) if given else titles.detect_title(src)
+    if not title:
+        raise SystemExit("pass --title (e.g. CUSA12345): the dump's sce_sys/param.sfo has no usable TITLE_ID "
+                         "and no profile matches its eboot")
+    if not given and title == titles.homebrew_title(src) and not titles.param_sfo(src).get("TITLE_ID"):
+        print(f"{title}: {titles.homebrew_toolchain(src)} homebrew without a usable param.sfo TITLE_ID: the title "
+              f"ID comes from its module name (--title picks another)")
+    try:
+        prof = titles.load(title)
+    except titles.ProfileError as e:
+        raise SystemExit(str(e))
+    prefix = (prefix or prof.get("pack", {}).get("prefix") or titles.default_prefix(title)).upper()
+    why = gc.prefix_problem(prefix)
+    if why:
+        raise SystemExit(f"prefix {prefix}: {why} (--prefix picks another)")
+    return title, prefix, prof
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", type=Path, default=titles.DEFAULT_SRC,
                     help="the title's extracted app0 (default: build/ghost/app0)")
@@ -289,26 +317,16 @@ def main() -> int:
                     help=f"with --usb ftp://...: files sent at once (default {usb_drive.FTP_JOBS})")
     ap.add_argument("--progress", type=float, default=30, metavar="SECONDS",
                     help="with --usb: seconds between progress lines (default 30)")
+    ap.add_argument("--folder", metavar="PATH",
+                    help="with --usb: the game's folder on the drive (default: its copy already there, else "
+                    "ghostldr/<TITLE>); any name works")
+    ap.add_argument("--verify", choices=["quick", "full", "none"], default="quick",
+                    help="with --usb: check the copy afterwards: every file's size and the key files' bytes "
+                    "(quick, the default), every byte (full), or not at all")
     gm.add_args(ap)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     src = args.src
-    if not (src / "eboot.bin").is_file():
-        raise SystemExit(f"{src}: no eboot.bin (point --src at the title's app0)")
-    title = titles.normalize_title(args.title) if args.title else titles.detect_title(src)
-    if not title:
-        raise SystemExit("pass --title (e.g. CUSA12345): the dump's sce_sys/param.sfo has no usable TITLE_ID "
-                         "and no profile matches its eboot")
-    if not args.title and title == titles.homebrew_title(src) and not titles.param_sfo(src).get("TITLE_ID"):
-        print(f"{title}: {titles.homebrew_toolchain(src)} homebrew without a usable param.sfo TITLE_ID: the title "
-              f"ID comes from its module name (--title picks another)")
-    try:
-        prof = titles.load(title)
-    except titles.ProfileError as e:
-        raise SystemExit(str(e))
-    prefix = (args.prefix or prof.get("pack", {}).get("prefix") or titles.default_prefix(title)).upper()
-    why = gc.prefix_problem(prefix)
-    if why:
-        raise SystemExit(f"prefix {prefix}: {why} (--prefix picks another)")
+    title, prefix, prof = resolve(src, args.title, args.prefix)
     if args.usb:
         return to_usb(args, src, title, prefix, prof)
     info = pack(src, title, prefix, OUT_ROOT / title, prof, args.order)

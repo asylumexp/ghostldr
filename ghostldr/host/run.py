@@ -17,11 +17,14 @@ and stops before touching the title when it cannot.  The game selector
 core runs it before the title when more than one title is installed, or with
 --select.
 
---app-root usb:/ghostldr boots from a USB drive's folder of titles
-(docs/usb.md): gfs_pack.py --usb puts titles there, and the console mounts
-the drive into SWRR's sandbox.  When this computer sees the drive too
-(--usb-drive, else the only mounted one with a ghostldr folder), its titles'
-profiles and dumps are used as installed ones' are.
+Where the title's files are (--app-root): by default ("auto") the games on
+a USB drive plugged into the PS5, found anywhere on it by their contents
+(docs/usb.md), else the titles installed in SWRR's saved data (ghostfs).
+usb:/ only looks on the drive, ghostfs only at the installed titles.  When
+this computer sees the drive too (--usb-drive, else the only mounted exFAT
+or FAT drive with games), its games' profiles and dumps are used as
+installed ones' are.  ghostldr.py (the repository's top folder) wraps this
+for everyday use: ghostldr.py boot [GAME].
 
 While the title runs, the console serves FTP on TCP 1212 (--ftp-port; 0:
 none; docs/ftp.md): any FTP client, any user and password.  Clients start on
@@ -105,6 +108,13 @@ HINTS = [
     ("bad image layout",
      "the extension blob is malformed: rebuild it from the same tree as "
      "the core"),
+    ("nothing installed",
+     "no game was found on a USB drive in the PS5 and none is installed: copy one onto a drive with "
+     "`python3 ghostldr.py copy DUMP` (docs/usb.md), or install one with `python3 ghostldr.py install DUMP`"),
+    ("no USB drive: plug one",
+     "the PS5 sees no USB drive: plug the drive into the PS5 (exFAT), restart SWRR and boot again"),
+    ("holds no games",
+     "`python3 ghostldr.py check` on the computer shows what the PS5 finds on the drive and what is wrong"),
 ]
 
 
@@ -129,6 +139,15 @@ def build_core() -> None:
         raise SystemExit(f"building the core failed: {e}{hint}")
 
 
+def lua_str(text: str) -> str:
+    """A Lua string literal (the app root may hold spaces, quotes, non-ASCII)."""
+    out = []
+    for b in text.encode():
+        c = chr(b)
+        out.append(f"\\{b:03d}" if b < 32 or b > 126 or c in '"\\' else c)
+    return '"' + "".join(out) + '"'
+
+
 def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int], ext: bytes = b"",
                   sel: bytes = b"") -> bytes:
     core = CORE.read_bytes()
@@ -143,7 +162,7 @@ def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int],
         f'GHOSTLDR_LOG_IP = "{log_ip}"',
         f"GHOSTLDR_LOG_PORT = {LOG_PORT}",
         f"GHOSTLDR_FLAGS = {flags}",
-        f'GHOSTLDR_APP_ROOT = "{app_root}"',
+        f"GHOSTLDR_APP_ROOT = {lua_str(app_root)}",
         f"GHOSTLDR_EXT_PORT = {EXT_PORT}",
         f"GHOSTLDR_EXT_SIZE = {len(ext)}",
         f"GHOSTLDR_EXT_CRC = {zlib.crc32(ext):#x}",
@@ -171,7 +190,8 @@ class ExtServer(threading.Thread):
         try:
             self.sock.bind(("0.0.0.0", port))
         except OSError as e:
-            raise SystemExit(f"cannot serve the {label} on TCP {port}: {e}")
+            raise SystemExit(f"cannot serve the {label} on TCP {port} ({e}): another run.py, ghostldr.py or the "
+                             "app is running on this computer; stop it first")
         self.sock.listen(4)
         self.sock.settimeout(0.5)
         self.stop = threading.Event()
@@ -200,7 +220,11 @@ class LogListener(threading.Thread):
         super().__init__(daemon=True)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("0.0.0.0", LOG_PORT))
+        try:
+            self.sock.bind(("0.0.0.0", LOG_PORT))
+        except OSError as e:
+            raise SystemExit(f"cannot listen for the console's log on UDP {LOG_PORT} ({e}): another run.py, "
+                             "ghostldr.py or the app is running on this computer; stop it first")
         self.sock.settimeout(0.5)
         self.lines: list[str] = []
         self.stop = threading.Event()
@@ -289,8 +313,14 @@ def title_dump(title: str | None, select: bool,
 
 
 def usb_titles(app_root: str, drive: Path | None) -> dict[str, Path] | None:
-    """With a USB app root: the titles on the drive as this computer sees it
-    ({} when it does not), else None."""
+    """With a USB app root: the games on the drive as this computer sees it
+    ({} when it does not), found as the console finds them, else None.  With
+    "auto", the drive's games when one with games is mounted here, else None
+    (the installed titles)."""
+    if app_root == "auto":
+        d = usb_drive.find_drive(drive)
+        found = usb_titles("usb:/", d) if d else {}
+        return found or None
     if not app_root.startswith("usb:"):
         return None
     d = usb_drive.find_drive(drive)
@@ -301,8 +331,11 @@ def usb_titles(app_root: str, drive: Path | None) -> dict[str, Path] | None:
     if (lib / "eboot.bin").is_file():           # one title
         t = profiles.detect_title(lib) or (lib.parent.name if profiles.normalize_title(lib.parent.name) else None)
         return {t: lib} if t else {}
-    return {p.name: p / "app0" for p in sorted(lib.glob("*")) if profiles.TITLE_RE.fullmatch(p.name)
-            and (p / "app0/eboot.bin").is_file()}
+    try:
+        sc = usb_drive.scan(usb_drive.LocalDrive(d), rel)
+    except OSError:
+        return {}
+    return {g.id: d / g.app0 for g in sc.games if g.ok and not g.duplicate_of}
 
 
 def preflight(force: bool, title: str | None, select: bool, drive_titles: dict[str, Path] | None = None) -> None:
@@ -400,7 +433,8 @@ def doctor(args) -> int:
             s.bind(("0.0.0.0", LOG_PORT))
             add("PASS", f"UDP {LOG_PORT} (log)", "free")
         except OSError as e:
-            add("FAIL", f"UDP {LOG_PORT} (log)", f"cannot bind: {e}")
+            add("FAIL", f"UDP {LOG_PORT} (log)", f"in use ({e}): another run.py, ghostldr.py or the app is "
+                "running on this computer; stop it first")
         finally:
             s.close()
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -408,11 +442,15 @@ def doctor(args) -> int:
         s.bind(("0.0.0.0", EXT_PORT))
         add("PASS", f"TCP {EXT_PORT} (extension)", "free")
     except OSError as e:
-        add("FAIL", f"TCP {EXT_PORT} (extension)", f"cannot bind: {e}")
+        add("FAIL", f"TCP {EXT_PORT} (extension)", f"in use ({e}): another run.py, ghostldr.py or the app is "
+            "running on this computer; stop it first")
     finally:
         s.close()
 
     ports = [args.loader_port] if args.loader_port else list(LOADERS)
+    if not args.host:
+        add("FAIL", "console", getattr(args, "no_console", "") or "not found")
+        ports = []
     for i, port in enumerate(ports):
         try:
             with socket.create_connection((args.host, port), timeout=3):
@@ -422,15 +460,15 @@ def doctor(args) -> int:
         except OSError as e:
             if i == len(ports) - 1:
                 add("FAIL", "console loader",
-                    f"nothing at {args.host}:{'/'.join(map(str, ports))} ({e}); SWRR up with "
-                    "Luac0re's loader, or Jak X with UltraC0re's?")
+                    f"nothing listens at {args.host}:{'/'.join(map(str, ports))}: {LOADER_HELP}")
 
     drive_titles = usb_titles(args.app_root, args.usb_drive)
-    if drive_titles is not None:
-        d = usb_drive.find_drive(args.usb_drive)
-        add("PASS" if drive_titles else "WARN", "USB drive",
-            f"{d}: {', '.join(drive_titles) or 'no titles'}" if d else
-            "not mounted here (only needed for the preflight and profiles; the console reads the drive)")
+    d = usb_drive.find_drive(args.usb_drive) if args.app_root in ("auto",) or args.app_root.startswith("usb:") \
+        else None
+    if drive_titles is not None or d:
+        add("PASS" if drive_titles else "WARN", "USB drive here",
+            f"{d}: {', '.join(drive_titles or {}) or 'no games (ghostldr.py check ' + str(d) + ' says why)'}" if d
+            else "none mounted here (fine: the PS5 reads the drive itself)")
     app0, which = title_dump(args.title, args.select, drive_titles)
     if app0 is None:
         add("WARN", "title dump", which)
@@ -488,7 +526,10 @@ def elfldr(args, listener: LogListener | None) -> int:
         raise SystemExit(f"elfldr needs Luac0re's loader in SWRR (TCP 9026); {args.host}:{port} is "
                          f"{LOADERS.get(port, 'another loader')}")
     print(f"sending {len(payload)} bytes of Lua to {args.host}:{port}", flush=True)
-    send_lua(args.host, payload, port)
+    try:
+        send_lua(args.host, payload, port)
+    except OSError as e:
+        raise SystemExit(f"could not send to {args.host}:{port} ({e}): {LOADER_HELP}")
     if not ext_server.sent.wait(60):
         print(f"extension: the console did not fetch it (is TCP {EXT_PORT} open in this computer's firewall?)",
               flush=True)
@@ -510,8 +551,16 @@ def elfldr(args, listener: LogListener | None) -> int:
     return 0
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
+LOADER_HELP = ("start SWRR, click the right half of the touchpad at PRESS START, then OPTIONS -> HALL OF FAME "
+               "(Luac0re's loader listens on 9026 until a game starts), or Jak X with UltraC0re (8888); "
+               "after a game has run, close SWRR and start it again first")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """run.py's options (ghostldr.py passes the ones it doesn't know on to them)."""
+    parser = argparse.ArgumentParser(
+        description="Send the ghostldr bootstrap to the console and show its log (the advanced tool; "
+        "python3 ghostldr.py covers everyday use).")
     parser.add_argument("mode", choices=["probe", "boot", "elfldr", "logs", "lua", "doctor"])
     parser.add_argument("--no-build", action="store_true",
                         help="use the prebuilt core in build/ghostldr (from a release) instead of running make")
@@ -570,13 +619,14 @@ def main() -> int:
     parser.add_argument("--wait", type=float, default=None,
                         help="seconds to keep printing the console's log (default: boot keeps listening until "
                              "Ctrl+C; probe and logs stop after 20 s)")
-    parser.add_argument("--app-root", default="ghostfs",
-                        help="where the title's app0 is: ghostfs (the installed titles, the default), "
-                        f"{usb_drive.APP_ROOT} (the titles on a USB drive, docs/usb.md), or a directory on a dev "
-                        "console, e.g. /data/ghost/app0 (a folder of <TITLE>/app0 folders works too)")
+    parser.add_argument("--app-root", default="auto",
+                        help="where the title's files are: auto (the default: the games on a USB drive in the "
+                        "PS5, else the installed ones), ghostfs (the installed titles), usb:/ or usb:/FOLDER (the "
+                        "games anywhere on a USB drive, or under FOLDER; docs/usb.md), or a directory on a dev "
+                        "console, e.g. /data/ghost/app0 (a folder of games works too)")
     parser.add_argument("--usb-drive", type=Path,
                         help="where this computer has the USB drive mounted, for the preflight check and the "
-                        "titles' profiles (default: the only mounted drive with a ghostldr folder)")
+                        "titles' profiles (default: the only mounted exFAT or FAT drive with games)")
     parser.add_argument("--ftp-port", type=int, default=FTP_PORT,
                         help=f"the console's FTP server while the title runs (default {FTP_PORT}; 0: none; "
                              "docs/ftp.md)")
@@ -587,7 +637,11 @@ def main() -> int:
                         help="the console's Lua loader: 9026 Luac0re (SWRR), 8888 UltraC0re (Jak X); "
                              "default: whichever answers")
     parser.add_argument("--log", type=Path, default=ROOT / "build/ghostldr/run.log")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     if not 0 <= args.ftp_port <= 65535:
         raise SystemExit(f"--ftp-port {args.ftp_port}: a TCP port, or 0 for no FTP server")
     if not 0 < args.elfldr_port <= 65535:
@@ -597,9 +651,13 @@ def main() -> int:
     if args.app_root.startswith("usb:") and not args.app_root.startswith("usb:/"):
         raise SystemExit(f"--app-root {args.app_root}: a USB path starts at the drive's root, e.g. "
                          f"{usb_drive.APP_ROOT}")
-    args.host = args.host or console_ip()
     if args.mode == "doctor":
+        try:
+            args.host = args.host or console_ip()
+        except SystemExit as e:    # the local checks still run
+            args.host, args.no_console = None, str(e)
         return doctor(args)
+    args.host = args.host or console_ip()
 
     recorder = recorder_running()
     listener = None if recorder else LogListener(args.log)
@@ -654,7 +712,10 @@ def main() -> int:
         payload = f'GHOSTLDR_PROFILE_HEX = "{bundle.hex()}"\n'.encode() + payload
         port = args.loader_port or loader_port(args.host)
         print(f"sending {len(payload)} bytes of Lua to {args.host}:{port}", flush=True)
-        send_lua(args.host, payload, port)
+        try:
+            send_lua(args.host, payload, port)
+        except OSError as e:
+            raise SystemExit(f"could not send to {args.host}:{port} ({e}): {LOADER_HELP}")
         if args.mode == "boot" and args.ftp_port:
             print(f"FTP: ftp://{args.host}:{args.ftp_port}/ once the title starts (any user and password)",
                   flush=True)

@@ -51,7 +51,7 @@ It needs Python 3.11 or newer and nothing else.
   - `gfs_pack.py`
   - `gfs_install.py`, including `--list`, `--remove` and `--update-meta`
   - `gfs_pack.py --usb DRIVE` and `usb_drive.py list` and `remove`, where DRIVE is the drive's mount point here or `ftp://PS5:1212/ghostldr_usb`
-  - `run.py boot --app-root ghostfs --no-build`, or `--app-root usb:/ghostldr` on the USB path
+  - `run.py boot --app-root ghostfs --no-build`, or `--app-root usb:/` on the USB path (the games anywhere on the drive)
   - `manager.py --detach` and `--exit`
   - `import_report.py` and `stub_report.py`
 - **Raw output:** each script's full output is under **Details**, and saved in the logs folder.

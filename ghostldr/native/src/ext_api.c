@@ -92,4 +92,5 @@ const struct ghost_api g_ghost_api = {
     .arena_buffers = arena_buffers,
     .jit_objects_find = jit_objects_find,
     .payload_fault = &g_payload_fault,
+    .library = ext_library,
 };

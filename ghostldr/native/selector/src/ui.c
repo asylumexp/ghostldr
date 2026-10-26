@@ -345,7 +345,7 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int *boot)
                 S->launching = 1;
                 S->panel_open = 0;
             } else {
-                toast(S, now, "This game's install is incomplete: run gfs_install.py again.");
+                toast(S, now, t->note[0] ? t->note : "This game's install is incomplete: run gfs_install.py again.");
             }
         } else if (pressed & (PAD_OPTIONS | PAD_TRIANGLE)) {
             S->panel_open = !S->panel_open;
@@ -551,7 +551,8 @@ static void details(struct sel *S, surface *s)
     fmt_size(size, sizeof(size), t->size);
     const char *dot = "  \xC2\xB7  ";
     if (!(t->flags & TITLE_COMPLETE))
-        sel_fmt(info, sizeof(info), "%s%sInstall incomplete", t->id[0] ? t->id : "", t->id[0] ? dot : "");
+        sel_fmt(info, sizeof(info), "%s%s%s", t->id[0] ? t->id : "", t->id[0] ? dot : "",
+                t->where[0] ? "Can't start: press Cross for why" : "Install incomplete");
     else
         sel_fmt(info, sizeof(info), "%s%s%s%s%s%s", t->id[0] ? t->id : "", t->version[0] && t->id[0] ? dot : "",
                 t->version[0] ? "Version " : "", t->version, t->size ? dot : "", t->size ? size : "");
@@ -612,10 +613,23 @@ static void info_panel(struct sel *S, surface *s, float k)
     panel_cell(S, s, x, y, half, "Title ID", t->id[0] ? t->id : "Unknown", WHITE);
     panel_cell(S, s, x2, y, half, "Version", t->version[0] ? t->version : "Unknown", WHITE);
     y += 104;
-    fmt_size(buf, sizeof(buf), t->size);
-    panel_cell(S, s, x, y, half, "Size", buf, WHITE);
-    panel_cell(S, s, x2, y, half, "Install", t->flags & TITLE_COMPLETE ? "Complete" : "Incomplete",
-               t->flags & TITLE_COMPLETE ? WHITE : WARN);
+    if (t->where[0]) { /* a game on a USB drive: where it is, and anything to know about it */
+        panel_cell(S, s, x, y, cw, "Folder on the USB drive", t->where, WHITE);
+        if (t->note[0]) { /* up to three lines */
+            y += 104;
+            draw_text(S, s, 21, x, y, t->flags & TITLE_COMPLETE ? "Note" : "Can't start", FAINT, cw);
+            char note[3][128];
+            int nl = wrap_lines(S, 26, cw, t->note, note, 3);
+            for (int i = 0; i < nl; i++)
+                draw_text(S, s, 26, x, y + 40 + 36 * i, note[i], t->flags & TITLE_COMPLETE ? WHITE : WARN, cw);
+            y += 36 * (nl > 1 ? nl - 1 : 0);
+        }
+    } else {
+        fmt_size(buf, sizeof(buf), t->size);
+        panel_cell(S, s, x, y, half, "Size", buf, WHITE);
+        panel_cell(S, s, x2, y, half, "Install", t->flags & TITLE_COMPLETE ? "Complete" : "Incomplete",
+                   t->flags & TITLE_COMPLETE ? WHITE : WARN);
+    }
     y += 104;
     panel_cell(S, s, x, y, half, "Art", art_label(t->icon_src), WHITE);
     if (t->prefix[0]) {

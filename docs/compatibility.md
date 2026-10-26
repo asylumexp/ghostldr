@@ -16,14 +16,14 @@ Homebrew built with the OpenOrbis toolchain has its own section: [Homebrew](#hom
 A USB drive is the quicker loop for trying a title: nothing is packed or installed, and copying again after a change only sends what changed.
 
 ```bash
-python3 ghostldr/host/gfs_pack.py --src /path/to/CUSA12345/app0 --usb /Volumes/MYDRIVE
+python3 ghostldr.py copy /path/to/CUSA12345/app0
 ```
 
 ```bash
-python3 ghostldr/host/run.py boot --app-root usb:/ghostldr --title CUSA12345 --snap
+python3 ghostldr/host/run.py boot --app-root usb:/ --title CUSA12345 --snap
 ```
 
-It also runs the executable-memory check below. Copying the `app0` folder to `<drive>/ghostldr/CUSA12345/app0` by hand works too ([usb.md](usb.md)). Profiles, HLE rules and the log work the same way; only the open order (step 8) is for installed titles. Steps 1 and 2 are the saved-data way.
+`gfs_pack.py --src DUMP --usb DRIVE` does the same as `copy` and also runs the executable-memory check below. Copying the dump's folder anywhere on the drive by hand works too, in a folder of any name ([usb.md](usb.md#what-goes-on-the-drive)); `python3 ghostldr.py check` says whether the PS5 will find it. Profiles, HLE rules and the log work the same way; only the open order (step 8) is for installed titles. Steps 1 and 2 are the saved-data way.
 
 ## 1. Pack
 
@@ -55,7 +55,7 @@ python3 ghostldr/host/gfs_install.py --title CUSA12345
 python3 ghostldr/host/run.py boot --app-root ghostfs --title CUSA12345 --snap
 ```
 
-(`--app-root usb:/ghostldr` for a title on a USB drive.)
+(`--app-root usb:/` for a title on a USB drive; the default, `auto`, looks on the drive first, then at the installed titles.)
 
 - `--title` picks among the installed titles; without it the only installed one boots, or the core logs the list and stops.
 - run.py sends every profile it knows with the core; the core uses the title's, or the generic default.

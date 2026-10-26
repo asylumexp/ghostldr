@@ -405,7 +405,7 @@ static void run(struct sel *S, const struct event *ev, int nev, const char *outd
 int main(int argc, char **argv)
 {
     const char *font = NULL, *out = ".", *scene_name = "tour", *prefix = "", *write_art = NULL, *user = NULL;
-    int ntitles = (int)(sizeof(FAKES) / sizeof(FAKES[0])), clock_h = 21, clock_m = 47, h24 = 1;
+    int ntitles = (int)(sizeof(FAKES) / sizeof(FAKES[0])), clock_h = 21, clock_m = 47, h24 = 1, usb = 0;
     static struct plat P;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--font") && i + 1 < argc)
@@ -420,6 +420,8 @@ int main(int argc, char **argv)
             ntitles = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--12h"))
             h24 = 0;
+        else if (!strcmp(argv[i], "--usb")) /* the games on a USB drive: folders, a second copy, one that can't start */
+            usb = 1;
         else if (!strcmp(argv[i], "--write-art") && i + 1 < argc)
             write_art = argv[++i];
         else if (!strcmp(argv[i], "--decode-meta") && i + 2 < argc) { /* FILE DIR: its pictures through meta.c */
@@ -451,7 +453,7 @@ int main(int argc, char **argv)
             if (eq)
                 *eq = 0, P.art[P.nart].id = a, P.art[P.nart].meta = meta, P.art[P.nart++].dir = eq + 1;
         } else {
-            fprintf(stderr, "usage: preview --font F.glf --out DIR [--scene tour|info|single|launch] [--titles N] "
+            fprintf(stderr, "usage: preview --font F.glf --out DIR [--scene tour|info|single|launch|usb] [--usb] [--titles N] "
                             "[--art TITLE=DIR] [--meta TITLE=meta.bin] [--user NAME] [--12h] [--prefix P]\n");
             return 2;
         }
@@ -479,6 +481,22 @@ int main(int argc, char **argv)
         titles[i].size = (u64)(f->gib * (1u << 30));
         titles[i].flags = f->complete ? TITLE_COMPLETE : 0;
         P.procedural[i] = f->art;
+        if (usb) { /* as main.c fills them from the extension's list */
+            titles[i].size = 0;
+            titles[i].prefix[0] = 0;
+            snprintf(titles[i].where, sizeof(titles[i].where), i ? "My Games/%s" : "Ghost of Tsushima (CUSA11456)",
+                     f->name);
+            if (i == 1) {
+                str_copy(titles[i].id, FAKES[0].id, 16);
+                str_copy(titles[i].name, FAKES[0].name, 128);
+                str_copy(titles[i].where, "ghostldr/CUSA11456", sizeof(titles[i].where));
+                str_copy(titles[i].note, "a second copy: --title boots the one in Ghost of Tsushima (CUSA11456)",
+                         sizeof(titles[i].note));
+            }
+            if (!f->complete)
+                str_copy(titles[i].note, "no sce_sys/param.sfo: name the folder after the game's ID (CUSA12345)",
+                         sizeof(titles[i].note));
+        }
     }
     if (font_init(&S, glf, 2u << 20) || ui_init(&S, titles, ntitles, 0)) {
         fprintf(stderr, "init failed\n");
@@ -513,6 +531,17 @@ int main(int argc, char **argv)
             {800, PAD_RIGHT, 0, NULL}, {880, 0, 0, NULL},
             {2000, PAD_OPTIONS, 0, NULL}, {2080, 0, 0, NULL}, {2600, 0, 0, "info"},
             {2700, PAD_CIRCLE, 0, NULL}, {2780, 0, 0, NULL}, {3300, 0, 0, "info-closed"},
+        };
+        run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
+    } else if (!strcmp(scene_name, "usb")) { /* with --usb: a second copy's panel, a folder that can't start */
+        static const struct event ev[] = {
+            {800, PAD_RIGHT, 0, NULL}, {880, 0, 0, NULL},
+            {2000, PAD_OPTIONS, 0, NULL}, {2080, 0, 0, NULL}, {2600, 0, 0, "usb-copy"},
+            {2700, PAD_CIRCLE, 0, NULL}, {2780, 0, 0, NULL},
+            {3000, PAD_R1, 0, NULL}, {3080, 0, 0, NULL}, {3200, PAD_R1, 0, NULL}, {3280, 0, 0, NULL},
+            {4400, 0, 0, "usb-bad"},
+            {4500, PAD_CROSS, 0, NULL}, {4580, 0, 0, NULL}, {4900, 0, 0, "usb-why"},
+            {5000, PAD_OPTIONS, 0, NULL}, {5080, 0, 0, NULL}, {5600, 0, 0, "usb-bad-info"},
         };
         run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
     } else if (!strcmp(scene_name, "launch")) {

@@ -501,9 +501,27 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         str_copy(titles[i].version, c->version, sizeof(titles[i].version));
         str_copy(titles[i].prefix, P.ghostfs ? c->prefix : "", sizeof(titles[i].prefix));
         titles[i].size = c->total;
-        titles[i].flags = c->flags & CAT_INCOMPLETE ? 0 : TITLE_COMPLETE;
-        LOG(&P, "title %d: %s '%s' (name %s) %s, %lu MiB, index %s%s", i, c->id, c->name, name_src(c->name_src),
-            c->version, c->total >> 20, c->index[0] ? c->index : "-", c->flags & CAT_INCOMPLETE ? ", incomplete" : "");
+        titles[i].flags = c->flags & (CAT_INCOMPLETE | CAT_BAD) ? 0 : TITLE_COMPLETE;
+        str_copy(titles[i].note, c->note, sizeof(titles[i].note));
+        if (P.library) { /* its folder, as the drive shows it: without the mount point and app0 */
+            const char *w = c->path;
+            int len = (int)c->dir_len, mp = str_len("/ghostldr_usb/");
+            if (len > mp && !memcmp(w, "/ghostldr_usb/", (size_t)mp))
+                w += mp, len -= mp;
+            str_copy(titles[i].where, w, len + 1 < (int)sizeof(titles[i].where) ? len + 1 : (int)sizeof(titles[i].where));
+            if (!titles[i].name[0] && !titles[i].id[0]) { /* nothing names it: its folder's name */
+                const char *base = titles[i].where;
+                for (const char *c = base; *c; c++)
+                    if (*c == '/' && c[1])
+                        base = c + 1;
+                str_copy(titles[i].name, base, sizeof(titles[i].name));
+            }
+        }
+        LOG(&P, "title %d: %s '%s' (name %s) %s, %lu MiB, %s %s%s%s", i, c->id, c->name, name_src(c->name_src),
+            c->version, c->total >> 20, P.library ? "at" : "index", P.library ? c->path : c->index[0] ? c->index : "-",
+            c->flags & CAT_INCOMPLETE ? ", incomplete" : "", c->note[0] ? ": " : "");
+        if (c->note[0])
+            LOG(&P, "title %d: %s", i, c->note);
     }
     if (font_init(S, sel_font_glf, 2u << 20) != 0) {
         LOG(&P, "built-in font unusable");

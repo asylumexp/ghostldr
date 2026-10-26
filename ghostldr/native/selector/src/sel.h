@@ -77,6 +77,8 @@ struct title {
     u8 icon_state;    /* 0 not tried, 1 loaded, 2 none */
     u8 bg_state;      /* 0 not tried, 1 has a backdrop, 2 none */
     u8 icon_src, bg_src; /* ART_*: set by sel_load_art, or ART_GENERATED */
+    char where[128];  /* a game on a USB drive: its folder there; empty: installed */
+    char note[96];    /* why it can't start, or about this copy; may be empty */
 };
 
 /* ---- outline font (font.c) ---- */

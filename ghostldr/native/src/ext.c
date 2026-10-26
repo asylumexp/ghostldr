@@ -422,9 +422,28 @@ int ext_approot_init(const char **root)
     return g_early->approot_init(root);
 }
 
-int ext_approot_pick(const char *title, const char **root)
+int ext_approot_pick(const char *title, int index, const char **root)
 {
-    return g_early ? g_early->approot_pick(title, root) : -1;
+    return g_early ? g_early->approot_pick(title, index, root) : -1;
+}
+
+int ext_library(const struct lib_title **list)
+{
+    *list = NULL;
+    return g_early ? g_early->library(list) : 0;
+}
+
+/* "auto" found no game on a drive: the code's early JIT block goes back (the
+ * next boot needs it) and the code is placed again with the title, as for
+ * any installed title; the blob stays. */
+void ext_unplace(void)
+{
+    if (g_in_jit)
+        jit_block_destroy(&g_jb);
+    logf("ext: code unplaced%s; placed again for the title", g_in_jit ? " (its JIT block released)" : "");
+    g_in_jit = false;
+    g_base = 0;
+    g_early = NULL;
 }
 
 /* A boot that stops before the title loads (an app root that failed): the

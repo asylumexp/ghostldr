@@ -10,8 +10,8 @@ Each game shows its real name and art: from the game's own files when it has the
 |---|---|
 | Left / Right (d-pad or left stick) | Move along the row. Holding repeats. |
 | L1 / R1 | Jump 5 titles. |
-| Cross | Boot the selected game. An incomplete install can't be booted: a message says to rerun `gfs_install.py`. |
-| Options or Triangle | Show the game's information: title ID, version, size, install status, container prefix. |
+| Cross | Boot the selected game. An incomplete install, or a folder on a USB drive that can't start, can't be booted: a message says why (rerun `gfs_install.py`; or what is wrong with the folder). |
+| Options or Triangle | Show the game's information: title ID, version, size, install status, container prefix; for a game on a USB drive, its folder there and any note. |
 | Circle | Close the information panel. |
 
 There is no way back to SWRR from the picker: to leave without booting, close SWRR from the PS button menu.
@@ -24,6 +24,7 @@ There is no way back to SWRR from the picker: to leave without booting, close SW
 - **One complete title, or `--title T`:** that title boots as before. The core closes the selector's socket without loading the module.
 - **`run.py boot --select`:** the selector shows anyway, even with one title or `--title` (run.py then sends every title profile it knows, so the title picked gets its own, and ignores `--title`). Use it to check the selector on hardware.
 - **No selector** (`--no-selector`, a release without `selector.bin`, or the module fails): several titles stop the boot as before (`pick one with run.py boot --title TITLE`). With `--title`, or one title, that title boots.
+- **Games on a USB drive** (`--app-root auto`, the default, or `usb:/...`; [usb.md](usb.md)): when the extension finds more than one game and no `--title` asks for one, it sets `CTX_FLAG_LIBRARY` and the selector lists what it found (`ghost_api.library()`): every game in the extension's order, second copies of a game each with their folder, and folders that can't start, with the reason. The choice goes back by its place in that list (`approot_pick`), so either copy of a game can be started.
 - **Outside ghostfs** (`--app-root /data/...`), only with `--select`.
 
 ```bash
@@ -34,12 +35,12 @@ The selector uses its built-in font by default; `--select-font auto` tries the c
 
 ## What it shows
 
-- **The list:** `GFSCATALOG/catalog.bin` (docs/ghostfs-catalogue.md). An install made with ghostldr v0.1 has no catalogue; its one title is the one in `GFSINDEX` (or `GHOSTIDX`). Outside ghostfs (`--app-root /data/...` on a dev console) the one title is the app root.
+- **The list:** `GFSCATALOG/catalog.bin` (docs/ghostfs-catalogue.md). An install made with ghostldr v0.1 has no catalogue; its one title is the one in `GFSINDEX` (or `GHOSTIDX`). On a USB drive, the games the extension found, with names and art from each game's `sce_sys` and the `meta.bin` beside its `app0`. Outside ghostfs (`--app-root /data/...` on a dev console) the one title is the app root.
 - **The row:** square tiles, the focused one 384 px with a soft glow and a white frame, the others 256 px and a little darker. Moving along the row slides the tiles on a critically damped spring (about 0.3 s, no overshoot).
-- **Under the focused tile:** its name, then title ID, version and size, then a **Start** button (greyed out for an incomplete install, with "Install incomplete" in orange).
+- **Under the focused tile:** its name, then title ID, version and size, then a **Start** button (greyed out for an incomplete install, with "Install incomplete" in orange, or for a USB folder that can't start, with "Can't start: press Cross for why").
 - **The backdrop:** the focused game's, full screen, dimmed and shaded darker towards the top, the left (where the text is) and the bottom. It is decoded once the row stops moving and crossfades from the previous one.
 - **The top bar:** the signed-in user's name (`sceUserServiceGetUserName`) beside a disc with their initial, and the clock in the system's 12/24-hour setting.
-- **Options:** an information panel slides in from the right: the icon, the name, title ID, version, size, install state, where the art came from and the save containers.
+- **Options:** an information panel slides in from the right: the icon, the name, title ID, version, size, install state, where the art came from and the save containers; for a game on a USB drive, its folder on the drive instead of size and install state, and a note (a second copy, or why it can't start).
 
 Icons are loaded one per frame, nearest to the selection first.
 
