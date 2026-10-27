@@ -101,6 +101,41 @@ class LoaderTests(unittest.TestCase):
         # the executable's file is freed once its text is written; its names stay (budget.c reads them)
         self.assertIn("main module hb imports libSceVideoOut ", lines)
 
+    def run_host_rc(self, app0: Path, *prx: str) -> tuple[int, list[str]]:
+        import subprocess
+        out = subprocess.run([str(self.exe), str(app0), *prx], capture_output=True, text=True, timeout=120)
+        return out.returncode, out.stdout.splitlines()
+
+    def test_corrupt_modules_fail_cleanly(self) -> None:
+        """Truncated / out-of-range modules return a parse failure (rc 4 for
+        the eboot), not a read past the file: the phdr table, a segment,
+        and a dynlib table each get one case."""
+        import struct as st
+        app0 = self.root / "bad"
+        (app0 / "sce_module").mkdir(parents=True)
+        (app0 / "sce_module/libc.prx").write_bytes(module("libc", INTERP + b"\x31\xc0\xc3", 0, 0x20, False, False))
+        good = module("hb", INTERP.ljust(0x40, b"\x90"), 0x80, 0x90, True, True)
+        # truncated before the program header table ends (64 + 5 * 56 bytes)
+        (app0 / "eboot.bin").write_bytes(good[:0x100])
+        rc, lines = self.run_host_rc(app0, "libc.prx")
+        self.assertEqual(rc, 4, lines)
+        self.assertTrue([ln for ln in lines if "program header table out of range" in ln], lines)
+        # first segment's file offset past the end of the file
+        bad = bytearray(good)
+        bad[64 + 8:64 + 16] = st.pack("<Q", 0x10000000)
+        (app0 / "eboot.bin").write_bytes(bytes(bad))
+        rc, lines = self.run_host_rc(app0, "libc.prx")
+        self.assertEqual(rc, 4, lines)
+        self.assertTrue([ln for ln in lines if "segment 0 out of range" in ln], lines)
+        # the string table's offset past the end of PT_SCE_DYNLIBDATA
+        bad = bytearray(good)
+        dyn_off = 3 * PAGE
+        bad[dyn_off + 8:dyn_off + 16] = st.pack("<Q", 0x1000)
+        (app0 / "eboot.bin").write_bytes(bytes(bad))
+        rc, lines = self.run_host_rc(app0, "libc.prx")
+        self.assertEqual(rc, 4, lines)
+        self.assertTrue([ln for ln in lines if "dynamic table out of range" in ln], lines)
+
     def test_ghost_is_loaded_as_before(self) -> None:
         app0 = ROOT / "build/ghost/app0"
         if not (app0 / "eboot.bin").exists():

@@ -149,6 +149,44 @@ class GhostfsCoreTests(unittest.TestCase):
         self.install("CUSA22222", incomplete=True)               # the index says so too
         lines = self.boot("CUSA22222")
         self.assertIn("ghostfs: the install of CUSA22222 is incomplete: rerun gfs_install.py", lines)
+        # gfs_install.py's stub before the data goes in: the header alone, no table or names
+        info = self.titles["CUSA22222"][0]
+        self.files[f"{gc.index_name(info['prefix'])}/index.bin"] = gp.index_header(
+            len(info["containers"]), info["entries"], info["total"], 0, 0, info["prefix"], "CUSA22222",
+            int(info["layout_id"], 16), gp.FLAG_INCOMPLETE)
+        lines = self.boot("CUSA22222")
+        self.assertIn("ghostfs: the install of CUSA22222 is incomplete: rerun gfs_install.py", lines)
+
+    def test_corrupt_index_fails_cleanly(self) -> None:
+        """A truncated/corrupt index is rejected at load, not read through:
+        cap 0 (read_linear would divide by it), a name offset past the
+        names blob, and a file size past the index total each fail."""
+        import struct as st
+        self.install("CUSA22222")
+        self.catalogue(("CUSA22222", 0, None))
+        key = f"{gc.index_name(self.titles['CUSA22222'][0]['prefix'])}/index.bin"
+        good = self.files[key]
+        # cap (u64 at 16) zeroed
+        bad = bytearray(good)
+        bad[16:24] = st.pack("<Q", 0)
+        self.files[key] = bytes(bad)
+        lines = self.boot("CUSA22222")
+        self.assertTrue([ln for ln in lines if "bad index: table or names out of range" in ln], lines)
+        self.assertTrue([ln for ln in lines if ln.startswith("init -1")], lines)
+        # first entry's name offset (u32 at header 128 + 16) past the names blob
+        bad = bytearray(good)
+        bad[128 + 16:128 + 20] = st.pack("<I", 0xFFFF)
+        self.files[key] = bytes(bad)
+        lines = self.boot("CUSA22222")
+        self.assertTrue([ln for ln in lines if "bad index: entry 0 out of range" in ln], lines)
+        self.assertTrue([ln for ln in lines if ln.startswith("init -1")], lines)
+        # first entry's size (u64 at header 128 + 8) past the index total
+        bad = bytearray(good)
+        bad[128 + 8:128 + 16] = st.pack("<Q", 1 << 40)
+        self.files[key] = bytes(bad)
+        lines = self.boot("CUSA22222")
+        self.assertTrue([ln for ln in lines if "bad index: entry 0 out of range" in ln], lines)
+        self.assertTrue([ln for ln in lines if ln.startswith("init -1")], lines)
 
     def test_catalogue_entry_for_a_legacy_index(self) -> None:
         self.install("CUSA11111", "GFSINDEX")

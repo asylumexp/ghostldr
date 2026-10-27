@@ -33,7 +33,18 @@ COLD struct module *module_open(const char *path, bool is_main)
         return NULL;
     }
     off_t size = (off_t)vfs_lseek(fd, 0, 2);
-    vfs_lseek(fd, 0, 0);
+    if (size <= 0) {
+        /* A failed seek used to fall through as a huge size (and a short
+         * read then skipped the parse): fail here, with the file named. */
+        logf("size %s failed %lx", path, size);
+        vfs_close(fd);
+        return NULL;
+    }
+    if (vfs_lseek(fd, 0, 0) < 0) {
+        logf("seek %s failed", path);
+        vfs_close(fd);
+        return NULL;
+    }
     u8 *buf = page_alloc((size_t)size);
     if (!buf) {
         vfs_close(fd);
@@ -53,7 +64,12 @@ COLD struct module *module_open(const char *path, bool is_main)
     vfs_close(fd);
     struct module *m = arena_alloc(sizeof(*m));
     const char *slash = strrchr_c(path, '/');
-    m->name = arena_strdup(slash ? slash + 1 : path);
+    if (m)
+        m->name = arena_strdup(slash ? slash + 1 : path);
+    if (!m || !m->name) {
+        page_free(buf, (size_t)size);
+        return NULL;
+    }
     m->is_main = is_main;
     if (module_parse(m, buf, (u64)size) != 0) {
         page_free(buf, (size_t)size);
