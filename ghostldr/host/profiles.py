@@ -15,7 +15,7 @@ and the ghost_* features patch or read fixed offsets in the executable, so
 they need the fingerprint.
 
 run.py compiles the profiles into small blobs (boot_bundle) and sends them
-with the core as a GHOSTLDR_PROFILE_HEX line, so changing a profile needs no
+with the core as a GHOSTLDR_PROFILE_B64 line, so changing a profile needs no
 reinstall.  The blob format is struct prof_hdr and the records after it in
 ghostldr/native/include/ghost.h; the core's side is native/src/profile.c.
 
@@ -624,7 +624,7 @@ def packed(title: str) -> dict:
 
 def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = (),
                 drive_titles: dict[str, Path] | None = None) -> bytes:
-    """What run.py sends as GHOSTLDR_PROFILE_HEX: with a title, its blob
+    """What run.py sends as GHOSTLDR_PROFILE_B64: with a title, its blob
     (marked requested) and the generic default; without, one blob per title
     this computer knows (profiles, packs and the titles on a USB drive it
     sees, drive_titles {ID: app0}: the core picks the installed one, or the
@@ -655,7 +655,7 @@ def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = (),
 
 
 def release_bundle() -> bytes:
-    """GHOSTLDR_PROFILE_HEX of the release's ghostldr.lua (tools/mkbundle.py):
+    """GHOSTLDR_PROFILE_B64 of the release's ghostldr.lua (tools/mkbundle.py):
     every profile in ghostldr/data/titles and the generic default, from the
     repository alone: nothing of this computer's packs, dumps or drives."""
     titles = known_titles()

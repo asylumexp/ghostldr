@@ -9,6 +9,7 @@ answers (--loader-port to choose).
     python3 ghostldr/host/run.py elfldr           # no title: run ELF payloads sent to TCP 9021
     python3 ghostldr/host/run.py logs             # only listen for UDP logs
     python3 ghostldr/host/run.py doctor           # check this host + console
+    python3 ghostldr/host/run.py clear-cache      # delete the release's bundle cache on the console
 
 A boot also serves the runtime extension (build/ghostldr/ext.bin: the NID
 table and the extension's HLE code) on TCP 18195; the core fetches it first
@@ -36,6 +37,10 @@ run.py elfldr boots no title: the console serves an ELF loader on TCP 9021
 with `nc PS5 9021 < payload.elf` or ghostldr/host/elf_send.py; their output
 comes back on the same connection.
 
+run.py clear-cache deletes the bundle cache the release's ghostldr.lua
+keeps in SWRR's saved data (GLDRCACHE, docs/using-the-release.md), so the
+next ghostldr.lua asks for a bundle again.  run.py itself never uses it.
+
 A boot first runs a preflight coverage check when a local app0 and the
 NID name table are staged: if imports would bind to stubs (which return
 0 and look like success to the title), it asks before booting, unless
@@ -46,6 +51,7 @@ build/ghostldr/preflight.md.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -165,7 +171,7 @@ def build_payload(flags: int, log_ip: str, app_root: str, knobs: dict[str, int],
         raise SystemExit(f"core data must start at the text page boundary ({text_size:#x})")
     header = "\n".join([
         'GHOSTLDR_MODE = "connect"',      # ghostldr.lua: the extension and selector from here, the log over UDP
-        f'GHOSTLDR_CORE_HEX = "{core.hex()}"',
+        f'GHOSTLDR_CORE_B64 = "{base64.b64encode(core).decode()}"',
         f"GHOSTLDR_TEXT_SIZE = {text_size:#x}",
         f"GHOSTLDR_IMAGE_SIZE = {layout['__image_end']:#x}",
         f'GHOSTLDR_LOG_IP = "{log_ip}"',
@@ -560,6 +566,23 @@ def elfldr(args, listener: LogListener | None) -> int:
     return 0
 
 
+def clear_cache_payload() -> bytes:
+    """ghostldr.lua in clear-cache mode: it deletes the release's bundle cache
+    (GLDRCACHE) and says so on the TV; no core."""
+    return ('GHOSTLDR_MODE = "clear-cache"\n' + BOOT_LUA.read_text()).encode()
+
+
+def clear_cache(args) -> int:
+    port = args.loader_port or loader_port(args.host)
+    try:
+        send_lua(args.host, clear_cache_payload(), port)
+    except OSError as e:
+        raise SystemExit(f"could not send to {args.host}:{port} ({e}): {LOADER_HELP}")
+    print(f"sent to {args.host}:{port}: the console deletes the bundle cache (GLDRCACHE) and shows the result on "
+          "the TV; the release's ghostldr.lua asks for a bundle next time", flush=True)
+    return 0
+
+
 def boot_flags(args) -> int:
     """The boot context's flags for probe and boot (native/include/ghost.h);
     the release's ghostldr.lua takes `run.py boot`'s defaults (mkbundle.py)."""
@@ -585,7 +608,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Send the ghostldr bootstrap to the console and show its log (the advanced tool; "
         "python3 ghostldr.py covers everyday use).")
-    parser.add_argument("mode", choices=["probe", "boot", "elfldr", "logs", "lua", "doctor"])
+    parser.add_argument("mode", choices=["probe", "boot", "elfldr", "logs", "lua", "doctor", "clear-cache"])
     parser.add_argument("--no-build", action="store_true",
                         help="use the prebuilt core in build/ghostldr (from a release) instead of running make")
     parser.add_argument("--keep-host-memory", action="store_true",
@@ -682,6 +705,8 @@ def main(argv: list[str] | None = None) -> int:
             args.host, args.no_console = None, str(e)
         return doctor(args)
     args.host = args.host or console_ip()
+    if args.mode == "clear-cache":
+        return clear_cache(args)
 
     recorder = recorder_running()
     listener = None if recorder else LogListener(args.log)
@@ -724,7 +749,7 @@ def main(argv: list[str] | None = None) -> int:
                                           ("trace_opens",) if args.trace_opens else (), drive_titles)
         except profiles.ProfileError as e:
             raise SystemExit(str(e))
-        payload = f'GHOSTLDR_PROFILE_HEX = "{bundle.hex()}"\n'.encode() + payload
+        payload = f'GHOSTLDR_PROFILE_B64 = "{base64.b64encode(bundle).decode()}"\n'.encode() + payload
         port = args.loader_port or loader_port(args.host)
         print(f"sending {len(payload)} bytes of Lua to {args.host}:{port}", flush=True)
         try:

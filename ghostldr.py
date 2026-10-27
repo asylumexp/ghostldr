@@ -354,6 +354,16 @@ def cmd_elfldr(args, extra: list[str]) -> int:
     return run_py(argv)
 
 
+# ---- clear-cache ----
+
+def cmd_clear_cache(args, extra: list[str]) -> int:
+    ip = console(args.console)
+    if not loader_listening(ip):
+        return fail(f"the PS5 at {ip} isn't listening for ghostldr: {LOADER_STEPS}")
+    print(f"Clearing the bundle cache on {ip}: the release's ghostldr.lua asks for a bundle again next time")
+    return run_py(["clear-cache", "--host", ip, *extra])
+
+
 # ---- install ----
 
 def cmd_install(args, extra: list[str]) -> int:
@@ -458,6 +468,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("payload", metavar="PAYLOAD", nargs="?", help="an ELF to send to the running loader")
     p.add_argument("--build", action="store_true", help="build the core from source first (developers)")
 
+    add("clear-cache", "forget the bundle the release's ghostldr.lua cached",
+        "Delete the bundle cache on the PS5 (GLDRCACHE in SWRR's saved data): the next time ghostldr.lua is sent "
+        "to it, it asks for ghostldr-ext.bin or ghostldr-elfldr.bin again (docs/using-the-release.md). Start "
+        "SWRR's loader (HALL OF FAME) first.")
+
     p = add("install", "install a game into SWRR's saved data (no USB drive)",
             "Lay the game out for SWRR's saved data, then send it to the PS5 (about 40 minutes for Ghost). "
             "Needs no drive, but loads more slowly than one. Run it again to carry on after a stop.",
@@ -470,7 +485,7 @@ def parser() -> argparse.ArgumentParser:
 def value_options(cmd: str) -> set[str]:
     """The options of the tool `cmd` passes options on to that take a value
     (so "--wait 20" stays together and 20 isn't taken for GAME)."""
-    if cmd in ("doctor", "boot", "logs", "elfldr"):
+    if cmd in ("doctor", "boot", "logs", "elfldr", "clear-cache"):
         import run
         opts = {o for a in run.build_parser()._actions if a.nargs != 0 for o in a.option_strings}
     else:
@@ -504,8 +519,8 @@ def split_passthrough(ap: argparse.ArgumentParser, argv: list[str]) -> tuple[lis
 
 
 COMMANDS = {"doctor": cmd_doctor, "copy": cmd_copy, "check": cmd_check, "boot": cmd_boot, "logs": cmd_logs,
-            "elfldr": cmd_elfldr, "install": cmd_install}
-PASS_THROUGH = {"doctor", "boot", "logs", "elfldr", "install"}
+            "elfldr": cmd_elfldr, "clear-cache": cmd_clear_cache, "install": cmd_install}
+PASS_THROUGH = {"doctor", "boot", "logs", "elfldr", "clear-cache", "install"}
 
 
 def main(argv: list[str] | None = None) -> int:

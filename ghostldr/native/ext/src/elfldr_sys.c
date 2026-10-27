@@ -859,6 +859,100 @@ unsigned elfldr_output(int fd, const void *buf, u64 len)
 
 int pl_parse_sce(struct module *m, u8 *file, u64 size) { return module_parse(m, file, size); }
 
+/* ---- the TV and ghostldr.lua (elfldr.h) ---- */
+
+static u32 g_port;
+static bool g_can_boot;
+
+/* the message dialog Luac0re's loader shows its own text in (its
+ * show_dialog: Terminate, Initialize, Open with an OK button), opened again
+ * for each change */
+static void dialog(const char *text)
+{
+    static u8 param[0x88 + 0x20] __attribute__((aligned(16)));
+    s32 (*term)(void) = host_real_in("libSceMsgDialog", "sceMsgDialogTerminate");
+    s32 (*init)(void) = host_real_in("libSceMsgDialog", "sceMsgDialogInitialize");
+    s32 (*open)(void *) = host_real_in("libSceMsgDialog", "sceMsgDialogOpen");
+    s32 (*user)(s32 *) = host_real_in("libSceUserService", "sceUserServiceGetInitialUser");
+    s32 uid = 0;
+    if (!term || !init || !open || !user || user(&uid) != 0)
+        return;
+    term();
+    init();
+    u8 *p = param, *m = param + 0x88;
+    memset(param, 0, sizeof(param));
+    *(u64 *)(p + 0x00) = 0x30;                         /* baseParam.size */
+    *(u32 *)(p + 0x2C) = 0xC0D1A109u + (u32)(u64)p;    /* magic */
+    *(u64 *)(p + 0x30) = 0x88;                         /* size */
+    *(u32 *)(p + 0x38) = 1;                            /* USER_MSG */
+    *(u64 *)(p + 0x40) = (u64)m;
+    *(s32 *)(p + 0x58) = uid;
+    *(u64 *)(m + 0x08) = (u64)text;                    /* buttonType 0: OK */
+    s32 rc = open(p);
+    if (rc != 0)
+        logf("elfldr: the TV's dialog did not open (%x)", rc);
+}
+
+void el_ui(int what, unsigned n)
+{
+    static char text[512];
+    const char *ip = g_ctx->size >= (CTX_CONSOLE_IP_SLOT + 1) * 8 ? (const char *)((u64 *)g_ctx)[CTX_CONSOLE_IP_SLOT]
+                                                                 : NULL;
+    if (!ip)
+        ip = "this PS5";
+    if (what == EL_UI_COUNTDOWN)
+        fmt(text, sizeof(text), "ghostldr\n\nLoading the ghostldr extension in %u...\n\nPress OK (or \xe2\x97\x8b) "
+            "to cancel and stay in the ELF loader on %s:%u", n, ip, g_port);
+    else
+        fmt(text, sizeof(text), "ghostldr\n\nELF loader on %s:%u\n(nc %s %u < payload.elf)\n\n%s\nSend \"quit\" there "
+            "to go back to Luac0re", ip, g_port, ip, g_port, g_can_boot ? "Send \"boot\" there to boot games."
+            : "To boot games, send ghostldr-ext.bin there.");
+    dialog(text);
+}
+
+int el_ui_cancelled(void)
+{
+    s32 (*status)(void) = host_real_in("libSceMsgDialog", "sceMsgDialogUpdateStatus");
+    return status && status() == 3; /* FINISHED: OK or the circle button */
+}
+
+void *el_map(unsigned long size)
+{
+    void *p = NULL;
+    return K.map_flex && K.map_flex(&p, ALIGN_UP(size, 0x4000), PROT_READ | PROT_WRITE, 0) == 0 ? p : NULL;
+}
+
+void el_unmap(void *p, unsigned long size) { K.munmap(p, ALIGN_UP(size, 0x4000)); }
+
+/* conn becomes the log (log.c): the previous one, if another, is closed */
+void el_log_to(int conn)
+{
+    struct boot_ctx *c = g_ctx;
+    c->log_addr = 0;
+    u64 old = __atomic_exchange_n(&c->log_fd, (u64)(s64)conn, __ATOMIC_SEQ_CST);
+    if ((s64)old >= 0 && (int)old != conn)
+        K.close((int)old);
+}
+
+/* A bundle: its parts and header fields where ghostldr.lua reads them
+ * (its next boot context is a new one), its whole header for ghostldr.lua
+ * to check, and conn becomes the log */
+void el_bundle_done(const unsigned char *hdr, void *ext, void *sel, int conn)
+{
+    struct boot_ctx *c = g_ctx;
+    u8 *copy = c->size >= (CTX_BUNDLE_HEADER_SLOT + 1) * 8 ? (u8 *)((u64 *)c)[CTX_BUNDLE_HEADER_SLOT] : NULL;
+    if (copy)
+        memcpy(copy, hdr, EL_BUNDLE_HEADER);
+    c->ext_fd = (u64)ext;
+    memcpy(&c->ext_size, hdr + 24, 8);
+    c->ext_crc = *(const u32 *)(hdr + 40);
+    memcpy(c->ext_sha256, hdr + 48, sizeof(c->ext_sha256));
+    c->sel_fd = sel ? (u64)sel : (u64)-1;
+    memcpy(&c->sel_size, hdr + 32, 8);
+    c->sel_crc = *(const u32 *)(hdr + 44);
+    el_log_to(conn);
+}
+
 int elfldr_main(void) HIDDEN;
 int elfldr_main(void)
 {
@@ -871,7 +965,11 @@ int elfldr_main(void)
     }
     g_payload_fault = on_fault;
     u32 port = CTX_ELFLDR_PORT(g_ctx->flags);
-    int rc = elfldr_serve((unsigned short)(port ? port : EL_PORT));
+    g_port = port ? port : EL_PORT;
+    g_can_boot = (g_ctx->flags & CTX_ELFLDR_CAN_BOOT) != 0;
+    struct el_serve s = {(unsigned short)g_port, CTX_ELFLDR_COUNTDOWN(g_ctx->flags), g_can_boot,
+                         (g_ctx->flags & CTX_FLAG_BUNDLE) != 0};
+    int rc = elfldr_serve(&s);
     g_payload_fault = NULL;
     el_fini();
     return rc;

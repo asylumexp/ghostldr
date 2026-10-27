@@ -64,7 +64,9 @@ nc CONSOLE 9026 < ghostldr.lua
 nc CONSOLE 9021 < ghostldr-ext.bin
 ```
 
-The first opens TCP 9021 on the PS5 and waits five minutes for the second; a jailbroken console's own ELF loader already has 9021, so there it opens 9022. The TV says which, with the PS5's address, in the dialog where Luac0re shows its own text, and then what happened. The second boots a game as `ghostldr.py boot` does: one on a USB drive in the PS5, else an installed one, with the game selector when there are several. Its log comes back on the same connection. Send `ghostldr-elfldr.bin` instead to start the [ELF loader](docs/elfldr.md). The three files must come from the same release. [docs/using-the-release.md](docs/using-the-release.md#boot-with-no-computer) has the details.
+The first opens TCP 9021 on the PS5 and waits five minutes for the second; a jailbroken console's own ELF loader already has 9021, so there it opens 9022. The TV says which, with the PS5's address, in the dialog where Luac0re shows its own text, and then what happened. The second boots a game as `ghostldr.py boot` does: one on a USB drive in the PS5, else an installed one, with the game selector when there are several. Its log comes back on the same connection. Send `ghostldr-elfldr.bin` instead to start the [ELF loader](docs/elfldr.md). The three files must come from the same release.
+
+**After the first time, send only `ghostldr.lua`.** It keeps the last bundle in SWRR's saved data (a 16 MiB save container, `GLDRCACHE`). On a PS5 the ELF loader then starts on 9021 at once, and the TV counts down five seconds to the games: press OK (or ○) to stay in the ELF loader instead. A new release asks for its bundle again by itself. [docs/using-the-release.md](docs/using-the-release.md#boot-with-no-computer) has the details.
 
 ## Documentation
 

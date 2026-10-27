@@ -14,6 +14,7 @@ lists them; `python3 ghostldr.py COMMAND --help` explains one.
 | `check [DRIVE]` | what the PS5 will find on a drive: games, their folders and saves, folders it can't start and why | `usb_drive.inspect` |
 | `boot [GAME]` | starts a game: a title ID or part of its name, else the only game or the game selector; the USB drive's games first, then the installed ones (`--usb`, `--installed`, `--folder`, `--select`) | `run.py boot` |
 | `logs` | the PS5's log while a game runs; `--saved` prints the end of the last one | `run.py logs` |
+| `clear-cache` | deletes the bundle the release's `ghostldr.lua` keeps in SWRR's saved data (`GLDRCACHE`), so it asks for one again ([using-the-release.md](using-the-release.md#later-sessions-ghostldrlua-alone)) | `run.py clear-cache` |
 | `install DUMP` | installs a game into SWRR's saved data, for a console without a drive | `gfs_pack.py`, `gfs_install.py` |
 
 DRIVE is a drive mounted on this computer (default: the only exFAT or FAT

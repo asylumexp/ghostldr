@@ -58,7 +58,7 @@ Icons are loaded one per frame, nearest to the selection first.
 The first of these that the title has:
 
 1. **Its own `sce_sys/param.sfo`:** `TITLE_xx` in the system language, else `TITLE`. From the copy in `<prefix>META`, else read through the title's index.
-2. **Its profile's `name`** (`ghostldr/data/titles/<TITLE>.json`). run.py sends the profiles at boot (`GHOSTLDR_PROFILE_HEX`; `--select` sends every profile it knows); `profiles.py` compiles the name into a `REC_NAME` record that the selector reads in place, and the core ignores. Ghost of Tsushima's profile says "Ghost of Tsushima", so the v0.1 install, whose dump has no `sce_sys`, shows its name without anything installed.
+2. **Its profile's `name`** (`ghostldr/data/titles/<TITLE>.json`). run.py sends the profiles at boot (`GHOSTLDR_PROFILE_B64`; `--select` sends every profile it knows); `profiles.py` compiles the name into a `REC_NAME` record that the selector reads in place, and the core ignores. Ghost of Tsushima's profile says "Ghost of Tsushima", so the v0.1 install, whose dump has no `sce_sys`, shows its name without anything installed.
 3. **A name stored at install time:** `--name` given to `gfs_pack.py` or `gfs_install.py`, else the PlayStation Store's (`--fetch-art`), in `<prefix>META`; then the catalogue's.
 4. **The title ID.**
 

@@ -24,6 +24,7 @@ local dump or pack.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import struct
 import sys
@@ -112,14 +113,15 @@ def make(out: Path) -> dict[str, Path]:
         "GHOSTLDR_BUNDLES = {",
         *(pin_lua(kind, e, s) for kind, (e, s) in bundles.items()),
         "}",
-        f'GHOSTLDR_CORE_HEX = "{core.hex()}"',
+        f'GHOSTLDR_CORE_B64 = "{base64.b64encode(core).decode()}"',
         f"GHOSTLDR_TEXT_SIZE = {text_size:#x}",
         f"GHOSTLDR_IMAGE_SIZE = {layout['__image_end']:#x}",
         f"GHOSTLDR_FLAGS = {run.boot_flags(defaults):#x}",    # run.py boot's: release SWRR's buffers, FTP 1212
         f"GHOSTLDR_APP_ROOT = {run.lua_str(defaults.app_root)}",
-        f'GHOSTLDR_PROFILE_HEX = "{profiles.release_bundle().hex()}"',
+        f'GHOSTLDR_PROFILE_B64 = "{base64.b64encode(profiles.release_bundle()).decode()}"',
         # Luac0re keeps one Lua state: what an earlier run.py boot set must not count here
         "GHOSTLDR_LOG_IP, GHOSTLDR_LOG_PORT = nil, nil",
+        "GHOSTLDR_CORE_HEX, GHOSTLDR_PROFILE_HEX = nil, nil",
         "GHOSTLDR_EXT_PORT, GHOSTLDR_EXT_SIZE, GHOSTLDR_EXT_CRC, GHOSTLDR_EXT_SHA256 = nil, nil, nil, nil",
         "GHOSTLDR_SEL_PORT, GHOSTLDR_SEL_SIZE, GHOSTLDR_SEL_CRC = nil, nil, nil",
         "GHOSTLDR_GPU_HEAP_MIB, GHOSTLDR_SLACK_MIB, GHOSTLDR_POOL1_MIB, GHOSTLDR_CPU_HEAP_MIB = nil, nil, nil, nil",

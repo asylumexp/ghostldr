@@ -370,7 +370,7 @@ def elf_with_script(script: str, **kw) -> bytes:
     return gnu_elf(b"\xc3" + b"ELFLDR-TEST:" + script.encode() + b"\n", dynamic=bool(kw.get("needed")), **kw)
 
 
-class Service(unittest.TestCase):
+class ServiceBase(unittest.TestCase):
     """elfldr.c over real sockets, with a loader that runs nothing."""
 
     @classmethod
@@ -380,7 +380,7 @@ class Service(unittest.TestCase):
         cls.exe = cls.root / "elfldr_host"
         build(cls.exe, [HERE / "ext_native/elfldr_host.c"],
               [NATIVE / "ext/src/elfldr.c", NATIVE / "ext/src/payload.c", NATIVE / "src/elf.c",
-               HERE / "ext_native/elfldr_fake.c"], ("-DEL_TIMEOUT_S=2",))
+               HERE / "ext_native/elfldr_fake.c"], ("-DEL_TIMEOUT_S=2", "-DEL_SECOND_MS=100"))
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -418,6 +418,9 @@ class Service(unittest.TestCase):
             while chunk := s.recv(65536):
                 buf += chunk
         return buf.decode("utf-8", "replace").splitlines()
+
+class Service(ServiceBase):
+    """The ELF loader as run.py starts it."""
 
     def test_payload_sent_as_nc_sends_it(self) -> None:
         """no half-close: the ELF's own headers say where it ends"""
@@ -460,8 +463,9 @@ class Service(unittest.TestCase):
         self.assertEqual(int(r.stdout), -1)
 
     def test_commands_and_quit(self) -> None:
-        self.assertEqual(self.talk(b"help\n"), ["[elfldr] send an ELF, or one of: status, quit, help"])
-        self.assertEqual(self.talk(b"bogus\r\n"), ["[elfldr] unknown command; send an ELF, or one of: status, quit, help"])
+        cmds = "status, boot, forget, log, quit, help"
+        self.assertEqual(self.talk(b"help\n"), [f"[elfldr] send an ELF, or one of: {cmds}"])
+        self.assertEqual(self.talk(b"bogus\r\n"), [f"[elfldr] unknown command; send an ELF, or one of: {cmds}"])
         self.assertEqual(self.talk(b"\x00\x01binary"),
                          ["[elfldr] refused: neither an ELF nor a command (it starts 00 01 62 69)"])
         s = self.connect()
@@ -478,7 +482,7 @@ class Service(unittest.TestCase):
         self.assertEqual(rest.decode(), "[elfldr] payload 1 exited with code 0\n")
         self.assertEqual(self.talk(b"quit\n"), ["[elfldr] quitting: SWRR goes back to Luac0re's loader"])
         self.assertEqual(self.proc.wait(10), 0)
-        self.assertEqual(self.proc.stdout.read().strip(), "served 0")
+        self.assertEqual(self.proc.stdout.read().splitlines(), [f"ui ready {self.port}", "served 0"])
 
     def test_refusals(self) -> None:
         lines = self.talk(gnu_elf(flags=(7, 6)))
@@ -530,6 +534,20 @@ class Service(unittest.TestCase):
         log = self.talk(b"status\n")
         self.assertEqual(log, ["[elfldr] 0 payloads running"])
 
+    def test_no_bundles_from_run_py(self) -> None:
+        """run.py's ELF loader serves its own extension: a bundle is refused, and
+        "boot" and "forget" say there is nothing to boot or forget."""
+        import mkbundle
+        b = mkbundle.header(2, b"x" * 300, b"", bytes(8)) + b"x" * 300
+        self.assertIn("bundles are for the release's ghostldr.lua", self.talk(b)[0])
+        self.assertIn("not booting: the extension here is the ELF loader's alone", self.talk(b"boot\n")[0])
+        self.assertIn("nothing to forget: run.py serves this extension", self.talk(b"forget\n")[0])
+        self.assertEqual(self.talk(b"quit\n"), ["[elfldr] quitting: SWRR goes back to Luac0re's loader"])
+        self.assertEqual(self.proc.wait(10), 0)
+        out = self.proc.stdout.read()
+        self.assertIn("ui ready", out)
+        self.assertNotIn("ui countdown", out)
+
     def test_elf_send(self) -> None:
         import elf_send
         path = self.root / "p.elf"
@@ -556,6 +574,124 @@ def run_elf_send(mod, argv: list[str], path: Path | None) -> int:
         return mod.main()
     finally:
         sys.argv = old
+
+
+class ReleaseService(ServiceBase):
+    """The ELF loader as the release's ghostldr.lua starts it: the countdown to
+    the extension's games, cancelling it, bundles told apart by their magic, and
+    the boot, forget and log commands.  A countdown second is 100 ms here."""
+
+    OPTIONS: tuple[str, ...] = ("countdown=5", "boot", "bundles")
+
+    def setUp(self) -> None:
+        self.proc = subprocess.Popen([str(self.exe), "serve", *self.OPTIONS], stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+        line = self.proc.stdout.readline()
+        self.assertTrue(line.startswith("listening "), line)
+        self.port = int(line.split()[1])
+
+    def start(self, *options: str) -> None:
+        self.tearDown()
+        self.OPTIONS = options
+        self.setUp()
+
+    def finish(self) -> tuple[int, list[str]]:
+        rc = self.proc.wait(20)
+        return rc, self.proc.stdout.read().splitlines()
+
+    def bundle(self, kind: int, ext: bytes, sel: bytes = b"") -> bytes:
+        import mkbundle
+        return mkbundle.header(kind, ext, sel, bytes.fromhex("0123456789abcdef")) + ext + sel
+
+    @staticmethod
+    def fnv(b: bytes) -> str:
+        h = 2166136261
+        for x in b:
+            h = ((h ^ x) * 16777619) & 0xFFFFFFFF
+        return f"{h:08x}"
+
+    def test_countdown_runs_out_and_boots(self) -> None:
+        rc, out = self.finish()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, ["ui countdown 5", "ui countdown 4", "ui countdown 3", "ui countdown 2",
+                               "ui countdown 1", "served 1"])      # EL_BOOT
+
+    def test_cancel_on_the_tv_keeps_the_elf_loader(self) -> None:
+        self.start("countdown=5", "boot", "bundles", "cancel=3")
+        time.sleep(1.2)                                # well past the countdown's 0.5 s
+        self.assertEqual(self.talk(elf_with_script("out=still here|;code=4;"))[-1],
+                         "[elfldr] payload 1 exited with code 4")
+        self.assertEqual(self.talk(b"quit\n"), ["[elfldr] quitting: SWRR goes back to Luac0re's loader"])
+        rc, out = self.finish()
+        self.assertEqual(out, ["ui countdown 5", "ui countdown 4", "ui countdown 3", "ui ready %d" % self.port,
+                               "served 0"])
+
+    def test_a_payload_stops_the_countdown(self) -> None:
+        lines = self.talk(elf_with_script("out=hi|;code=2;"))
+        self.assertEqual(lines[-1], "[elfldr] payload 1 exited with code 2")
+        time.sleep(0.8)
+        self.talk(b"quit\n")
+        rc, out = self.finish()
+        self.assertEqual(out[-2:], ["ui ready %d" % self.port, "served 0"])
+        self.assertNotIn("served 1", out)
+
+    def test_boot_forget_and_log_commands(self) -> None:
+        self.start("boot", "bundles")
+        with self.connect() as log:
+            log.sendall(b"log\n")
+            self.assertEqual(log.recv(4096).decode().splitlines()[0],
+                             "[elfldr] this connection gets ghostldr's log from now on")
+            self.assertEqual(self.talk(b"forget\n"),
+                             ["[elfldr] forgetting the cached bundles: send ghostldr-ext.bin or ghostldr-elfldr.bin "
+                              "to this port next"])
+            rc, out = self.finish()
+            self.assertEqual(out, ["ui ready %d" % self.port, "log 1", "served 3"])    # EL_FORGET
+        self.start("boot", "bundles")
+        self.assertEqual(self.talk(b"boot\n"), ["[elfldr] booting games: the ELF loader stops"])
+        self.assertEqual(self.finish()[1][-1], "served 1")
+
+    def test_bundles_are_told_apart_by_their_magic(self) -> None:
+        """A full bundle sent as nc sends it (no half-close), the header and the
+        parts in any packet sizes: taken whole and handed over; its connection
+        becomes the log."""
+        ext, sel = os.urandom(300000), os.urandom(70000)
+        data = self.bundle(1, ext, sel)
+        with self.connect() as s:
+            for i in range(0, len(data), 7001):
+                s.sendall(data[i:i + 7001])
+            first = s.recv(4096).decode()
+            self.assertIn(f"[elfldr] received ghostldr-ext.bin ({len(data)} bytes): ghostldr.lua checks it and boots it",
+                          first)
+            rc, out = self.finish()
+            rest = first + s.recv(4096).decode()
+        self.assertIn("[ghostldr] the log goes here", rest)
+        self.assertEqual(out[-3:], [f"bundle kind 1 ext {len(ext)} {self.fnv(ext)} sel {len(sel)} {self.fnv(sel)}",
+                                    "log 1", "served 2"])                  # EL_BUNDLE
+
+    def test_bundle_refusals(self) -> None:
+        self.start("bundles")
+        good = self.bundle(2, os.urandom(5000))
+        with self.connect() as s:      # cut short
+            s.sendall(good[:3000])
+            s.shutdown(socket.SHUT_WR)
+            self.assertEqual(s.recv(4096).decode(),
+                             f"[elfldr] refused: 3000 of the bundle's {len(good)} bytes came (the client stopped sending)\n")
+        bad = bytearray(good)
+        struct.pack_into("<I", bad, 8, 2)
+        self.assertIn("refused: a bundle of format 2", self.talk(bytes(bad))[0])
+        self.assertEqual(self.talk(b"GLDRB", half_close=True),
+                         ["[elfldr] refused: the connection ended after 5 bytes, inside the headers"])
+        a = self.connect()             # a payload runs: no bundle now
+        a.sendall(elf_with_script("sleep=1500;code=0;"))
+        a.recv(4096)
+        self.assertEqual(self.talk(good), ["[elfldr] refused: a bundle while 1 payload runs: send it again once they "
+                                           "have finished"])
+        while a.recv(4096):
+            pass
+        a.close()
+        lines = self.talk(good)        # now it is taken
+        self.assertIn("received ghostldr-elfldr.bin (5128 bytes): ghostldr.lua checks it", lines[0])
+        self.assertEqual(self.finish()[1][-1], "served 2")
 
 
 if __name__ == "__main__":

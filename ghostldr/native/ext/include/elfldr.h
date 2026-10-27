@@ -23,6 +23,9 @@
 #pragma once
 
 #define EL_PORT 9021                 /* TCP: the usual elfldr port; run.py elfldr --port */
+#ifndef EL_SECOND_MS
+#define EL_SECOND_MS 1000            /* a countdown second (the host tests make it shorter) */
+#endif
 #define EL_MAX_PAYLOAD (64u << 20)   /* bytes an ELF may have */
 #define EL_SESSIONS 8                /* payloads at once (the JIT objects allow 4) */
 
@@ -43,13 +46,46 @@ int el_run(struct el_payload *p, char *why, unsigned size);
 int el_poll(struct el_payload *p, char *line, unsigned size);
 void el_describe(struct el_payload *p, char *line, unsigned size); /* one line for "status" */
 
+/* ---- the TV and ghostldr.lua (elfldr_sys.c; fakes in the host tests) ---- */
+enum { EL_UI_READY, EL_UI_COUNTDOWN };
+/* Show on the TV: the loader's port and what it takes (READY), or the
+ * seconds left before the extension loads (COUNTDOWN, n seconds) */
+void el_ui(int what, unsigned n);
+/* the user dismissed the countdown (its dialog finished): 1 */
+int el_ui_cancelled(void);
+/* memory for a bundle's parts, which ghostldr.lua takes over (flexible
+ * memory on the console, as it maps its own) */
+void *el_map(unsigned long size);
+void el_unmap(void *p, unsigned long size);
+/* A bundle came on conn (hdr: its 128-byte header; sel NULL: none): hand
+ * it to ghostldr.lua, and conn becomes the log */
+void el_bundle_done(const unsigned char *hdr, void *ext, void *sel, int conn);
+/* conn becomes the log (the "log" command) */
+void el_log_to(int conn);
+
 /* ---- the service (elfldr.c) ---- */
 /* the length of the ELF or SELF whose first have bytes are b: > 0, 0 when
  * more bytes are needed to tell, < 0 when it is neither */
 long el_file_size(const unsigned char *b, unsigned long have);
-/* Serve on port until a client sends "quit" while nothing runs: 0, or < 0
- * (the port is taken, ...). */
-int elfldr_serve(unsigned short port);
+
+/* The release's two-file boot (docs/architecture.md): a bundle sent to the
+ * loader's port is told apart by its magic and taken whole */
+#define EL_BUNDLE_MAGIC "GLDRBNDL"
+#define EL_BUNDLE_HEADER 128
+#define EL_BUNDLE_MAX (64u << 20) /* bytes each part may have */
+
+struct el_serve {
+    unsigned short port;
+    unsigned countdown; /* seconds before EL_BOOT, unless the user cancels or a payload comes; 0: none */
+    int can_boot;       /* the full extension is here: "boot" and the countdown work */
+    int bundles;        /* ghostldr.lua's listen mode: bundles are taken (EL_BUNDLE); else refused */
+};
+/* What elfldr_serve returns besides 0 (a client sent "quit" while nothing
+ * ran) and < 0 (the port is taken, ...): */
+#define EL_BOOT 1   /* boot games now: the countdown ran out, or "boot" */
+#define EL_BUNDLE 2 /* a bundle came (el_bundle_done has it) */
+#define EL_FORGET 3 /* "forget": ghostldr.lua clears its bundle cache */
+int elfldr_serve(const struct el_serve *s);
 
 #ifdef BOOT_MAGIC /* beside ghost.h: the payload formats (payload.c) */
 #define PL_ORBIS 1  /* imports from the system's libraries (OpenOrbis: an ELF, or create-fself's OELF/SELF) */

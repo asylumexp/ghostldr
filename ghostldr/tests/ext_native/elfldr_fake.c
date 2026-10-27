@@ -9,6 +9,11 @@
  * finishes with exit code N, or as a crash.  Two payloads at once, as if
  * there were two JIT objects.  Freestanding like elfldr.c: ghost.h, and the
  * environment of ftp.h.
+ *
+ * The TV and ghostldr.lua (el_ui, el_map, el_bundle_done, el_log_to) print
+ * what they are asked, one "ui ..." / "bundle ..." / "log ..." line each on
+ * stdout; el_ui_cancelled says yes once the countdown has shown
+ * g_cancel_at seconds (elfldr_host.c sets it).
  */
 #include "ghost.h"
 #include "ftp.h"
@@ -176,4 +181,57 @@ int el_poll(struct el_payload *p, char *line, unsigned size)
 void el_describe(struct el_payload *p, char *line, unsigned size)
 {
     fmt(line, size, "payload %u: running for %ld ms", p->id, fv_clock_ms() - p->t0);
+}
+
+/* ---- the TV and ghostldr.lua ---- */
+long write(int fd, const void *buf, unsigned long n);
+int g_cancel_at = -1; /* the user dismisses the countdown when it shows this many seconds */
+static volatile int g_cancel;
+
+static void out(const char *f, ...)
+{
+    char line[300];
+    __builtin_va_list ap;
+    __builtin_va_start(ap, f);
+    int n = vfmt(line, sizeof(line) - 1, f, ap);
+    __builtin_va_end(ap);
+    line[n++] = '\n';
+    write(1, line, (unsigned long)n);
+}
+
+void el_ui(int what, unsigned n)
+{
+    out(what == EL_UI_COUNTDOWN ? "ui countdown %u" : "ui ready %u", n);
+    if (what == EL_UI_COUNTDOWN && (int)n == g_cancel_at)
+        g_cancel = 1;
+}
+
+int el_ui_cancelled(void) { return __atomic_exchange_n(&g_cancel, 0, __ATOMIC_SEQ_CST); }
+
+void *el_map(unsigned long size) { return fv_alloc(size); }
+void el_unmap(void *p, unsigned long size) { fv_free(p, size); }
+
+static u32 sum(const u8 *p, u64 n)
+{
+    u32 h = 2166136261u; /* FNV-1a, to compare with what the test sent */
+    for (u64 i = 0; i < n; i++)
+        h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
+void el_log_to(int conn)
+{
+    out("log %d", conn >= 0);
+    static const char line[] = "[ghostldr] the log goes here\n";
+    fv_send(conn, line, sizeof(line) - 1);
+}
+
+void el_bundle_done(const unsigned char *hdr, void *ext, void *sel, int conn)
+{
+    u32 kind;
+    u64 ext_size, sel_size;
+    memcpy(&kind, hdr + 16, 4), memcpy(&ext_size, hdr + 24, 8), memcpy(&sel_size, hdr + 32, 8);
+    out("bundle kind %u ext %lu %08x sel %lu %08x", kind, ext_size, sum(ext, ext_size), sel_size,
+        sel ? sum(sel, sel_size) : 0);
+    el_log_to(conn);
 }

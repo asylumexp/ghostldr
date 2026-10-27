@@ -366,6 +366,20 @@ class CliTests(unittest.TestCase):
             rc = gl.main(["boot", *args])
         return rc, seen.get("argv"), err.getvalue()
 
+    def test_clear_cache(self) -> None:
+        """ghostldr.py clear-cache: run.py clear-cache for the console found, its options passed on."""
+        import ghostldr as gl
+        seen = {}
+        with mock.patch.object(gl, "console", return_value="10.0.0.5"), \
+                mock.patch.object(gl, "loader_listening", return_value=9026), \
+                mock.patch.object(gl, "run_py", side_effect=lambda argv: seen.setdefault("argv", argv) and 0), \
+                contextlib.redirect_stdout(io.StringIO()):
+            rc = gl.main(["clear-cache", "--loader-port", "9026"])
+        self.assertEqual((rc, seen["argv"]), (0, ["clear-cache", "--host", "10.0.0.5", "--loader-port", "9026"]))
+        sub = cli("clear-cache", "--help")
+        self.assertEqual(sub.returncode, 0, sub.stderr)
+        self.assertIn("GLDRCACHE", sub.stdout)
+
     def test_boot(self) -> None:
         rc, argv, _ = self.boot()
         self.assertEqual((rc, argv), (0, ["boot", "--app-root", "auto", "--no-build", "--host", "10.0.0.5"]))

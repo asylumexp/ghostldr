@@ -3,7 +3,7 @@
  *
  * host/profiles.py compiles ghostldr/data/titles/<TITLE>.json (merged over
  * default.json) into the little-endian blobs below; run.py sends one per
- * known title plus the generic default (title "") as GHOSTLDR_PROFILE_HEX,
+ * known title plus the generic default (title "") as GHOSTLDR_PROFILE_B64,
  * and ghostldr.lua leaves a pointer to them, ended by 8 zero bytes, in the
  * last u64 of the boot context.  Without it every title gets k_default.
  *

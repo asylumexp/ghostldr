@@ -215,13 +215,42 @@ Everything else is as in step 4: the preflight line, the first boot, the log and
 
    Press Ctrl+C when you've seen enough: that stops the log, not the game. A payload-sender app that closes the connection right after sending works too; the game starts all the same, and only the log is lost.
 
-That's all. Every later session: close SWRR, start it again, open HALL OF FAME, and send the same two files.
+That's all. `ghostldr.lua` keeps the bundle on the PS5 (below), so every later session needs only the first file: close SWRR, start it again, open HALL OF FAME, and send `ghostldr.lua`.
 
-- **Ports:** the bundle goes to 9021, or 9022 when 9021 is taken. The ELF loader that `ghostldr-elfldr.bin` starts listens on the next port after the bundle's: 9022 on a stock console, 9023 on a jailbroken one. Both are on the TV, on the connection and in a notification.
+### Later sessions: ghostldr.lua alone
+
+The first time a bundle arrives, `ghostldr.lua` saves it, as it came, in a save container of its own in SWRR's saved data: `GLDRCACHE`, 16 MiB of the console's storage (the bundle is 2.8 MB, or 110 KB for `ghostldr-elfldr.bin`). The log says `cached ghostldr-ext.bin in this console's saved data (…): from now on send ghostldr.lua alone`. It holds one bundle, the last one sent. Next time:
+
+```bash
+nc CONSOLE 9026 < ghostldr.lua
+```
+
+- **On a PS5,** the [ELF loader](elfldr.md) starts at once on 9021 (9022 on a jailbroken console), and with `ghostldr-ext.bin` cached the TV counts down:
+
+  ```
+  ghostldr
+
+  Loading the ghostldr extension in 5...
+
+  Press OK (or ○) to cancel and stay in the ELF loader on 192.168.1.123:9021
+  ```
+
+  Let it run out and the games boot as above. Press OK (or ○) and the ELF loader stays, for payloads: send `boot` there later to boot the games after all (`echo boot | nc CONSOLE 9021`), or `quit` to go back to Luac0re's loader. A payload sent during the countdown stops it too. With only `ghostldr-elfldr.bin` cached there is no countdown: the ELF loader runs, and sending `ghostldr-ext.bin` to its port boots the games (and caches it).
+- **On a PS4,** which has no ELF loader, the same countdown shows in the dialog, then the cached `ghostldr-ext.bin` boots. OK (or ○) goes back to Luac0re's loader instead.
+- **The log:** with nothing sent there is no connection for the log to go to. On a PS5, connect to the ELF loader and send `log` (`echo log | nc CONSOLE 9021`, or `nc` and type it) before the countdown runs out or `boot`: that connection gets the log, then the game's.
+- **A newer bundle:** send it to the same port as before, to the ELF loader while it runs or to the prompt. It is checked as any bundle, replaces the cache, and runs: `ghostldr-ext.bin` boots the games, `ghostldr-elfldr.bin` restarts the ELF loader with it. `ghostldr-elfldr.bin` doesn't replace a cached `ghostldr-ext.bin`, whose extension has the ELF loader too.
+- **A new release:** its `ghostldr.lua` finds the old release's bundle in the cache, shows `Version mismatch: the cached ghostldr-ext.bin is from build …, this ghostldr.lua expects build …` above the usual prompt, and the bundle you send replaces it.
+- **A damaged cache** (cut short, or a checksum that doesn't match: the selector's here, the extension's in the core, both before anything runs) is deleted, the TV says `The cached bundle is damaged: deleted. Send the bundle again.` above the prompt, and what you send is cached again.
+- **No room:** if the console's storage can't take 16 MiB more, the log says `not cached: the console's storage is full …; this boot goes on`, and the next session asks for the bundle again.
+- **Clearing it:** send `forget` to the ELF loader (`echo forget | nc CONSOLE 9021`): the cache is deleted and the prompt asks for a bundle. From a computer, `python3 ghostldr.py clear-cache` (or `ghostldr/host/run.py clear-cache`) deletes it while Luac0re's loader listens. With only `nc`, put one line before the script: `(echo "GHOSTLDR_CLEAR_CACHE = true"; cat ghostldr.lua) | nc CONSOLE 9026` clears it, then asks for a bundle. Deleting `GLDRCACHE` in SWRR's saved data (as under [Removing it](#removing-it)) works too; it is not a game's progress.
+
+### Notes
+
+- **Ports:** the bundle goes to 9021, or 9022 when 9021 is taken. The ELF loader takes over the bundle's port once ghostldr.lua has closed it: 9021 on a stock console, 9022 on a jailbroken one. A bundle sent to it is still taken (it is told apart from a payload by its first bytes). Both are on the TV, on the connection and in a notification.
 - **Nothing arrives in five minutes:** `ghostldr.lua` closes its port and gives SWRR back to Luac0re's loader untouched, and the TV says so above Luac0re's own text; send it again.
-- **Anything else on that port is refused,** with the reason and what it expected on the TV, on its connection and in a notification, and `ghostldr.lua` keeps waiting for the right file: an ELF (send `ghostldr-elfldr.bin` first), a Lua script (that goes to 9026), a bundle that arrived cut short, or one from another release: `ghostldr-ext.bin is from another build (…) than this ghostldr.lua (…): send ghostldr.lua and ghostldr-ext.bin from the same release`.
+- **Anything else on that port is refused,** with the reason and what it expected on the TV, on its connection and in a notification, and `ghostldr.lua` keeps waiting for the right file: an ELF (send `ghostldr-elfldr.bin` first), a Lua script (that goes to 9026), a bundle that arrived cut short, or one from another release: `version mismatch: ghostldr-ext.bin is from build …, this ghostldr.lua is build …: send ghostldr.lua and ghostldr-ext.bin from the same release`.
 - **What it doesn't do:** it takes `ghostldr.py boot`'s defaults and no options: no `--title` (the selector asks when there are several games), no `--folder`, no memory knobs, and no preflight check against your dump. A title profile written on your computer isn't in it; the release's own profiles are. For any of that, use `ghostldr.py boot`.
-- **On a PS4** the full bundle boots as on a PS5 (from saved data; [ps4.md](ps4.md)); the ELF loader's is refused, since the ELF loader needs a PS5, and the TV says to send `ghostldr-ext.bin` instead. In Jak X with UltraC0re, send `ghostldr.lua` to 8888 instead of 9026; that is untested, and `ghostldr.py boot` is the tested way there.
+- **On a PS4** the full bundle boots as on a PS5 (from saved data; [ps4.md](ps4.md)), and is cached the same way; the ELF loader's is refused, since the ELF loader needs a PS5, and the TV says to send `ghostldr-ext.bin` instead. In Jak X with UltraC0re, send `ghostldr.lua` to 8888 instead of 9026; that is untested, and `ghostldr.py boot` is the tested way there.
 - **Which `nc`:** Luac0re's loader runs a script once its connection ends. macOS's `nc` ends it after the file by itself; on Linux add `-N` to the first command (`nc -N CONSOLE 9026 < ghostldr.lua`), or `-q 0` with the traditional netcat, or the command waits until you press Ctrl+C. The bundle needs neither: `ghostldr.lua` reads its length from its header. On Windows, use a payload-sender app, or `nc` in WSL.
 
 ## Names and pictures in the game selector (optional)
@@ -285,3 +314,5 @@ This deletes Ghost's data and index and keeps its progress, `GHOSTSAVE` (add `--
 Or delete the entries by hand in **Settings → Saved Data and Game/App Settings → Saved Data (PS4) → Console Storage → Star Wars Racer Revenge**: `GHOST000`…`GHOST055` and `GHOSTINDEX` (or `GFSINDEX`).
 
 Keep `GHOSTSAVE` (Ghost's progress) and the Luac0re save (`SLUS-20268` on US SWRR, `SLES-50366` on EU) unless you mean to remove those too.
+
+**The bundle cache** (`GLDRCACHE`, 16 MiB, [above](#later-sessions-ghostldrlua-alone)): `python3 ghostldr.py clear-cache`, `forget` sent to the ELF loader, or delete `GLDRCACHE` in the same Saved Data list.

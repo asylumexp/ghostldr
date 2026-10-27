@@ -644,6 +644,18 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 #define CTX_FTP_PORT(flags) ((u32)((flags) >> 48)) /* the FTP server's TCP port (run.py --ftp-port; 0: none) */
 #define CTX_FLAG_ELFLDR 1048576 /* no title: serve the ELF loader (run.py elfldr, docs/elfldr.md) */
 #define CTX_ELFLDR_PORT(flags) ((u32)((flags) >> 32) & 0xFFFF) /* its TCP port (run.py elfldr --port) */
+/* The ELF loader in the release's listen mode (ghostldr.lua, with
+ * CTX_FLAG_BUNDLE): seconds of countdown before it boots games (bits 48-55,
+ * the FTP port's, which no title uses here), and that the extension is the
+ * full one, so it can ("boot", the countdown) */
+#define CTX_ELFLDR_COUNTDOWN(flags) ((u32)((flags) >> 48) & 0xFF)
+#define CTX_ELFLDR_CAN_BOOT (1ULL << 56)
+/* Listen mode: the context's u64s after the profile slot, when ctx->size
+ * covers them: the console's address as text (for the TV), and 128 bytes
+ * where the ELF loader copies the header of a bundle it takes, which
+ * ghostldr.lua checks against its pins as it checks its own */
+#define CTX_CONSOLE_IP_SLOT 64
+#define CTX_BUNDLE_HEADER_SLOT 65
 /* The release's ghostldr.lua received a bundle (ghostldr-ext.bin or
  * ghostldr-elfldr.bin, docs/architecture.md "Two-file boot"): ext_fd and
  * sel_fd hold the addresses of the extension and the selector in flexible

@@ -17,24 +17,42 @@ nc CONSOLE 9026 < ghostldr.lua
 nc CONSOLE 9021 < ghostldr-elfldr.bin
 ```
 
-The second connection stays open and shows the loader's log, including the port payloads go to:
+The second connection stays open and shows the loader's log:
 
 ```
 ghostldr: received ghostldr-elfldr.bin (110241 bytes, build …) from 192.168.1.23 on TCP 9021
-ghostldr: starting the ELF loader on TCP 9022: send payloads with nc 192.168.1.123 9022 < payload.elf; send "quit" there to give SWRR back to Luac0re's loader
+ghostldr: cached ghostldr-elfldr.bin in this console's saved data (GLDRCACHE save container 16.0 MiB, 0.1 MiB): from now on send ghostldr.lua alone
+ghostldr: starting the ELF loader on TCP 9021: send payloads with nc 192.168.1.123 9021 < payload.elf; send "quit" there to give SWRR back to Luac0re's loader
 …
-[ghostldr 96] elfldr: listening on TCP 9022 (send an ELF: nc <ps5> 9022 < payload.elf)
+[ghostldr 96] elfldr: listening on TCP 9021 (send an ELF: nc <ps5> 9021 < payload.elf)
 ```
 
-The ports, which the TV (in Luac0re's dialog), the log and the PS5's notifications also give:
+Payloads then go to the same port: `ghostldr.lua` closes its listener there, in SWRR and in the JIT compiler process that made the socket, before the core starts, and the ELF loader listens on it instead. The ports, which the TV (in Luac0re's dialog), the log and the PS5's notifications also give:
 
 | | Stock console | Jailbroken (its own ELF loader has 9021) |
 |---|---|---|
 | `ghostldr.lua` | 9026, Luac0re's loader | 9026 |
-| `ghostldr-elfldr.bin` | 9021 | 9022 |
-| payloads | 9022 | 9023 |
+| `ghostldr-elfldr.bin`, then payloads | 9021 | 9022 |
 
-The payload port is the first free one after the bundle's: it is never the bundle's own, so a bundle sent twice isn't taken for a payload, and on a stock console 9021 stays the port to send ghostldr's files to. Payload-sender apps work for all three sends; the log of the second is lost if the app closes the connection, but the loader starts all the same.
+A bundle sent to the ELF loader's port is told apart from a payload by its first eight bytes (`GLDRBNDL`) and taken (below). Payload-sender apps work for all the sends; the log of the bundle is lost if the app closes the connection, but the loader starts all the same.
+
+### Later sessions: ghostldr.lua alone
+
+`ghostldr.lua` keeps the last bundle it took in SWRR's saved data ([using-the-release.md](using-the-release.md#later-sessions-ghostldrlua-alone)), so after the first time:
+
+```bash
+nc CONSOLE 9026 < ghostldr.lua
+```
+
+starts the ELF loader at once, on 9021 (9022 when that is taken). If the cached bundle is `ghostldr-ext.bin`, which has the ELF loader too, the TV counts down five seconds and then the loader stops and games boot; press OK (or ○) on the TV, or send a payload, and the ELF loader stays. With `ghostldr-elfldr.bin` cached there is no countdown. Either way these lines work too, in the release's mode only:
+
+| Line | What it does |
+|---|---|
+| `boot` | stops the loader and boots games with the cached `ghostldr-ext.bin`; refused while a payload runs, or with only `ghostldr-elfldr.bin` at hand |
+| `log` | that connection gets ghostldr's log from now on (and the game's, after `boot`) |
+| `forget` | deletes the cache: the loader stops, and `ghostldr.lua` asks for a bundle on the same port |
+
+and a bundle sent to the port stops the loader and replaces the cache (unless it is `ghostldr-elfldr.bin` and `ghostldr-ext.bin` is cached): `ghostldr-ext.bin` boots games, `ghostldr-elfldr.bin` starts the loader again with itself. One from another release is refused with `version mismatch` on its connection and the TV, and the loader starts again from the cache.
 
 `ghostldr-elfldr.bin` holds only what the ELF loader needs: the extension's code for payloads (the kernel, module, file, homebrew, thread-specific data and libc families, entry for entry as in the full extension) and none of a game's, no game selector, no FTP server and no NID table. It is about 110 KB where `ghostldr-ext.bin` is 2.8 MB, and takes 128 KiB of new JIT memory instead of 432 KiB. An ELF names its imports, and those are found by name, so payloads link as before. A SELF or create-fself's OELF names them by NID only, and finding SWRR's functions for those needs the NID table: this loader refuses them (`a SELF or an OELF names its imports by NID only, and this ELF loader has no NID table`). Send the ELF `ld.lld` wrote, as recommended below anyway, or use `run.py elfldr`.
 
@@ -88,6 +106,7 @@ Instead of an ELF, a client may send one line of text:
 |---|---|
 | `status` | lists the payloads that run: threads, time, where their code is |
 | `quit` | stops the loader and returns to Luac0re's loader; refused while a payload runs |
+| `boot`, `log`, `forget` | with the release's `ghostldr.lua` ([above](#later-sessions-ghostldrlua-alone)); `run.py elfldr` serves its own extension, so there they say there is nothing to boot or forget |
 | `help` | lists these |
 
 `elf_send.py --cmd status` sends one. Up to three payloads run at once (below). Each has its own connection for its output.
@@ -191,7 +210,7 @@ It must be position-independent x86-64 (`ET_DYN`), with code and writable data i
 
 ## How it works
 
-`run.py elfldr` sends ghostldr's core with the context flag `CTX_FLAG_ELFLDR` and the port; `ghostldr.lua` does the same once it has taken `ghostldr-elfldr.bin` ([architecture.md](architecture.md#two-file-boot)). The core fetches the extension (`run.py` serves the full one, with the NID table; the bundle carries `ext-elfldr.bin`), places it, and calls its ELF loader (`ghostldr/native/ext/src/elfldr.c`, `elfldr_sys.c`, `payload.c`), which serves on the boot thread until told to quit.
+`run.py elfldr` sends ghostldr's core with the context flag `CTX_FLAG_ELFLDR` and the port; `ghostldr.lua` does the same once it has taken `ghostldr-elfldr.bin`, or found a bundle in its cache, adding the countdown's seconds and whether it may boot games ([architecture.md](architecture.md#the-bundle-cache)). The core fetches the extension (`run.py` serves the full one, with the NID table; the bundle carries `ext-elfldr.bin`), places it, and calls its ELF loader (`ghostldr/native/ext/src/elfldr.c`, `elfldr_sys.c`, `payload.c`), which serves on the boot thread until told to quit.
 
 - **Executable memory.** Each payload takes one of the emulator's JIT objects (never the IPU object that holds the core). Its code is written through the compiler process at the object's end, and the whole object is mapped read-execute in a range reserved for the payload above 0x10_0000_0000, so that the code ends where the payload's data begins. The data is direct memory mapped right after the view. When the payload finishes, the view, the data and the range go back, and the object is free for the next payload. Nothing is ever writable and executable at once.
 - **Imports** bind as a game's do (the extension, then the core's overrides, then SWRR's modules by name), with a few of the loader's own first: `_exit`, `exit`, `abort` and `raise` end the thread; `socket`, `__sys_socketex` and `sceNetSocket` fall back to the compiler; `accept` and `close` keep track of sockets; `mmap`, `munmap` and the flexible-memory calls use direct memory. Imports that are found nowhere bind to a stub that logs the call and returns 0; the first line lists them.
@@ -204,7 +223,7 @@ On a 13.60 PS5 (EU SWRR, Luac0re 2.4b), the four samples ran back to back and at
 
 ## Tests
 
-`ghostldr/tests/test_elfldr.py` runs offline: the payload formats, relocations, TLS sites and refusals (`payload.c` and `elf.c` built for the computer), the samples, and the service over real sockets with a loader that runs nothing (`elfldr.c` built for the computer), and `elf_send.py` against it.
+`ghostldr/tests/test_elfldr.py` runs offline: the payload formats, relocations, TLS sites and refusals (`payload.c` and `elf.c` built for the computer), the samples, and the service over real sockets with a loader that runs nothing (`elfldr.c` built for the computer), and `elf_send.py` against it. In the release's mode, with its seconds shortened: the countdown running out, cancelled on the TV at a given second or by a payload, `boot`, `forget` and `log`, and bundles told apart from payloads by their magic, whole or refused. `test_bundle.py` runs `ghostldr.lua` around it ([architecture.md](architecture.md#the-bundle-cache)).
 
 ```bash
 python3 -m unittest discover -s ghostldr/tests -p test_elfldr.py
