@@ -64,7 +64,8 @@ COLD struct module *module_open(const char *path, bool is_main)
     vfs_close(fd);
     struct module *m = arena_alloc(sizeof(*m));
     const char *slash = strrchr_c(path, '/');
-    m->name = m ? arena_strdup(slash ? slash + 1 : path) : NULL;
+    if (m)
+        m->name = arena_strdup(slash ? slash + 1 : path);
     if (!m || !m->name) {
         page_free(buf, (size_t)size);
         return NULL;

@@ -438,13 +438,27 @@ COLD static int load_index(const char *name, const char *want_title, const char 
         logf("ghostfs: %s: bad index (%ld of %lu bytes)", name, got, size);
         return -1;
     }
-    /* The catalogue (gfs_titles, just below) bounds-checks its table; the
+    const char *title = g_hdr->version >= 2 ? g_hdr->title : "";
+    if ((want_title && g_hdr->version >= 2 && strncmp(title, want_title, 16) != 0) ||
+        (want_prefix && strncmp(g_hdr->prefix, want_prefix, 16) != 0)) {
+        logf("ghostfs: %s holds %.16s (%.16s000..), not %s", name, title, g_hdr->prefix,
+             want_title ? want_title : want_prefix);
+        return -1;
+    }
+    if (g_hdr->version >= 2 && (g_hdr->flags & GFS_INCOMPLETE)) {
+        logf("ghostfs: the install of %.16s is incomplete: rerun gfs_install.py", g_hdr->title);
+        return -1;
+    }
+    /* The table and the names come after the header's own checks, so an
+     * install's stub index (gfs_install.py's header alone, flagged
+     * incomplete) is reported as unfinished above, not as a bad index.
+     * The catalogue (gfs_titles, just below) bounds-checks its table; the
      * index did not, and find()/ename() feed entry name offsets straight
      * into strcmp.  Reject a truncated or corrupt index here, before
      * anything reads through it: cap 0 would divide by zero in
      * read_linear, an entry past the table or names blob would read past
      * the index, and an entry past `total` names bytes no container has. */
-    if (g_hdr->cap == 0 || hsize > size || (u64)g_hdr->entries * sizeof(struct gfs_entry) > size - hsize ||
+    if (g_hdr->cap == 0 || (u64)g_hdr->entries * sizeof(struct gfs_entry) > size - hsize ||
         g_hdr->names_off > size || (u64)g_hdr->names_size > size - g_hdr->names_off) {
         logf("ghostfs: %s: bad index: table or names out of range", name);
         return -1;
@@ -467,17 +481,6 @@ COLD static int load_index(const char *name, const char *want_title, const char 
                 return -1;
             }
         }
-    }
-    const char *title = g_hdr->version >= 2 ? g_hdr->title : "";
-    if ((want_title && g_hdr->version >= 2 && strncmp(title, want_title, 16) != 0) ||
-        (want_prefix && strncmp(g_hdr->prefix, want_prefix, 16) != 0)) {
-        logf("ghostfs: %s holds %.16s (%.16s000..), not %s", name, title, g_hdr->prefix,
-             want_title ? want_title : want_prefix);
-        return -1;
-    }
-    if (g_hdr->version >= 2 && (g_hdr->flags & GFS_INCOMPLETE)) {
-        logf("ghostfs: the install of %.16s is incomplete: rerun gfs_install.py", g_hdr->title);
-        return -1;
     }
     g_ent = (const struct gfs_entry *)(idx + hsize);
     g_names = (const char *)idx + g_hdr->names_off;
