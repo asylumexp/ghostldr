@@ -3,17 +3,21 @@
  * the FTP harness's POSIX environment (ftp_host.c) and the fake loader in
  * elfldr_fake.c.  test_elfldr.py drives it:
  *
- *     elfldr_host serve [countdown=N] [boot] [bundles] [cancel=N]
+ *     elfldr_host serve [boot] [bundles] [selecting]
  *                                  prints "listening PORT", serves until it
- *                                  returns ("served RC"): N seconds of
- *                                  countdown, the full extension ("boot"
- *                                  works), bundles taken, the user cancels
- *                                  the countdown when it shows N
+ *                                  returns ("served RC"): the full
+ *                                  extension cached ("boot" works),
+ *                                  bundles taken, beside the game selector
+ *                                  (SIGUSR1: a title was picked)
  *     elfldr_host size FILE N      el_file_size of FILE's first N bytes
  */
 #define FTP_HOST_NO_MAIN
 #include "ftp_host.c"
 #include "elfldr.h"
+#include <signal.h>
+
+extern volatile int g_stop;
+static void picked(int sig) { (void)sig, g_stop = 1; }
 
 int main(int argc, char **argv)
 {
@@ -29,18 +33,16 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc >= 2 && strcmp(argv[1], "serve") == 0) {
-        extern int g_cancel_at;
         struct el_serve o = {0, 0, 0, 0};
         for (int i = 2; i < argc; i++) {
-            if (strncmp(argv[i], "countdown=", 10) == 0)
-                o.countdown = (unsigned)atoi(argv[i] + 10);
-            else if (strcmp(argv[i], "boot") == 0)
+            if (strcmp(argv[i], "boot") == 0)
                 o.can_boot = 1;
             else if (strcmp(argv[i], "bundles") == 0)
                 o.bundles = 1;
-            else if (strncmp(argv[i], "cancel=", 7) == 0)
-                g_cancel_at = atoi(argv[i] + 7);
+            else if (strcmp(argv[i], "selecting") == 0)
+                o.selecting = 1;
         }
+        signal(SIGUSR1, picked);
         int s = fv_listen(0x7f000001, 0, 1); /* a free port, as the system picks one */
         unsigned a;
         unsigned short port;

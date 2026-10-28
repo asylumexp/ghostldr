@@ -23,7 +23,10 @@
 --   core=RET[,RET]  what each boot call returns (default 0; the last repeats)
 --   elfldr=ACT[,ACT] what each ELF loader call does (default quit): quit,
 --                   boot, forget, bundle:PATH (a bundle came to its port),
---                   or a number; "log+ACT": a client took the log first
+--                   pick:INDEX:TITLE[:USER] (beside the game selector: a game
+--                   was picked; the core returns 4), or a number; "log+ACT":
+--                   a client took the log first, "bundle:PATH+pick:...": a
+--                   bundle came while the selector showed
 --   core-takes=none the core returns before taking anything
 --   sender-gone     the core's log sends fail: it closes the connection (log_fd -1)
 --   noflex          sceKernelMapFlexibleMemory fails for anything but the core's pages
@@ -32,13 +35,12 @@
 --                   empty one, removed at the end)
 --   disk=BYTES      free space on the console's storage (default: plenty)
 --   no-savedata     libSceSaveData does not load
---   cancel=N        the TV's dialog is dismissed while the countdown shows N
 -- It prints what it saw: "bind <fd> <port> <rc>", "accept <fd>",
 -- "sent <fd> <line>", "close <fd>", "map <addr> <size>", "unmap <addr> <size>",
 -- "dialog: <text>" (what the TV shows, "|" for line breaks),
 -- "jit-socket <fd>" and "jit-close <fd>" (sockets the compiler makes on a
--- PS5), "core-call", "core-ext ok|crc", "elfldr port <p> countdown <n>
--- can-boot <0|1>", "elfldr listening <port>" or "elfldr-bind <port> held by
+-- PS5), "core-call", "core-ext ok|crc", "elfldr port <p> can-boot <0|1>[ selecting]",
+-- "elfldr listening <port>" or "elfldr-bind <port> held by
 -- <who>", "save-mount <name> <mode> <blocks> <rc>", "save-umount <name>",
 -- "save-delete <name> <rc>", and at the end "leak"/"jit-leak"/"listen-leak"/
 -- "save-leak"/"file-leak" lines for what is still held and "clock <seconds>".
@@ -297,9 +299,7 @@ function get_error_string() return "errno : 0x0000000000000030\nerror : Address 
 function send_notification(s) print("notification: " .. s) end
 -- Luac0re's dialog on the TV, one line ("|" for its line breaks)
 version_string, TITLE_ID = "Luac0re 2.4b by Gezine", platform == "PS4" and "CUSA03474" or "CUSA03492"
-local last_dialog = ""
 function show_dialog(text)
-    last_dialog = text
     print("dialog: " .. text:gsub("\n", " | "))
 end
 
@@ -437,11 +437,6 @@ local SAVE = {
         clock_us = clock_us + us
         return 0
     end,
-    sceMsgDialogUpdateStatus = function()
-        -- FINISHED once the countdown shows the second the user dismisses it at
-        if opts.cancel and last_dialog:find(" in " .. opts.cancel .. "%.%.%.") then return 3 end
-        return 2                                                -- RUNNING
-    end,
 }
 
 -- ---------------------------------------------------------------- calls
@@ -505,8 +500,8 @@ end
 -- it listens on its port (a socket the compiler made and handed over, with
 -- SO_REUSEADDR and SO_REUSEPORT) and returns what the client did
 local function fake_elfldr(ctx, flags)
-    local port, countdown, can_boot = flags >> 32 & 0xFFFF, flags >> 48 & 0xFF, flags >> 56 & 1
-    print(string.format("elfldr port %d countdown %d can-boot %d", port, countdown, can_boot))
+    local port, can_boot, selecting = flags >> 32 & 0xFFFF, flags >> 56 & 1, flags >> 57 & 1
+    print(string.format("elfldr port %d can-boot %d%s", port, can_boot, selecting == 1 and " selecting" or ""))
     local who = held(port)
     if who then
         print(string.format("elfldr-bind %d held by %s", port, who))
@@ -530,6 +525,14 @@ local function fake_elfldr(ctx, flags)
             rc = 1
         elseif step == "forget" then
             rc = 3
+        elseif step:match("^pick:") then
+            local index, title, user = step:match("^pick:(-?%d+):([^:]*):?(%x*)$")
+            local blk = read64(ctx + 0x210)
+            write32(blk + 0x18, tonumber(index) & 0xFFFFFFFF)
+            write32(blk + 0x1c, user ~= "" and tonumber(user, 16) or 0)
+            write_buffer(blk + 0x20, title .. string.rep("\0", 16 - #title))
+            print(string.format("elfldr-pick %s %s", index, title))
+            rc = 4
         elseif step:match("^bundle:") then
             local f = assert(io.open(step:sub(8), "rb"))
             local data = f:read("a")
@@ -569,7 +572,12 @@ end
 
 local function fake_core(ctx)
     print("core-call")
-    for off = 0, 0x208, 8 do print(string.format("ctx %x %x", off, read64(ctx + off))) end
+    for off = 0, 0x210, 8 do print(string.format("ctx %x %x", off, read64(ctx + off))) end
+    local blk = read64(ctx + 8) >= 0x218 and read64(ctx + 0x210) or 0
+    if blk ~= 0 then   -- the game selector's block (ghost.h struct el_select): index, user, title, boot
+        print(string.format("select %d %x %s %d", string.unpack("<i4", read_buffer(blk + 0x18, 4)), read32(blk + 0x1c),
+            (read_buffer(blk + 0x20, 16):gsub("%z.*", "")), read64(blk + 0x30)))
+    end
     local t = read64(ctx + 0x30)   -- jit_sysw (test_ps4.py checks the offset)
     while t ~= 0 and read64(t) ~= 0 do
         print(string.format("stub %x %x", read64(t), read64(t + 8)))
@@ -588,7 +596,7 @@ local function fake_core(ctx)
             if not ok then return -7 end
         end
         local s = read64(ctx + E + 0x18)
-        if not elf and s ~= -1 then
+        if (not elf or flags & (1 << 57) ~= 0) and s ~= -1 then     -- sel.c takes it, beside the ELF loader too
             take_mem(s)
             write64(ctx + E + 0x18, -1)
         end

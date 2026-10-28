@@ -13,11 +13,15 @@
 --              that is taken) and waits up to 5 minutes for ghostldr-ext.bin
 --              (boot a game) or ghostldr-elfldr.bin (the ELF loader), checks
 --              it against the pins, caches it, and the log goes back on that
---              connection.  On a PS5 a cached bundle starts the ELF loader on
---              that port at once; with ghostldr-ext.bin it counts down 5
---              seconds on the TV and boots games unless the user cancels.  A
---              PS4 or Jak X counts down here instead (docs/architecture.md,
---              "Two-file boot" and "The bundle cache").  Nothing of SWRR's is
+--              connection.  On a PS5, ghostldr-ext.bin (cached or sent) opens
+--              the game selector at once with the ELF loader listening beside
+--              it on that port; once a game is picked the ELF loader stops,
+--              the extension's executable memory goes, and a second call
+--              boots the pick.  A cached ghostldr-elfldr.bin starts the ELF
+--              loader alone.  A bundle sent to the ELF loader (any build's,
+--              checked against its own header) is cached for the next boot
+--              (docs/architecture.md, "Two-file boot" and "The bundle
+--              cache").  A PS4 or Jak X opens the selector without it.  Nothing of SWRR's is
 --              touched before a bundle is in hand.  The prompt and every
 --              outcome show on the TV, in Luac0re's message dialog, as well
 --              as in a notification and on the bundle's connection.
@@ -177,12 +181,17 @@ local function mib(n) return string.format("%.1f MiB", n / 1048576) end
 -- extension, then the selector.
 local BUNDLE_MAGIC, BUNDLE_HEADER, HEADER_FMT = "GLDRBNDL", 128, "<c8I4I4I4I4I8I8I4I4c32c32c8"
 local BUNDLE_PORTS = {9021, 9022}   -- 9021: the scene's ELF loader port, free on a stock console
-local BUNDLE_WAIT_S, COUNTDOWN_S = 300, 5
+local BUNDLE_WAIT_S = 300
 local KIND_FILE = {[1] = "ghostldr-ext.bin", [2] = "ghostldr-elfldr.bin"}
 local CTX_FLAG_ELFLDR, CTX_FLAG_BUNDLE, CTX_ELFLDR_CAN_BOOT = 1 << 20, 1 << 21, 1 << 56
+local CTX_FLAG_SELECT = 2048    -- the game selector even with one title: a bundle never boots straight into a game
 local EL_BOOT, EL_BUNDLE, EL_FORGET = 1, 2, 3   -- the ELF loader's results (ext/include/elfldr.h)
+-- the ELF loader beside the game selector (ghost.h CTX_ELFLDR_SELECT, struct el_select): the core's result
+-- once a game is picked, and the pick's fields
+local CTX_ELFLDR_SELECT, EL_PICKED = 1 << 57, 4
+local SEL_INDEX, SEL_USER, SEL_TITLE, SEL_BOOT = 0x18, 0x1c, 0x20, 0x30
 local SO_REUSEADDR_, SO_NOSIGPIPE, SO_RCVBUF, SO_SNDTIMEO, SO_RCVTIMEO = 0x4, 0x800, 0x1002, 0x1005, 0x1006
--- the extension's ELF loader runs on a PS5 in SWRR (Luac0re); a PS4 and Jak X count down here instead
+-- the extension's ELF loader runs on a PS5 in SWRR (Luac0re); not on a PS4 or in Jak X
 local HAS_ELFLDR = PLATFORM ~= "PS4" and not ULTRA
 
 local opt
@@ -304,7 +313,7 @@ local function check_header(h)
     local magic, format, hsize, kind, _, ext_size, sel_size, ext_crc, sel_crc, ext_sha, sel_sha, build =
         string.unpack(HEADER_FMT, h)
     local r = {kind = kind, file = KIND_FILE[kind] or string.format("a bundle of kind %d", kind), format = format,
-               build = hex(build), ext_size = ext_size, sel_size = sel_size, pin = pin_of(kind)}
+               build = hex(build), ext_size = ext_size, sel_size = sel_size, pin = pin_of(kind), header = h}
     local pin = r.pin
     if magic ~= BUNDLE_MAGIC then
         r.bad = "magic"
@@ -348,7 +357,7 @@ local function take(from)
     local h = read_buffer(scratch, got)
     if h ~= BUNDLE_MAGIC:sub(1, #h) and h:sub(1, 8) ~= BUNDLE_MAGIC then
         local what = h:sub(1, 4) == "\x7fELF" and "an ELF" or h:sub(1, 4) == "\x4f\x15\x3d\x1d" and "a SELF"
-            or h:find("^%s*%-%-") and "a Lua script" or "not a ghostldr bundle"
+            or h:find("^%s*%-%-") and "a Lua script" or "not a ghostldr bundle (no GLDRBNDL header: a .bin from something else?)"
         local hint = (what == "an ELF" or what == "a SELF")
             and ": ELF payloads go to the ELF loader, which ghostldr-elfldr.bin starts (on this port)"
             or what == "a Lua script" and ": Lua scripts go to Luac0re's loader on TCP 9026" or ""
@@ -411,7 +420,7 @@ end
 -- stays BUSY for good.
 local CACHE_DIR, CACHE_FILE = "GLDRCACHE", "bundle.bin"
 local SAVE_NOT_FOUND, SAVE_NO_SPACE = 0x809F0008, 0x809F000A
-local sd, cached_kind
+local sd, cached_kind, cached_build
 local function save_calls()
     if sd ~= nil then return sd end
     sd = false
@@ -476,7 +485,7 @@ local function cache_umount(mp)
 end
 
 local function cache_delete()
-    cached_kind = nil
+    cached_kind, cached_build = nil, nil
     if not save_calls() then return -1 end
     local p = sd.params
     for i = 0, 56, 8 do write64(p + i, 0) end
@@ -541,11 +550,13 @@ local function cache_read(parts)
     end
     if b.bad then return nil, "mismatch", b end
     b.cached = true
-    cached_kind = b.kind
+    cached_kind, cached_build = b.kind, b.build
     return b
 end
 
--- b into the cache, replacing what is there: true, or false and why
+-- b into the cache, replacing what is there, its header as it came (another
+-- build's too: one sent to the ELF loader is for the next boot): true, or
+-- false and why
 local function cache_store(b)
     if not save_calls() then return false, "the saved-data calls are missing" end
     local total = BUNDLE_HEADER + b.ext_size + b.sel_size
@@ -560,13 +571,11 @@ local function cache_store(b)
         end
         return false, string.format("its save container was not made (%x)", rc & 0xFFFFFFFF)
     end
-    local kwrite, pin = kfn("sceKernelWrite"), b.pin
+    local kwrite = kfn("sceKernelWrite")
     write_string(sd.path, mp .. "/" .. CACHE_FILE)
     local fd, ok = s32(kfn("sceKernelOpen")(sd.path, 0x601, 0x1b6)), false
     if fd >= 0 then
-        write_buffer(scratch, string.pack(HEADER_FMT, BUNDLE_MAGIC, 1, BUNDLE_HEADER, b.kind, 0, pin.ext_size,
-            pin.sel_size, pin.ext_crc, pin.sel_crc, hex_to_binary(pin.ext_sha256), hex_to_binary(pin.sel_sha256),
-            hex_to_binary(GHOSTLDR_BUILD)) .. string.rep("\0", 8))
+        write_buffer(scratch, b.header)
         ok = kwrite(fd, scratch, BUNDLE_HEADER) == BUNDLE_HEADER and kwrite(fd, b.ext, b.ext_size) == b.ext_size
             and (b.sel_size == 0 or kwrite(fd, b.sel, b.sel_size) == b.sel_size)
         kfn("sceKernelClose")(fd)
@@ -576,25 +585,11 @@ local function cache_store(b)
         cache_delete()
         return false, ok and string.format("its commit failed (%x)", rc & 0xFFFFFFFF) or "writing it failed"
     end
-    cached_kind = b.kind
+    cached_kind, cached_build = b.kind, b.build
     return true, string.format("%s save container %s, %s", CACHE_DIR, mib(blocks * 32768), mib(total))
 end
 
 -- ---------------------------------------------------------------- listen mode: waiting for a bundle
-local dialog_status
--- the TV's dialog was dismissed (OK or the circle button: FINISHED)
-local function dialog_done()
-    if dialog_status == nil then
-        dialog_status = false
-        local name = malloc(32)
-        write_string(name, "libSceMsgDialog.sprx")
-        local h = s32(kfn("sceKernelLoadStartModule")(name, 0, 0, 0, 0, 0))
-        local f = h > 0 and dlsym(h, "sceMsgDialogUpdateStatus") or 0
-        if f ~= 0 then dialog_status = func_wrap(f) end
-    end
-    return dialog_status and s32(dialog_status()) == 3
-end
-
 -- a listener on the bundle port: 9021, else 9022, the first time; the same port after
 local function bundle_listener()
     if port then
@@ -616,46 +611,19 @@ end
 
 -- Wait on the bundle port (lfd: its listener, else one is opened) for a
 -- bundle, which is returned, or BUNDLE_WAIT_S (nil, said, nothing left
--- open).  note: shown above the prompt.  countdown (a PS4's or Jak X's
--- cached ghostldr-ext.bin): "cached" when it runs out, "cancel" when the
--- TV's dialog is dismissed; a bundle sent meanwhile is taken instead.
-local function receive_bundle(lfd, note, countdown)
+-- open).  note: shown above the prompt.
+local function receive_bundle(lfd, note)
     lfd = lfd or bundle_listener()
     local where = string.format("%s:%d%s", ip or "this console", port, port_note)
     waiting = string.format("Send ghostldr-ext.bin (games)\nor ghostldr-elfldr.bin (ELF loader)\nto %s\n\n"
         .. "Waiting %d minutes", where, BUNDLE_WAIT_S // 60)
-    local left
-    local function show(n)
-        left = n
-        if n then
-            screen(string.format("Booting the cached ghostldr-ext.bin in %d...\n\nPress OK (or \xe2\x97\x8b) to cancel "
-                .. "and go back to Luac0re's loader.\nA ghostldr-ext.bin sent to %s replaces it.", n, where))
-        else
-            screen((note and note .. "\n\n" or "") .. waiting)
-        end
-    end
-    if countdown then
-        event(string.format("booting the cached ghostldr-ext.bin (build %s) in %d seconds; dismiss the message on "
-            .. "the TV to go back to Luac0re's loader instead", GHOSTLDR_BUILD, countdown))
-    else
-        send_notification(string.format("ghostldr %s: send ghostldr-ext.bin (games) or ghostldr-elfldr.bin (ELF "
-            .. "loader) to %s in the next %d minutes", GHOSTLDR_BUILD, where, BUNDLE_WAIT_S // 60))
-    end
-    show(countdown)
+    send_notification(string.format("ghostldr %s: send ghostldr-ext.bin (games) or ghostldr-elfldr.bin (ELF "
+        .. "loader) to %s in the next %d minutes", GHOSTLDR_BUILD, where, BUNDLE_WAIT_S // 60))
+    screen((note and note .. "\n\n" or "") .. waiting)
     local poll, clock = kfn("poll"), kfn("sceKernelGetProcessTime")
     local pfd, sa, alen = malloc(8), malloc(16), malloc(8)
-    local deadline = clock() + (countdown or BUNDLE_WAIT_S) * 1000000
-    while true do
-        local now = clock()
-        if now >= deadline then break end
-        if countdown then
-            if dialog_done() then
-                syscall.close(lfd)
-                return "cancel"
-            end
-            local n = (deadline - now + 999999) // 1000000
-            if n ~= left then show(n) end
-        end
+    local deadline = clock() + BUNDLE_WAIT_S * 1000000
+    while clock() < deadline do
         write32(pfd, lfd)
         write32(pfd + 4, 1)             -- POLLIN
         if s32(poll(pfd, 1, 1000)) > 0 then
@@ -669,12 +637,10 @@ local function receive_bundle(lfd, note, countdown)
                     syscall.close(lfd)  -- SWRR's copy; the compiler's went at once (tcp_socket)
                     return b
                 end
-                left = nil              -- the countdown shows again over the refusal
             end
         end
     end
     syscall.close(lfd)
-    if countdown then return "cached" end
     event(string.format("nothing came on TCP %d in %d minutes: Luac0re's loader takes scripts again", port,
         BUNDLE_WAIT_S // 60), string.format("Timed out: nothing came on port %d in %d minutes.\nBack to Luac0re's "
         .. "loader: send ghostldr.lua again to retry.\n\n%s", port, BUNDLE_WAIT_S // 60, loader_text()))
@@ -813,10 +779,11 @@ else
 end
 local LOG_FD = 7 * 8                -- fields[8]: log_fd
 local EXT = 45 * 8 + 0x40           -- ext_fd, then size, crc; sel_fd at +0x18
-local CTX_IP, CTX_HEADER = 0x200, 0x208   -- listen mode, after the profile slot (ghost.h CTX_*_SLOT)
-local stubs, prof_mem, ip_mem, header_mem
+local CTX_IP, CTX_HEADER, CTX_SELECT = 0x200, 0x208, 0x210   -- listen mode, after the profile slot (ghost.h CTX_*_SLOT)
+local stubs, prof_mem, ip_mem, header_mem, select_mem
 -- o: flags, app_root, log_fd, log_addr, the extension's ext/ext_size/ext_crc/ext_sha256 and the
--- selector's sel/sel_size/sel_crc (ext and sel: a socket, or an address with CTX_FLAG_BUNDLE)
+-- selector's sel/sel_size/sel_crc (ext and sel: a socket, or an address with CTX_FLAG_BUNDLE);
+-- picked: boot the game picked beside the ELF loader (select_mem as the first call left it)
 local function boot_ctx(o)
     stubs = stubs or compiler_stubs()
     local fields = {
@@ -841,7 +808,7 @@ local function boot_ctx(o)
     for i, v in ipairs(fields) do write64(ctx + (i - 1) * 8, v) end
     -- fields, reserved[8], ext_fd/size/crc, sel_fd/size/crc, fw, ext SHA-256 pin[24]; listen mode: and
     -- after the profile slot, the console's address and the ELF loader's bundle header
-    write64(ctx + 8, LISTEN and CTX_HEADER + 8 or #fields * 8 + 8 * 8 + 7 * 8 + 3 * 8)
+    write64(ctx + 8, LISTEN and CTX_SELECT + 8 or #fields * 8 + 8 * 8 + 7 * 8 + 3 * 8)
     local app_root = malloc(#o.app_root + 1)
     write_string(app_root, o.app_root)
     write64(ctx + (#fields - 2) * 8, app_root)
@@ -880,11 +847,17 @@ local function boot_ctx(o)
     write64(ctx + 0x1F8, prof_mem or 0)
     if LISTEN then
         if not ip_mem then
-            ip_mem, header_mem = malloc(64), malloc(BUNDLE_HEADER)
+            ip_mem, header_mem, select_mem = malloc(64), malloc(BUNDLE_HEADER), malloc(64)
             write_string(ip_mem, (ip or "this PS5"):sub(1, 60))
         end
         write64(ctx + CTX_IP, ip_mem)
         write64(ctx + CTX_HEADER, header_mem)
+        if o.picked then
+            write64(select_mem + SEL_BOOT, 1)
+        else
+            for i = 0, 56, 8 do write64(select_mem + i, 0) end
+        end
+        write64(ctx + CTX_SELECT, select_mem)
     end
     return ctx
 end
@@ -901,9 +874,9 @@ end
 -- ---------------------------------------------------------------- listen mode: the flow
 -- The core with bundle b's parts (taken: the core unmaps them; what it did
 -- not take is unmapped here): its result, and the context
-local function run_bundle(b, flags, app_root)
+local function run_bundle(b, flags, app_root, picked)
     local pin = b.pin
-    local ctx = boot_ctx({flags = flags | CTX_FLAG_BUNDLE, app_root = app_root, log_fd = conn, log_addr = 0,
+    local ctx = boot_ctx({flags = flags | CTX_FLAG_BUNDLE, app_root = app_root, log_fd = conn, log_addr = 0, picked = picked,
         ext = b.ext, ext_size = pin.ext_size, ext_crc = pin.ext_crc, ext_sha256 = pin.ext_sha256,
         sel = b.sel, sel_size = b.sel ~= -1 and pin.sel_size or 0, sel_crc = pin.sel_crc})
     local ret = s32(call_core(ctx))
@@ -955,8 +928,53 @@ local function store(b)
         event(string.format("cached %s in this console's saved data (%s): from now on send ghostldr.lua alone",
             b.file, what))
     else
-        event(string.format("%s not cached: %s; this boot goes on", b.file, what))
+        event(string.format("%s not cached: %s; ghostldr goes on without it", b.file, what))
     end
+end
+
+-- what the TV and the log say when games boot from the cache
+local function booting_cached()
+    event(string.format("booting the cached ghostldr-ext.bin (build %s): a game on a USB drive, else an installed one",
+        GHOSTLDR_BUILD), "Booting: a game on a USB drive in the console,\nelse an installed one")
+end
+
+-- A bundle the ELF loader took (nb, its parts in memory): cached for the
+-- next ghostldr boot, whichever build it is (the ELF loader checked its own
+-- header against its parts as it came), and its memory let go; the sender,
+-- a notification and the TV are told.  Refused (said) when it has this
+-- build's ID with other contents.  Whether it was cached.
+local function keep_for_next_boot(nb)
+    if nb.bad and nb.bad ~= "build" then
+        local line, tv = header_problem(nb, nb.file, "Send it again")
+        event("refused: " .. line, "Refused: " .. tv)
+    else
+        store(nb)
+    end
+    unmap(nb.ext, nb.ext_size)
+    if nb.sel ~= -1 then unmap(nb.sel, nb.sel_size) end
+    if not nb.cached then return false end
+    local other = nb.build ~= GHOSTLDR_BUILD
+    event(string.format("received %s (build %s) at the ELF loader: the new ghostldr ext file will be applied on "
+        .. "the next ghostldr boot%s", nb.file, nb.build, other and string.format(" (send ghostldr.lua of build %s "
+        .. "with it)", nb.build) or ""), string.format("Received %s (build %s).\n\nThe new ghostldr ext file will "
+        .. "be applied\non the next ghostldr boot.%s", nb.file, nb.build, other
+        and string.format("\n(It needs ghostldr.lua of build %s.)", nb.build) or ""))
+    return true
+end
+
+-- the bundle the ELF loader took (its header copied, its parts in the context), or nil
+local function taken(ctx)
+    if read64(ctx + EXT) == -1 then return nil end
+    local nb = check_header(read_buffer(header_mem, BUNDLE_HEADER))
+    nb.ext, nb.sel = read64(ctx + EXT), read64(ctx + EXT + 0x18)
+    return nb
+end
+
+-- the TV and the log when the game selector opens with the ELF loader beside it
+local function selecting(what)
+    event(string.format("%s (build %s): the game selector, with the ELF loader on TCP %d beside it until a game "
+        .. "is picked", what, GHOSTLDR_BUILD, port), string.format("Opening the game selector.\nELF loader on %s:%d "
+        .. "until a game is picked.", ip or "this console", port))
 end
 
 local function listen_main()
@@ -968,8 +986,11 @@ local function listen_main()
             or string.format("the bundle cache was not cleared (%x)", rc & 0xFFFFFFFF))
     end
     local note
-    local b, problem, detail = cache_read(HAS_ELFLDR and 1 or 0)
-    if b and b.kind == 2 and not HAS_ELFLDR then b = nil end   -- a PS5's: no ELF loader here
+    local b, problem, detail = cache_read(2)
+    if b and b.kind == 2 and not HAS_ELFLDR then   -- a PS5's: no ELF loader here
+        unmap(b.ext, b.ext_size)
+        b = nil
+    end
     if problem == "mismatch" then
         local line, tv = header_problem(detail, "the cached " .. detail.file,
             "The bundle sent next replaces it.")
@@ -979,108 +1000,115 @@ local function listen_main()
         event(string.format("the cached bundle is damaged (%s): it is deleted; send the bundle again", detail))
         note = "The cached bundle is damaged: deleted.\nSend the bundle again."
     end
-    local mode = not b and "prompt" or HAS_ELFLDR and "elfldr" or "countdown"
-    local countdown = b and b.kind == 1 and COUNTDOWN_S or 0
-    if mode == "elfldr" then    -- its port: the bundle port, given back whole (both processes' copies)
+    -- a cached ghostldr-ext.bin: the game selector at once, with the ELF loader beside it on a PS5
+    local mode = not b and "prompt" or b.kind == 2 and "elfldr" or HAS_ELFLDR and "select" or "boot"
+    local picked    -- the second call boots the game picked beside the ELF loader
+    if mode ~= "prompt" then
         hold(b)
-        local lfd = bundle_listener()
-        syscall.close(lfd)
-        event(string.format("the cached %s (build %s): the ELF loader on TCP %d%s", b.file, GHOSTLDR_BUILD, port,
-            b.kind == 1 and string.format(", booting games in %d seconds unless cancelled on the TV", COUNTDOWN_S)
-            or "; send ghostldr-ext.bin there to boot games"))
+        if mode ~= "boot" then  -- the ELF loader's port: the bundle port, given back whole (both processes' copies)
+            syscall.close(bundle_listener())
+        end
+        if mode == "boot" then
+            booting_cached()
+        elseif mode == "select" then
+            selecting("the cached ghostldr-ext.bin")
+        else
+            event(string.format("the cached %s (build %s): the ELF loader on TCP %d; a ghostldr-ext.bin sent "
+                .. "there is kept for the next boot", b.file, GHOSTLDR_BUILD, port))
+        end
     end
     while true do
-        if mode == "prompt" or mode == "countdown" then
-            local r = receive_bundle(nil, note, mode == "countdown" and COUNTDOWN_S or nil)
+        if mode == "prompt" then
+            local r = receive_bundle(nil, note)
             note = nil
             if r == nil then return end
-            if r == "cancel" then
-                event("the countdown was cancelled on the TV: Luac0re's loader takes scripts again",
-                    "Cancelled.\nBack to Luac0re's loader.\n\n" .. loader_text())
-                return
-            elseif r == "cached" then
-                b, problem, detail = cache_read(2)
-                if b then
-                    hold(b)
-                    mode = "boot"
-                    event("booting the cached ghostldr-ext.bin: a game on a USB drive, else an installed one",
-                        "Booting: a game on a USB drive in the console,\nelse an installed one")
-                else
-                    event(string.format("the cached bundle is damaged (%s): it is deleted", detail or "gone"))
-                    note, mode = "The cached bundle is damaged: deleted.\nSend the bundle again.", "prompt"
-                end
+            b = r
+            hold(b)
+            say(string.format("received %s (%d bytes, build %s) from %s on TCP %d", b.file,
+                BUNDLE_HEADER + b.ext_size + b.sel_size, GHOSTLDR_BUILD, b.from, port))
+            store(b)
+            -- the second call boots from the cache: a bundle that could not be cached boots as it is
+            mode = b.kind == 2 and "elfldr" or (HAS_ELFLDR and b.cached) and "select" or "boot"
+            if mode == "select" then
+                selecting("received ghostldr-ext.bin")
+            elseif mode == "boot" then
+                event("booting: the games on a USB drive in the console, else the installed ones; the log "
+                    .. "follows here (closing this connection stops the log, not the game)",
+                    "Received ghostldr-ext.bin.\n\nBooting: a game on a USB drive in the console,\nelse an "
+                    .. "installed one")
             else
-                b = r
-                hold(b)
-                say(string.format("received %s (%d bytes, build %s) from %s on TCP %d", b.file,
-                    BUNDLE_HEADER + b.ext_size + b.sel_size, GHOSTLDR_BUILD, b.from, port))
-                store(b)
-                mode, countdown = b.kind == 1 and "boot" or "elfldr", 0
-                if b.kind == 1 then
-                    event("booting: the games on a USB drive in the console, else the installed ones; the log "
-                        .. "follows here (closing this connection stops the log, not the game)",
-                        "Received ghostldr-ext.bin.\n\nBooting: a game on a USB drive in the console,\nelse an "
-                        .. "installed one")
-                else
-                    event(string.format("starting the ELF loader on TCP %d: send payloads with nc %s %d < "
-                        .. "payload.elf; send \"quit\" there to give SWRR back to Luac0re's loader", port,
-                        ip or "<PS5>", port), string.format("Received ghostldr-elfldr.bin.\n\nELF loader: send "
-                        .. "payloads to %s:%d\n(nc %s %d < payload.elf)\nSend \"quit\" there to go back to Luac0re",
-                        ip or "this console", port, ip or "PS5", port))
+                event(string.format("starting the ELF loader on TCP %d: send payloads with nc %s %d < "
+                    .. "payload.elf; send \"quit\" there to give SWRR back to Luac0re's loader", port,
+                    ip or "<PS5>", port), string.format("Received ghostldr-elfldr.bin.\n\nELF loader: send "
+                    .. "payloads to %s:%d\n(nc %s %d < payload.elf)\nSend \"quit\" there to go back to Luac0re",
+                    ip or "this console", port, ip or "PS5", port))
+            end
+        elseif mode == "select" then
+            -- the game selector with the ELF loader beside it on the bundle port (boot.c elfldr_select):
+            -- once a game is picked the ELF loader stops, after any payload still running, and the
+            -- extension goes with its executable memory; a second call boots the pick
+            local flags = CTX_FLAG_ELFLDR | CTX_ELFLDR_SELECT | (port << 32) | CTX_FLAG_SELECT
+                | (base_flags & 0xFFFFFFFF)
+            local was_cached, sent = b.cached, b.from ~= nil
+            local code, ctx = run_bundle(b, flags, GHOSTLDR_APP_ROOT)
+            if code == EL_PICKED then
+                local ob = cache_read(2)    -- what boots: the cache as it is before a bundle sent meanwhile
+                local nb = taken(ctx)
+                if nb then keep_for_next_boot(nb) end   -- its connection stays the log, into the game
+                local title = read_buffer(select_mem + SEL_TITLE, 16):gsub("%z.*", "")
+                picked = s32(read32(select_mem + SEL_INDEX)) >= 0 and title ~= ""
+                if not ob then
+                    return back("the game selector closed, but nothing of this build is cached to boot", code, ctx)
                 end
+                ob.from = b.from    -- sent this session, as before the cache: a failure then goes back
+                b = ob
+                hold(b)
+                mode = "boot"
+                event(picked and string.format("%s picked: the ELF loader has stopped; booting it", title)
+                    or "nothing picked in the game selector: booting as without it",
+                    picked and string.format("Starting %s.", title) or nil)
+            elseif code == -7 and was_cached and not sent then
+                cache_delete()
+                event("the cached bundle is damaged (the core's checksum of its extension failed): it is deleted")
+                drop(ctx)
+                note, mode = "The cached bundle is damaged: deleted.\nSend the bundle again.", "prompt"
+            else
+                if code == -7 and was_cached then cache_delete() end
+                return back("the game selector stopped", code, ctx)
             end
         elseif mode == "elfldr" then
-            -- as run.py elfldr: no title, the ELF loader on the bundle port; with the full extension
-            -- at hand (here, or cached) "boot" and the countdown boot games
-            local can_boot = b.kind == 1 or cached_kind == 1
-            local flags = CTX_FLAG_ELFLDR | (port << 32) | (countdown << 48) | (can_boot and CTX_ELFLDR_CAN_BOOT or 0)
+            -- as run.py elfldr: no title, the ELF loader on the bundle port; with this build's
+            -- ghostldr-ext.bin cached (or here) "boot" opens the game selector
+            local can_boot = b.kind == 1 or (cached_kind == 1 and cached_build == GHOSTLDR_BUILD)
+            local flags = CTX_FLAG_ELFLDR | (port << 32) | (can_boot and CTX_ELFLDR_CAN_BOOT or 0)
             -- damaged (-7): a bundle from the cache goes, and the prompt asks for another; one just
             -- sent goes from the cache too, and SWRR back to Luac0re's loader as before
             local was_cached, sent = b.cached, b.from ~= nil
             local code, ctx = run_bundle(b, flags, "/app0")
-            countdown = 0
             if code == EL_BOOT then
                 b, problem, detail = cache_read(2)
                 if b then
                     hold(b)
-                    mode = "boot"
-                    event("booting the cached ghostldr-ext.bin: a game on a USB drive, else an installed one",
-                        "Booting: a game on a USB drive in the console,\nelse an installed one")
+                    mode = "select"
+                    selecting("the cached ghostldr-ext.bin")
                 else
                     event(string.format("the cached bundle is damaged (%s): it is deleted", detail or "gone"))
                     drop(ctx)
                     note, mode = "The cached bundle is damaged: deleted.\nSend the bundle again.", "prompt"
                 end
             elseif code == EL_BUNDLE then
-                local nb = check_header(read_buffer(header_mem, BUNDLE_HEADER))
-                nb.ext, nb.sel = read64(ctx + EXT), read64(ctx + EXT + 0x18)
-                if nb.bad then  -- its memory back, the refusal on its connection, then the ELF loader again
-                    unmap(nb.ext, nb.ext_size)
-                    if nb.sel ~= -1 then unmap(nb.sel, nb.sel_size) end
-                    local line, tv = header_problem(nb, nb.file, "Send both from the same release")
-                    event("refused: " .. line, "Refused: " .. tv)
-                    if conn >= 0 then syscall.close(conn) end
-                    conn = -1
-                    b, problem, detail = cache_read(1)
-                    if not b then
-                        return back("the ELF loader stopped (nothing cached to restart it with)", code, ctx)
-                    end
-                    hold(b)
-                else
-                    b = nb
-                    b.from = "the ELF loader's port"
-                    hold(b)
-                    mode = b.kind == 1 and "boot" or "elfldr"
-                    if b.kind == 1 then
-                        event("received ghostldr-ext.bin at the ELF loader: booting games",
-                            "Received ghostldr-ext.bin.\n\nBooting: a game on a USB drive in the console,\nelse an "
-                            .. "installed one")
-                    else
-                        event(string.format("received ghostldr-elfldr.bin at the ELF loader: it runs on TCP %d now",
-                            port))
-                    end
-                    store(b)
+                write64(ctx + LOG_FD, -1)   -- its connection is ours again
+                -- the loader carries on with this build's bundle as cached now, read before the new one
+                local ob = cache_read(1)
+                local nb = taken(ctx)
+                if keep_for_next_boot(nb) and not ob and nb.build == GHOSTLDR_BUILD then ob = cache_read(1) end
+                if conn >= 0 then syscall.close(conn) end   -- the sender's nc ends; the loader carries on
+                conn = -1
+                b = ob
+                if not b then
+                    return back("the ELF loader stopped (nothing of this build cached to restart it with)", code)
                 end
+                hold(b)
             elseif code == EL_FORGET then
                 local rc = cache_delete()
                 event(rc == 0 and "the bundle cache is cleared: send a bundle to this port"
@@ -1096,9 +1124,10 @@ local function listen_main()
                 if code == -7 and was_cached then cache_delete() end
                 return back(code == 0 and "the ELF loader quit" or "the ELF loader stopped", code, ctx)
             end
-        else    -- boot
+        else    -- boot: the pick from beside the ELF loader, else the selector (even for one game)
             local was_cached, sent = b.cached, b.from ~= nil
-            local code, ctx = run_bundle(b, base_flags, GHOSTLDR_APP_ROOT)
+            local code, ctx = run_bundle(b, base_flags | (picked and 0 or CTX_FLAG_SELECT), GHOSTLDR_APP_ROOT,
+                picked)
             if code == 0 then
                 if conn >= 0 then say("the game runs; its log keeps coming here") end
                 return
@@ -1107,7 +1136,7 @@ local function listen_main()
             if code == -7 and was_cached and not sent then
                 event("the cached bundle is damaged (the core's checksum of its extension failed): it is deleted")
                 drop(ctx)
-                note, mode = "The cached bundle is damaged: deleted.\nSend the bundle again.", "prompt"
+                note, mode, picked = "The cached bundle is damaged: deleted.\nSend the bundle again.", "prompt", nil
             else
                 return back("the boot stopped", code, ctx)
             end

@@ -162,9 +162,9 @@ void fsvsh_new_save_refused(void)
  * from a decrypted save on a USB drive that carries sce_sys/keystone
  * (Apollo's PS4/APOLLO layout: exports made on a jailbroken console, or by
  * Apollo under ghostldr, which gets the keystone into its copies once it is
- * known), and from the save itself while the system holds it bound during
- * the H-RACE window, if SWRR may read it there (save_race.c).  Without one
- * the user is told on screen what is missing. */
+ * known).  SWRR may not read it from the save itself, even while the
+ * system holds it bound during the H-RACE window (EACCES on a 13.60 PS5).
+ * Without one the user is told on screen what is missing. */
 static s32 (*k_open)(const char *, int, int);
 static s64 (*k_write)(int, const void *, u64);
 static s32 (*k_close)(int);
@@ -365,11 +365,6 @@ static s32 vsh_mount(const void *opt, const char *volume, const char *mount_path
             logf("fsvsh: %s:%s: %s; trying a read-only copy through a refused mount", tid, dir,
                  fp_known ? "the fingerprint mount was refused" : "no keystone for its title");
             s32 rc2 = save_race_copy(user, tid, dir, dst);
-            u8 ks[0x60];
-            if (!fp_known && save_race_keystone(ks) &&
-                keystone_store(tid, ks, "the save itself while the system held it bound") &&
-                savedata_fingerprint(user, tid, fp))
-                return vsh_mount(opt, volume, mount_path, key); /* now as a writable copy */
             if (!fp_known)
                 say_no_keystone(tid);
             if (rc2 == 0) {

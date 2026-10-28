@@ -343,7 +343,6 @@ class SaveToolWrites(SaveRaceBase):
                              capture_output=True, text=True, timeout=120)
         lines = out.stdout.splitlines()
         self.assertTrue(any("banner: No keystone for CUSA07992" in ln for ln in lines), "\n".join(lines))
-        self.assertTrue(any("its sce_sys/keystone while bound: not readable" in ln for ln in lines), "\n".join(lines))
         self.assertFalse((self.root / f"data/ghostldr/keystones/{TITLE}.keystone").exists())
 
     def test_an_unchanged_copy_writes_nothing(self) -> None:

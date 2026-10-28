@@ -26,26 +26,6 @@ static void *ghost_main_thread(void *unused)
     return NULL;
 }
 
-/* No title: the extension's ELF loader serves payloads until it is told to
- * quit (docs/elfldr.md).  It needs the NID table and the extension's code,
- * placed as for a title; then the call returns to Luac0re's loader with the
- * extension's JIT block given back. */
-int ghost_elfldr(void)
-{
-    crash_install();
-    if (is_ps4()) {
-        logf("elfldr: a PS5 only (its executable memory comes from views of the emulator's JIT objects)");
-        return -9;
-    }
-    if (ext_fetch() != 0)
-        return -7;
-    int rc = arena_init() != 0 || ext_start() != 0 ? -8 : ext_elfldr();
-    g_payload_fault = NULL;
-    ext_abandon();
-    logf("elfldr: back to the Lua loader (%d)", rc);
-    return rc;
-}
-
 /* Save tools (PF_SAVE_TOOL, docs/selector.md): the user whose saves the
  * title opens, as the game selector chose it; 0: the user running SWRR. */
 u32 g_title_user;
@@ -58,30 +38,14 @@ static int g_choose, g_pick_rc = 1; /* 1: not yet */
 static bool g_library;
 static const char *g_pick_root;
 
-int boot_title_pick(const char *title, int index)
+/* The title's app root (ctx app_root): "auto" (the games on a USB drive,
+ * else the installed ones), "ghostfs", a title's directory, or a USB drive
+ * or folder of titles (the extension decides).  0, or -6; *choose: 1 when
+ * ghostfs or a library leaves the choice to the game selector. */
+static int boot_root(const char **rootp, int *choose_out, bool *library_out)
 {
-    if (g_pick_rc == 1)
-        g_pick_rc = !g_choose ? 0
-                    : g_library ? ext_approot_pick(title, index, &g_pick_root)
-                    : gfs_pick(title) ? -1 : 0;
-    return g_pick_rc;
-}
-
-int boot_save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg)
-{
-    return g_pick_rc ? -1 : ext_save_prescan(user, progress, arg);
-}
-
-int ghost_boot(void)
-{
-    const char *root = (const char *)g_ctx->app_root;
-    logf("boot: app root %s", root);
-    crash_install();
-    /* the extension carries the NID table: without it nothing resolves, so
-     * stop before anything touches the title or the host's state */
-    if (ext_fetch() != 0)
-        return -7;
-    int choose = 0; /* game selector: 1 when ghostfs or a library left the choice to it */
+    const char *root = *rootp;
+    int choose = 0;
     bool library = false, decided = false; /* decided: "auto" found the title on a USB drive */
     if (strcmp(root, "auto") == 0) {
         /* the games on a USB drive, else the installed ones (run.py's
@@ -120,6 +84,14 @@ int ghost_boot(void)
             library = choose > 0;
         }
     }
+    *rootp = root, *choose_out = choose, *library_out = library;
+    return 0;
+}
+
+/* Before the game selector: what the host leaves running stops, and its
+ * message dialog goes (else it keeps the app's input) */
+static void boot_quiet_host(void)
+{
     /* Jak X: the emulator threads UltraC0re leaves running (Luac0re stops SWRR's) */
     void host_stop_emulator_threads(void);
     host_stop_emulator_threads();
@@ -143,12 +115,131 @@ int ghost_boot(void)
         void host_dmem_census(void);
         host_dmem_census();
     }
+}
+
+static struct el_select *select_block(void)
+{
+    return g_ctx->size >= (CTX_SELECT_SLOT + 1) * 8 ? (struct el_select *)((u64 *)g_ctx)[CTX_SELECT_SLOT] : NULL;
+}
+
+static volatile int g_el_done, g_el_rc;
+
+static void *elfldr_thread(void *unused)
+{
+    (void)unused;
+    g_el_rc = ext_elfldr();
+    __atomic_store_n(&g_el_done, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+/* The ELF loader beside the game selector (CTX_ELFLDR_SELECT): it serves on
+ * a thread of its own while the selector shows.  Once a title is picked it
+ * stops (after any payload still running), and the extension goes with its
+ * executable memory; the pick is left in s for ghostldr.lua, which boots it
+ * in a second call.  CTX_ELFLDR_PICKED, or < 0. */
+static int elfldr_select(struct el_select *s)
+{
+    const char *root = (const char *)g_ctx->app_root;
+    int choose = 0;
+    bool library = false;
+    s->index = -1;
+    if (boot_root(&root, &choose, &library) != 0)
+        return -6;
+    boot_quiet_host();
+    u64 lo, hi;
+    if (arena_init() != 0 || arena_code_region(&lo, &hi) != 0 || ext_start() != 0) {
+        ext_abandon();
+        return -8;
+    }
+    /* sel.c places the selector's image here: no payload's code goes there */
+    s->res_lo = ALIGN_UP(lo, 0x10000), s->res_hi = s->res_lo + g_ctx->staging_size;
+    u64 tid = 0;
+    g_el_done = 0;
+    if (ghost_thread_create(&tid, NULL, elfldr_thread, NULL, "ghostldr-elfldr") != 0) {
+        logf("elfldr: no thread for the ELF loader beside the selector");
+        ext_abandon();
+        return -12;
+    }
+    g_choose = choose, g_library = library;
+    char title[16];
+    int picked = sel_run(true, title);
+    __atomic_store_n(&s->stop, 1, __ATOMIC_RELEASE);
+    logf("elfldr: %s picked: the ELF loader stops once no payload runs", picked >= 0 ? title : "nothing");
+    while (!__atomic_load_n(&g_el_done, __ATOMIC_ACQUIRE))
+        K.usleep(50000);
+    s->index = picked, s->user = g_title_user;
+    memcpy(s->title, title, sizeof(s->title));
+    gfs_unmount_all();
+    ext_abandon();
+    logf("elfldr: stopped (%d): the extension and its executable memory are given back", g_el_rc);
+    return g_el_rc < 0 ? g_el_rc : CTX_ELFLDR_PICKED;
+}
+
+/* No title: the extension's ELF loader serves payloads until it is told to
+ * quit (docs/elfldr.md).  It needs the NID table and the extension's code,
+ * placed as for a title; then the call returns to Luac0re's loader with the
+ * extension's JIT block given back. */
+int ghost_elfldr(void)
+{
+    crash_install();
+    if (is_ps4()) {
+        logf("elfldr: a PS5 only (its executable memory comes from views of the emulator's JIT objects)");
+        return -9;
+    }
+    if (ext_fetch() != 0)
+        return -7;
+    struct el_select *s = select_block();
+    if ((g_ctx->flags & CTX_ELFLDR_SELECT) && s)
+        return elfldr_select(s);
+    int rc = arena_init() != 0 || ext_start() != 0 ? -8 : ext_elfldr();
+    g_payload_fault = NULL;
+    ext_abandon();
+    logf("elfldr: back to the Lua loader (%d)", rc);
+    return rc;
+}
+
+int boot_title_pick(const char *title, int index)
+{
+    if (g_pick_rc == 1)
+        g_pick_rc = !g_choose ? 0
+                    : g_library ? ext_approot_pick(title, index, &g_pick_root)
+                    : gfs_pick(title) ? -1 : 0;
+    return g_pick_rc;
+}
+
+int boot_save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg)
+{
+    return g_pick_rc ? -1 : ext_save_prescan(user, progress, arg);
+}
+
+int ghost_boot(void)
+{
+    const char *root = (const char *)g_ctx->app_root;
+    logf("boot: app root %s", root);
+    crash_install();
+    /* the extension carries the NID table: without it nothing resolves, so
+     * stop before anything touches the title or the host's state */
+    if (ext_fetch() != 0)
+        return -7;
+    int choose = 0; /* game selector: 1 when ghostfs or a library left the choice to it */
+    bool library = false;
+    int rc = boot_root(&root, &choose, &library);
+    if (rc != 0)
+        return rc;
+    boot_quiet_host();
     /* ---- game selector (sel.c): it picks the title before its index is
      * loaded and its memory planned, and frees all it used first ---- */
     char title[16];
     g_choose = choose, g_library = library;
-    /* a save tool (Apollo) asks whose saves even when it is the only title */
-    int picked = sel_run(choose || (g_ctx->flags & CTX_FLAG_SELECT) || profile_has(PF_SAVE_TOOL), title);
+    struct el_select *s = select_block();
+    int picked;
+    if (s && s->boot) { /* picked beside the ELF loader, in ghostldr.lua's first call (elfldr_select) */
+        memcpy(title, s->title, sizeof(title));
+        title[sizeof(title) - 1] = 0;
+        picked = s->index, g_title_user = s->user;
+        logf("boot: %s, picked in the game selector beside the ELF loader", picked >= 0 ? title : "no title");
+    } else /* a save tool (Apollo) asks whose saves even when it is the only title */
+        picked = sel_run(choose || (g_ctx->flags & CTX_FLAG_SELECT) || profile_has(PF_SAVE_TOOL), title);
     if (boot_title_pick(picked >= 0 ? title : NULL, picked) != 0) {
         if (library)
             ext_abandon();
@@ -159,7 +250,7 @@ int ghost_boot(void)
     if (g_title_user)
         logf("boot: saves of user %x", g_title_user);
 
-    int rc = modules_load_boot(root, &g_main_mod);
+    rc = modules_load_boot(root, &g_main_mod);
     if (rc != 0)
         return rc;
 

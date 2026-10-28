@@ -380,7 +380,7 @@ class ServiceBase(unittest.TestCase):
         cls.exe = cls.root / "elfldr_host"
         build(cls.exe, [HERE / "ext_native/elfldr_host.c"],
               [NATIVE / "ext/src/elfldr.c", NATIVE / "ext/src/payload.c", NATIVE / "src/elf.c",
-               HERE / "ext_native/elfldr_fake.c"], ("-DEL_TIMEOUT_S=2", "-DEL_SECOND_MS=100"))
+               HERE / "ext_native/elfldr_fake.c"], ("-DEL_TIMEOUT_S=2",))
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -467,7 +467,10 @@ class Service(ServiceBase):
         self.assertEqual(self.talk(b"help\n"), [f"[elfldr] send an ELF, or one of: {cmds}"])
         self.assertEqual(self.talk(b"bogus\r\n"), [f"[elfldr] unknown command; send an ELF, or one of: {cmds}"])
         self.assertEqual(self.talk(b"\x00\x01binary"),
-                         ["[elfldr] refused: neither an ELF nor a command (it starts 00 01 62 69)"])
+                         ["[elfldr] refused: not an ELF, a ghostldr bundle or a command (it starts 00 01 62 69): a "
+                          ".bin that is neither an ELF nor ghostldr's (no GLDRBNDL header) is not taken"])
+        # a .bin that only starts like a bundle is no bundle: refused as any other binary
+        self.assertIn("is not taken", self.talk(b"GLDRBNDX\x00\x01" + bytes(200))[0])
         s = self.connect()
         s.sendall(elf_with_script("sleep=1500;code=0;"))
         self.assertEqual(s.recv(4096).decode().splitlines()[0][:19], "[elfldr] payload 1:")
@@ -540,13 +543,12 @@ class Service(ServiceBase):
         import mkbundle
         b = mkbundle.header(2, b"x" * 300, b"", bytes(8)) + b"x" * 300
         self.assertIn("bundles are for the release's ghostldr.lua", self.talk(b)[0])
-        self.assertIn("not booting: the extension here is the ELF loader's alone", self.talk(b"boot\n")[0])
+        self.assertIn("not booting: no ghostldr-ext.bin of this build is cached", self.talk(b"boot\n")[0])
         self.assertIn("nothing to forget: run.py serves this extension", self.talk(b"forget\n")[0])
         self.assertEqual(self.talk(b"quit\n"), ["[elfldr] quitting: SWRR goes back to Luac0re's loader"])
         self.assertEqual(self.proc.wait(10), 0)
         out = self.proc.stdout.read()
         self.assertIn("ui ready", out)
-        self.assertNotIn("ui countdown", out)
 
     def test_elf_send(self) -> None:
         import elf_send
@@ -577,11 +579,11 @@ def run_elf_send(mod, argv: list[str], path: Path | None) -> int:
 
 
 class ReleaseService(ServiceBase):
-    """The ELF loader as the release's ghostldr.lua starts it: the countdown to
-    the extension's games, cancelling it, bundles told apart by their magic, and
-    the boot, forget and log commands.  A countdown second is 100 ms here."""
+    """The ELF loader as the release's ghostldr.lua starts it: no countdown,
+    bundles told apart by their magic and checked against their own header
+    (whichever build), and the boot, forget and log commands."""
 
-    OPTIONS: tuple[str, ...] = ("countdown=5", "boot", "bundles")
+    OPTIONS: tuple[str, ...] = ("boot", "bundles")
 
     def setUp(self) -> None:
         self.proc = subprocess.Popen([str(self.exe), "serve", *self.OPTIONS], stdout=subprocess.PIPE,
@@ -610,30 +612,13 @@ class ReleaseService(ServiceBase):
             h = ((h ^ x) * 16777619) & 0xFFFFFFFF
         return f"{h:08x}"
 
-    def test_countdown_runs_out_and_boots(self) -> None:
-        rc, out = self.finish()
-        self.assertEqual(rc, 0)
-        self.assertEqual(out, ["ui countdown 5", "ui countdown 4", "ui countdown 3", "ui countdown 2",
-                               "ui countdown 1", "served 1"])      # EL_BOOT
-
-    def test_cancel_on_the_tv_keeps_the_elf_loader(self) -> None:
-        self.start("countdown=5", "boot", "bundles", "cancel=3")
-        time.sleep(1.2)                                # well past the countdown's 0.5 s
+    def test_it_waits_with_no_countdown(self) -> None:
+        time.sleep(0.8)
         self.assertEqual(self.talk(elf_with_script("out=still here|;code=4;"))[-1],
                          "[elfldr] payload 1 exited with code 4")
         self.assertEqual(self.talk(b"quit\n"), ["[elfldr] quitting: SWRR goes back to Luac0re's loader"])
         rc, out = self.finish()
-        self.assertEqual(out, ["ui countdown 5", "ui countdown 4", "ui countdown 3", "ui ready %d" % self.port,
-                               "served 0"])
-
-    def test_a_payload_stops_the_countdown(self) -> None:
-        lines = self.talk(elf_with_script("out=hi|;code=2;"))
-        self.assertEqual(lines[-1], "[elfldr] payload 1 exited with code 2")
-        time.sleep(0.8)
-        self.talk(b"quit\n")
-        rc, out = self.finish()
-        self.assertEqual(out[-2:], ["ui ready %d" % self.port, "served 0"])
-        self.assertNotIn("served 1", out)
+        self.assertEqual(out, ["ui ready %d" % self.port, "served 0"])
 
     def test_boot_forget_and_log_commands(self) -> None:
         self.start("boot", "bundles")
@@ -660,8 +645,8 @@ class ReleaseService(ServiceBase):
             for i in range(0, len(data), 7001):
                 s.sendall(data[i:i + 7001])
             first = s.recv(4096).decode()
-            self.assertIn(f"[elfldr] received ghostldr-ext.bin ({len(data)} bytes): ghostldr.lua checks it and boots it",
-                          first)
+            self.assertIn(f"[elfldr] received ghostldr-ext.bin ({len(data)} bytes, build 0123456789abcdef): a ghostldr "
+                          "bundle; ghostldr.lua caches it for the next ghostldr boot", first)
             rc, out = self.finish()
             rest = first + s.recv(4096).decode()
         self.assertIn("[ghostldr] the log goes here", rest)
@@ -690,7 +675,50 @@ class ReleaseService(ServiceBase):
             pass
         a.close()
         lines = self.talk(good)        # now it is taken
-        self.assertIn("received ghostldr-elfldr.bin (5128 bytes): ghostldr.lua checks it", lines[0])
+        self.assertIn("received ghostldr-elfldr.bin (5128 bytes, build 0123456789abcdef): a ghostldr bundle", lines[0])
+        self.assertEqual(self.finish()[1][-1], "served 2")
+
+    def test_beside_the_game_selector(self) -> None:
+        """The selector has the TV (no ready line); quit, boot and forget wait
+        for the pick; one bundle is held and serving goes on; once a title is
+        picked (SIGUSR1) the loader waits for its running payload, says so,
+        and returns 0."""
+        import signal
+        self.start("boot", "bundles", "selecting")
+        for cmd in (b"quit\n", b"boot\n", b"forget\n"):
+            self.assertIn("not now: the game selector is up", self.talk(cmd)[0])
+        b = self.bundle(1, os.urandom(4000), os.urandom(1000))
+        with self.connect() as held:
+            held.sendall(b)
+            self.assertIn("ghostldr.lua caches it for the next ghostldr boot once a game is picked in the selector",
+                          held.recv(4096).decode())
+            self.assertIn("refused: a ghostldr bundle came already", self.talk(b)[0])
+            self.assertEqual(self.talk(elf_with_script("out=during the selector|;code=3;"))[-1],
+                             "[elfldr] payload 1 exited with code 3")
+            busy = self.connect()
+            busy.sendall(elf_with_script("sleep=1200;code=0;"))
+            busy.recv(4096)
+            time.sleep(0.3)
+            self.proc.send_signal(signal.SIGUSR1)
+            while busy.recv(4096):
+                pass
+            busy.close()
+            rc, out = self.finish()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("ui ready %d" % self.port, out)
+        self.assertEqual(out[-2:], ["ui waiting 1", "served 0"])
+        self.assertEqual(sum(o.startswith("bundle kind 1") for o in out), 1)
+
+    def test_a_damaged_bundle_is_refused_and_another_build_taken(self) -> None:
+        self.start("bundles")
+        ext = os.urandom(5000)
+        bad = bytearray(self.bundle(2, ext))
+        bad[-1] ^= 1                   # its extension no longer matches the header's CRC-32
+        self.assertEqual(self.talk(bytes(bad)), ["[elfldr] refused: the bundle came damaged (a CRC-32 in it does not "
+                                                 "match its header): send it again"])
+        import mkbundle
+        other = mkbundle.header(2, ext, b"", bytes.fromhex("fedcba9876543210")) + ext
+        self.assertIn("received ghostldr-elfldr.bin (5128 bytes, build fedcba9876543210)", self.talk(other)[0])
         self.assertEqual(self.finish()[1][-1], "served 2")
 
 

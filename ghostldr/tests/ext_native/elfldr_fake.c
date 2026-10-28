@@ -12,8 +12,7 @@
  *
  * The TV and ghostldr.lua (el_ui, el_map, el_bundle_done, el_log_to) print
  * what they are asked, one "ui ..." / "bundle ..." / "log ..." line each on
- * stdout; el_ui_cancelled says yes once the countdown has shown
- * g_cancel_at seconds (elfldr_host.c sets it).
+ * stdout.
  */
 #include "ghost.h"
 #include "ftp.h"
@@ -185,9 +184,6 @@ void el_describe(struct el_payload *p, char *line, unsigned size)
 
 /* ---- the TV and ghostldr.lua ---- */
 long write(int fd, const void *buf, unsigned long n);
-int g_cancel_at = -1; /* the user dismisses the countdown when it shows this many seconds */
-static volatile int g_cancel;
-
 static void out(const char *f, ...)
 {
     char line[300];
@@ -199,14 +195,11 @@ static void out(const char *f, ...)
     write(1, line, (unsigned long)n);
 }
 
-void el_ui(int what, unsigned n)
-{
-    out(what == EL_UI_COUNTDOWN ? "ui countdown %u" : "ui ready %u", n);
-    if (what == EL_UI_COUNTDOWN && (int)n == g_cancel_at)
-        g_cancel = 1;
-}
+void el_ui(unsigned n) { out("ui ready %u", n); }
 
-int el_ui_cancelled(void) { return __atomic_exchange_n(&g_cancel, 0, __ATOMIC_SEQ_CST); }
+volatile int g_stop; /* elfldr_host: SIGUSR1, a title was picked in the selector */
+int el_stop_requested(void) { return g_stop; }
+void el_ui_waiting(unsigned n) { out("ui waiting %u", n); }
 
 void *el_map(unsigned long size) { return fv_alloc(size); }
 void el_unmap(void *p, unsigned long size) { fv_free(p, size); }

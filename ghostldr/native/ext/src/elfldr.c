@@ -19,10 +19,12 @@
  *
  * The release's two-file boot (docs/architecture.md) shares the port: a
  * bundle (ghostldr-ext.bin, ghostldr-elfldr.bin) is told apart by its
- * magic, taken whole and handed to ghostldr.lua (EL_BUNDLE), which checks
- * it, caches it and switches to it.  With a cached full extension the
- * loader starts with a countdown on the TV: unless the user dismisses it
- * or a payload comes first, the games boot when it runs out (EL_BOOT).
+ * magic, taken whole, checked against its own header (sizes, CRC-32s) and
+ * handed to ghostldr.lua (EL_BUNDLE), which caches it: it is applied on the
+ * next ghostldr boot, and the loader carries on with what it had.  Beside
+ * the game selector (selecting) it serves on a thread of its own: a bundle
+ * is held until a title is picked, quit, boot and forget wait for the pick,
+ * and once el_stop_requested it stops when no payload runs.
  *
  * Everything here runs on the thread that called elfldr_serve, which also
  * frees each finished payload (el_poll) between connections.  Payloads run
@@ -46,6 +48,7 @@ struct sess {
 
 static struct sess g_s[EL_SESSIONS];
 static unsigned g_next_id = 1;
+static int g_selecting, g_bundle_held; /* beside the game selector; a bundle waits for ghostldr.lua */
 
 static void say(int fd, const char *f, ...) __attribute__((format(printf, 2, 3)));
 static void say(int fd, const char *f, ...)
@@ -138,7 +141,8 @@ static int receive(int c, unsigned char *head, unsigned long *have_out, unsigned
         for (;;) {
             for (; n < have && n < cmd_size - 1 && head[n] != '\n' && head[n] != '\r'; n++) {
                 if (head[n] < 0x20 || head[n] > 0x7e) {
-                    say(c, "refused: neither an ELF nor a command (it starts %02x %02x %02x %02x)", head[0],
+                    say(c, "refused: not an ELF, a ghostldr bundle or a command (it starts %02x %02x %02x %02x): a "
+                           ".bin that is neither an ELF nor ghostldr's (no GLDRBNDL header) is not taken", head[0],
                         have > 1 ? head[1] : 0, have > 2 ? head[2] : 0, have > 3 ? head[3] : 0);
                     return -1;
                 }
@@ -200,6 +204,21 @@ static void reap(void)
     }
 }
 
+/* CRC-32 (zlib's), as mkbundle.py writes it into a bundle's header */
+static u32 crc32(const unsigned char *p, unsigned long n)
+{
+    static const u32 k_nib[16] = {0x00000000, 0x1DB71064, 0x3B6E20C8, 0x26D930AC, 0x76DC4190, 0x6B6B51F4,
+                                  0x4DB26158, 0x5005713C, 0xEDB88320, 0xF00F9344, 0xD6D6A3E8, 0xCB61B38C,
+                                  0x9B64C2B0, 0x86D3D2D4, 0xA00AE278, 0xBDBDF21C};
+    u32 crc = 0xFFFFFFFFu;
+    while (n--) {
+        crc ^= *p++;
+        crc = (crc >> 4) ^ k_nib[crc & 15];
+        crc = (crc >> 4) ^ k_nib[crc & 15];
+    }
+    return ~crc;
+}
+
 /* fill p[0, n): first from the `have` bytes already received at *cur, then
  * from the connection.  0, or -1 (said) */
 static int fill(int c, unsigned char *p, unsigned long n, const unsigned char **cur, unsigned long *have,
@@ -222,9 +241,9 @@ static int fill(int c, unsigned char *p, unsigned long n, const unsigned char **
     return 0;
 }
 
-/* A bundle (its first `have` bytes in head): taken whole, then handed to
- * ghostldr.lua, which checks it against its pins.  1: taken (c is the log
- * now), else refused (said). */
+/* A bundle (its first `have` bytes in head): taken whole, checked against
+ * its own header, then handed to ghostldr.lua, which caches it for the
+ * next boot.  1: taken (c is the log now), else refused (said). */
 static int take_bundle(int c, unsigned char *head, unsigned long have, int bundles)
 {
     if (!bundles) {
@@ -235,6 +254,10 @@ static int take_bundle(int c, unsigned char *head, unsigned long have, int bundl
     if (running()) {
         say(c, "refused: a bundle while %u payload%s run%s: send it again once they have finished", running(),
             running() == 1 ? "" : "s", running() == 1 ? "s" : "");
+        return -1;
+    }
+    if (g_bundle_held) {
+        say(c, "refused: a ghostldr bundle came already; it is cached once a game is picked in the selector");
         return -1;
     }
     while (have < EL_BUNDLE_HEADER) {
@@ -251,8 +274,8 @@ static int take_bundle(int c, unsigned char *head, unsigned long have, int bundl
     memcpy(&ext_size, head + 24, 8), memcpy(&sel_size, head + 32, 8);
     if (format != 1 || hsize != EL_BUNDLE_HEADER || (kind != 1 && kind != 2) || !ext_size ||
         ext_size > EL_BUNDLE_MAX || sel_size > EL_BUNDLE_MAX || (kind == 2 && sel_size)) {
-        say(c, "refused: a bundle of format %u, kind %u, parts of %lu and %lu bytes: not one this ghostldr.lua "
-               "reads; send ghostldr.lua and the bundle from the same release", format, kind, ext_size, sel_size);
+        say(c, "refused: a bundle of format %u, kind %u, parts of %lu and %lu bytes: not a ghostldr-ext.bin or "
+               "ghostldr-elfldr.bin this ghostldr reads", format, kind, ext_size, sel_size);
         return -1;
     }
     unsigned long total = EL_BUNDLE_HEADER + ext_size + sel_size, done = EL_BUNDLE_HEADER;
@@ -266,6 +289,12 @@ static int take_bundle(int c, unsigned char *head, unsigned long have, int bundl
         rc = fill(c, ext, ext_size, &cur, &have, &done, total);
     if (rc == 0 && sel)
         rc = fill(c, sel, sel_size, &cur, &have, &done, total);
+    u32 ext_crc, sel_crc;
+    memcpy(&ext_crc, hdr + 40, 4), memcpy(&sel_crc, hdr + 44, 4);
+    if (rc == 0 && (crc32(ext, ext_size) != ext_crc || (sel && crc32(sel, sel_size) != sel_crc))) {
+        say(c, "refused: the bundle came damaged (a CRC-32 in it does not match its header): send it again");
+        rc = -1;
+    }
     if (rc != 0) {
         if (rc == -2)
             say(c, "refused: no memory for the bundle's %lu bytes", total);
@@ -275,8 +304,13 @@ static int take_bundle(int c, unsigned char *head, unsigned long have, int bundl
             el_unmap(sel, sel_size);
         return -1;
     }
-    say(c, "received %s (%lu bytes): ghostldr.lua checks it and %s", kind == 1 ? "ghostldr-ext.bin" : "ghostldr-elfldr.bin",
-        total, kind == 1 ? "boots it" : "starts the ELF loader with it");
+    u8 build[8];
+    memcpy(build, hdr + 112, sizeof(build));
+    say(c, "received %s (%lu bytes, build %02x%02x%02x%02x%02x%02x%02x%02x): a ghostldr bundle; ghostldr.lua caches "
+           "it for the next ghostldr boot%s", kind == 1 ? "ghostldr-ext.bin" : "ghostldr-elfldr.bin", total, build[0],
+        build[1], build[2], build[3], build[4], build[5], build[6], build[7],
+        g_selecting ? " once a game is picked in the selector" : "");
+    g_bundle_held = g_selecting;
     el_bundle_done(hdr, ext, sel, c);
     return 1;
 }
@@ -296,6 +330,11 @@ static int command(int c, const char *cmd, int can_boot, int bundles)
         return 0;
     }
     int what = strcmp(cmd, "quit") == 0 ? 1 : strcmp(cmd, "boot") == 0 ? 2 : strcmp(cmd, "forget") == 0 ? 3 : 0;
+    if (what && g_selecting) {
+        say(c, "not now: the game selector is up; pick a game there (payloads and ghostldr bundles are taken "
+               "until then)");
+        return 0;
+    }
     if (what && running()) {
         say(c, "not %s: %u payload%s still running", what == 1 ? "quitting" : what == 2 ? "booting" : "forgetting",
             running(), running() == 1 ? "" : "s");
@@ -307,8 +346,8 @@ static int command(int c, const char *cmd, int can_boot, int bundles)
     }
     if (what == 2) {
         if (!can_boot) {
-            say(c, "not booting: the extension here is the ELF loader's alone; send ghostldr-ext.bin to this port "
-                   "to boot games");
+            say(c, "not booting: no ghostldr-ext.bin of this build is cached; send one to this port, then \"boot\" "
+                   "(or send ghostldr.lua again)");
             return 0;
         }
         say(c, "booting games: the ELF loader stops");
@@ -383,40 +422,29 @@ int elfldr_serve(const struct el_serve *o)
         fv_log("elfldr: cannot listen on TCP %u (errno %d)", o->port, -lfd);
         return lfd;
     }
-    fv_log("elfldr: listening on TCP %u (send an ELF: nc <ps5> %u < payload.elf)", o->port, o->port);
-    /* the countdown: the extension's games boot when it runs out, unless
-     * the user dismisses it on the TV or a payload comes first */
-    unsigned left = o->can_boot ? o->countdown : 0;
-    long tick = fv_clock_ms() + EL_SECOND_MS;
-    if (left) {
-        fv_log("elfldr: booting games in %u s unless cancelled (on the TV, or by sending a payload)", left);
-        el_ui(EL_UI_COUNTDOWN, left);
-    } else
-        el_ui(EL_UI_READY, o->port);
+    fv_log("elfldr: listening on TCP %u (send an ELF: nc <ps5> %u < payload.elf)%s", o->port, o->port,
+           o->selecting ? ", beside the game selector" : "");
+    g_selecting = o->selecting, g_bundle_held = 0;
+    if (!o->selecting) /* the selector has the TV */
+        el_ui(o->port);
     int rc = 0;
+    unsigned waited = 0;
     for (;;) {
         reap();
-        if (left && el_ui_cancelled()) {
-            left = 0;
-            fv_log("elfldr: countdown cancelled on the TV: the ELF loader stays");
-            el_ui(EL_UI_READY, o->port);
-        }
-        long now = fv_clock_ms();
-        if (left && now >= tick) {
-            tick += EL_SECOND_MS;
-            if (--left == 0) {
-                fv_log("elfldr: countdown over: booting games");
-                rc = EL_BOOT;
+        if (o->selecting && el_stop_requested()) {
+            if (!running())
                 break;
+            if (waited != running()) {
+                waited = running();
+                fv_log("elfldr: a title was picked: waiting for %u payload%s to finish", waited, waited == 1 ? "" : "s");
+                el_ui_waiting(waited);
             }
-            el_ui(EL_UI_COUNTDOWN, left);
+            fv_sleep_ms(POLL_MS);
+            continue;
         }
-        long wait = POLL_MS;
-        if (left && tick - now < wait)
-            wait = tick - now > 0 ? tick - now : 0;
         unsigned addr = 0;
         unsigned short from = 0;
-        int c = fv_accept(lfd, (int)wait, &addr, &from);
+        int c = fv_accept(lfd, POLL_MS, &addr, &from);
         if (c == -FV_ETIMEDOUT || c == -FV_EINTR)
             continue;
         if (c < 0) {
@@ -427,18 +455,18 @@ int elfldr_serve(const struct el_serve *o)
         fv_log("elfldr: client %u.%u.%u.%u:%u", addr >> 24, addr >> 16 & 255, addr >> 8 & 255, addr & 255, from);
         fv_timeouts(c, EL_TIMEOUT_S);
         int r = serve_one(c, o->can_boot, o->bundles);
-        if (r == 1 && left) { /* a payload: the user wants the ELF loader */
-            left = 0;
-            fv_log("elfldr: a payload came: no countdown, the ELF loader stays");
-            el_ui(EL_UI_READY, o->port);
-        }
         if (r != 1 && r < 5) /* else a payload's session, or the log, keeps the connection */
             fv_sclose(c);
+        if (r == 6 && o->selecting) /* held for ghostldr.lua; serving goes on until the pick */
+            continue;
         if (r >= 2 && r != 5) {
             rc = r == 2 ? 0 : r == 3 ? EL_BOOT : r == 4 ? EL_FORGET : EL_BUNDLE;
             break;
         }
     }
     fv_sclose(lfd);
+    if (o->selecting)
+        fv_log("elfldr: stopped beside the game selector%s", g_bundle_held ? "; a bundle waits for ghostldr.lua" : "");
+    g_selecting = 0;
     return rc;
 }

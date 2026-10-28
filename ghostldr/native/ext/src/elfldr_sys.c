@@ -549,6 +549,23 @@ void el_fini(void)
     g_nobj = 0;
 }
 
+/* beside the game selector (CTX_ELFLDR_SELECT): boot.c's block */
+static struct el_select *select_block(void)
+{
+    return (g_ctx->flags & CTX_ELFLDR_SELECT) && g_ctx->size >= (CTX_SELECT_SLOT + 1) * 8
+               ? (struct el_select *)((u64 *)g_ctx)[CTX_SELECT_SLOT]
+               : NULL;
+}
+
+/* a payload's code goes at the end of its JIT object: not over the
+ * selector's image, which sel.c copies to the start of the code region */
+static bool clear_of_selector(const struct jit_obj *o, u64 code)
+{
+    const struct el_select *s = select_block();
+    u64 lo = o->home + o->size - code, hi = o->home + o->size;
+    return !s || !s->res_hi || hi <= s->res_lo || lo >= s->res_hi;
+}
+
 /* ---- a payload's life ---- */
 
 static void on_fault(struct module *m, int sig, u64 rip, u64 addr)
@@ -660,11 +677,12 @@ int el_load(const unsigned char *buf, unsigned long len, unsigned id, int conn, 
         goto out;
     }
     keep_libs(p);
-    /* the smallest free JIT object its code fits, past the object's header */
+    /* the smallest free JIT object its code fits, past the object's header
+     * and, beside the game selector, clear of where the selector's image goes */
     int best = -1;
     for (u32 i = 0; i < g_nobj; i++)
         if (!g_user[i] && g_obj[i].rx >= 0 && g_obj[i].size >= pi->exec_end + PL_HEADER &&
-            (best < 0 || g_obj[i].size < g_obj[best].size))
+            clear_of_selector(&g_obj[i], pi->exec_end) && (best < 0 || g_obj[i].size < g_obj[best].size))
             best = (int)i;
     if (best < 0) {
         u32 busy = 0;
@@ -893,27 +911,32 @@ static void dialog(const char *text)
         logf("elfldr: the TV's dialog did not open (%x)", rc);
 }
 
-void el_ui(int what, unsigned n)
+void el_ui(unsigned n)
 {
     static char text[512];
     const char *ip = g_ctx->size >= (CTX_CONSOLE_IP_SLOT + 1) * 8 ? (const char *)((u64 *)g_ctx)[CTX_CONSOLE_IP_SLOT]
                                                                  : NULL;
     if (!ip)
         ip = "this PS5";
-    if (what == EL_UI_COUNTDOWN)
-        fmt(text, sizeof(text), "ghostldr\n\nLoading the ghostldr extension in %u...\n\nPress OK (or \xe2\x97\x8b) "
-            "to cancel and stay in the ELF loader on %s:%u", n, ip, g_port);
-    else
-        fmt(text, sizeof(text), "ghostldr\n\nELF loader on %s:%u\n(nc %s %u < payload.elf)\n\n%s\nSend \"quit\" there "
-            "to go back to Luac0re", ip, g_port, ip, g_port, g_can_boot ? "Send \"boot\" there to boot games."
-            : "To boot games, send ghostldr-ext.bin there.");
+    fmt(text, sizeof(text), "ghostldr\n\nELF loader on %s:%u\n(nc %s %u < payload.elf)\n\n%s\nSend \"quit\" there "
+        "to go back to Luac0re", ip, n, ip, n, g_can_boot ? "Send \"boot\" there to boot games."
+        : "A ghostldr-ext.bin sent there is kept for the next boot.");
     dialog(text);
 }
 
-int el_ui_cancelled(void)
+int el_stop_requested(void)
 {
-    s32 (*status)(void) = host_real_in("libSceMsgDialog", "sceMsgDialogUpdateStatus");
-    return status && status() == 3; /* FINISHED: OK or the circle button */
+    const struct el_select *s = select_block();
+    return s && __atomic_load_n(&s->stop, __ATOMIC_ACQUIRE) != 0;
+}
+
+/* a title was picked in the selector while payloads still run */
+void el_ui_waiting(unsigned n)
+{
+    static char text[200];
+    fmt(text, sizeof(text), "ghostldr\n\nA game was picked.\nWaiting for %u ELF loader payload%s to finish\nbefore it "
+        "starts.", n, n == 1 ? "" : "s");
+    dialog(text);
 }
 
 void *el_map(unsigned long size)
@@ -967,8 +990,8 @@ int elfldr_main(void)
     u32 port = CTX_ELFLDR_PORT(g_ctx->flags);
     g_port = port ? port : EL_PORT;
     g_can_boot = (g_ctx->flags & CTX_ELFLDR_CAN_BOOT) != 0;
-    struct el_serve s = {(unsigned short)g_port, CTX_ELFLDR_COUNTDOWN(g_ctx->flags), g_can_boot,
-                         (g_ctx->flags & CTX_FLAG_BUNDLE) != 0};
+    struct el_serve s = {(unsigned short)g_port, g_can_boot, (g_ctx->flags & CTX_FLAG_BUNDLE) != 0,
+                         select_block() != NULL};
     int rc = elfldr_serve(&s);
     g_payload_fault = NULL;
     el_fini();

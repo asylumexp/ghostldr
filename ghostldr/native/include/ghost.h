@@ -381,6 +381,7 @@ int gfs_getdents(int fd, void *buf, int size);
 int gfs_find_file(const char *name, char *dir, size_t size); /* a title file outside sce_module */
 int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16]);
 int gfs_umount(const char mount_point[16], u32 max_ms);
+void gfs_unmount_all(void); /* the data containers mounted for reads go (none may be mid-read) */
 const char *gfs_save_name(void);                        /* <prefix>SAVE */
 const char *title_id(void);                             /* the index's title ID, "" if unknown */
 /* the save data family (ext/src/hle_savedata.c) */
@@ -648,17 +649,33 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 #define CTX_FLAG_ELFLDR 1048576 /* no title: serve the ELF loader (run.py elfldr, docs/elfldr.md) */
 #define CTX_ELFLDR_PORT(flags) ((u32)((flags) >> 32) & 0xFFFF) /* its TCP port (run.py elfldr --port) */
 /* The ELF loader in the release's listen mode (ghostldr.lua, with
- * CTX_FLAG_BUNDLE): seconds of countdown before it boots games (bits 48-55,
- * the FTP port's, which no title uses here), and that the extension is the
- * full one, so it can ("boot", the countdown) */
-#define CTX_ELFLDR_COUNTDOWN(flags) ((u32)((flags) >> 48) & 0xFF)
+ * CTX_FLAG_BUNDLE): a full extension of this build is cached, so "boot"
+ * can boot games (bit 56, in the FTP port's bits, which no title uses here) */
 #define CTX_ELFLDR_CAN_BOOT (1ULL << 56)
 /* Listen mode: the context's u64s after the profile slot, when ctx->size
  * covers them: the console's address as text (for the TV), and 128 bytes
  * where the ELF loader copies the header of a bundle it takes, which
- * ghostldr.lua checks against its pins as it checks its own */
+ * ghostldr.lua reads to cache it for the next boot */
 #define CTX_CONSOLE_IP_SLOT 64
 #define CTX_BUNDLE_HEADER_SLOT 65
+/* The ELF loader beside the game selector (ghostldr.lua with a cached
+ * ghostldr-ext.bin, docs/architecture.md "The bundle cache"): with
+ * CTX_FLAG_ELFLDR and CTX_ELFLDR_SELECT, the ELF loader serves on a thread
+ * of its own while the selector shows; when a title is picked it stops,
+ * the extension and its executable memory are given back, and ghostldr.lua
+ * boots the pick in a second call (struct el_select at CTX_SELECT_SLOT,
+ * ghostldr.lua's, zeroed; ctx->size 0x218) */
+#define CTX_ELFLDR_SELECT (1ULL << 57)
+#define CTX_SELECT_SLOT 66
+#define CTX_ELFLDR_PICKED 4 /* ghost_elfldr's result then (beside elfldr.h's EL_BOOT 1, EL_BUNDLE 2, EL_FORGET 3) */
+struct el_select {
+    u64 stop;           /* +0x00 the core: a title is picked, the ELF loader stops */
+    u64 res_lo, res_hi; /* +0x08 the core: where the selector's image goes: no payload code there */
+    s32 index;          /* +0x18 the pick (the core, first call); -1: none */
+    u32 user;           /* +0x1c a save tool's user (g_title_user) */
+    char title[16];     /* +0x20 the pick's title ID */
+    u64 boot;           /* +0x30 ghostldr.lua, second call: boot index/title/user, no selector */
+};
 /* The release's ghostldr.lua received a bundle (ghostldr-ext.bin or
  * ghostldr-elfldr.bin, docs/architecture.md "Two-file boot"): ext_fd and
  * sel_fd hold the addresses of the extension and the selector in flexible

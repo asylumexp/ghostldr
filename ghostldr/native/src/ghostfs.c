@@ -228,6 +228,20 @@ static void evict(struct cont *victim)
     g_evictions++;
 }
 
+/* The data containers mounted for reads go: the game selector beside the
+ * ELF loader (boot.c elfldr_select) read through them, and the title boots
+ * in a second call that mounts them again */
+void gfs_unmount_all(void)
+{
+    if (!g_hdr || !g_cont)
+        return;
+    lock(&g_cont_lock);
+    for (u32 i = 0; i < g_hdr->containers && i < GFS_MAX_CONT; i++)
+        if (g_cont[i].fd >= 0 && !g_cont[i].busy)
+            evict(&g_cont[i]);
+    unlock(&g_cont_lock);
+}
+
 /* 0: one more real slot is the caller's until gfs_slot_release (idle data
  * containers are unmounted to make room); -1: no slot can be spared */
 int gfs_slot_reserve(void)

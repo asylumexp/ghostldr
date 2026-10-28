@@ -149,37 +149,6 @@ static void pin_tree(int dirfd, u32 slot, const char *rel, int depth)
         }
 }
 
-/* the bound save's sce_sys/keystone, if SWRR may read it while the save is
- * bound (a game's keystone without a computer: hle_fsvsh.c); g_ks_rc: 1 not
- * tried, 0 read, else what open/read answered */
-static u8 g_ks[0x60];
-static volatile s64 g_ks_rc = 1;
-
-static void try_keystone(u32 slot)
-{
-    char p[48];
-    fmt(p, sizeof(p), "/savedata%u/sce_sys/keystone", slot);
-    int k = R.open(p, O_RDONLY, 0);
-    if (k < 0) {
-        static int *(*err)(void);
-        if (!err)
-            err = host_real("__error");
-        g_ks_rc = err ? -(s64)*err() : -1;
-        return;
-    }
-    s64 n = R.read(k, g_ks, sizeof(g_ks));
-    R.close(k);
-    g_ks_rc = n == (s64)sizeof(g_ks) && memcmp(g_ks, "keystone", 8) == 0 ? 0 : 1000 + n;
-}
-
-bool save_race_keystone(u8 out[0x60])
-{
-    if (g_ks_rc != 0)
-        return false;
-    memcpy(out, g_ks, sizeof(g_ks));
-    return true;
-}
-
 /* a racer caught something on /savedata<slot> (a directory or the save's
  * sce_sys/param.sfo): if the save's files show there, hold its param.sfo and
  * open its files now.  The save's root is listed through a descriptor opened
@@ -204,7 +173,6 @@ static void pin_save(u32 slot)
         pin_tree(root, slot, "", 6);
         R.close(root);
     }
-    try_keystone(slot);
     R.close(sfo); /* sce_sys/param.sfo itself was opened again by pin_tree, if readable */
     __atomic_store_n(&g_pinning, g_npin > 0 ? 2 : 0, __ATOMIC_RELEASE); /* nothing pinned: let a later catch try */
 }
@@ -407,7 +375,7 @@ static s32 race_copy(s32 user, const char *tid, const char *dir, const char *dst
         return E_NOMEM;
     }
     memset(&G_r, 0, sizeof(G_r));
-    g_npin = 0, g_pinning = 0, g_ks_rc = 1;
+    g_npin = 0, g_pinning = 0;
     u8 st[0x78];
     for (u32 n = 0; n < 16; n++) {
         char p[16];
@@ -515,9 +483,6 @@ static s32 race_copy(s32 user, const char *tid, const char *dir, const char *dst
     logf("save_race: %s:%s: %s took %lu us; first descriptor %s%ld us after the request; %d files held",
          t, d, fp ? "the fingerprint mount" : "MountInternal", (u64)(t1 - t0),
          G_r.first_us ? "" : "never (", G_r.first_us ? (long)(G_r.first_us - t0) : 0L, g_npin);
-    if (g_ks_rc != 1)
-        logf("save_race: %s:%s: its sce_sys/keystone while bound: %s (%ld)", t, d,
-             g_ks_rc == 0 ? "read" : "not readable", (long)g_ks_rc);
     return root != -1 ? 0 : rc ? rc : E_NOENT;
 }
 
