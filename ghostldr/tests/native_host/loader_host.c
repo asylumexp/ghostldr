@@ -92,6 +92,7 @@ u32 bx_code(const struct module *m, const struct bx_range **runs) { return 0; }
 int vfs_stat(const char *path, void *st) { return stat(path, st); }
 int budget_patch_text(struct module *m, u8 *text) { return 0; }
 void hooks_patch_text(struct module *m, u8 *text) {}
+void ext_patch_text(struct module *m, u8 *text, u64 size) {}
 
 /* one buffer stands in for the code region; all of it counts as RX */
 #define REGION (128UL << 20)

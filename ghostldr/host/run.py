@@ -591,6 +591,7 @@ def boot_flags(args) -> int:
         | (4 if args.snap or args.count_imports or args.profile else 0) | (16 if args.profile else 0) \
         | (8 if args.count_imports else 0) | (32 if args.force_title_ready else 0) \
         | (64 if args.ext_jit else 0) | (128 if args.dialog_cancel else 0) | (256 if args.ime_fixed_name else 0) \
+        | (0x400000 if args.dialog_auto else 0) \
         | (512 if args.keep_remote_play else 0) | (1024 if args.boot_start_modules else 0) \
         | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0) \
         | (16384 if args.diag else 0) | (65536 if args.no_auto_memory else 0) \
@@ -639,6 +640,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="answer every system dialog with buttons by cancelling (to bisect a title hang)")
     parser.add_argument("--ime-fixed-name", action="store_true",
                         help="text input answers \"Player\" instead of the console user's name")
+    parser.add_argument("--dialog-auto", action="store_true",
+                        help="never draw system dialogs and the on-screen keyboard over the title's frames: answer "
+                             "them at once, as for titles that draw with the GPU")
     memory = parser.add_mutually_exclusive_group()
     memory.add_argument("--no-auto-memory", action="store_true",
                         help="a title without a memory plan gets the plain plan-free budget: no lazy commit, no "

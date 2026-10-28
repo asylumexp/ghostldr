@@ -93,4 +93,7 @@ const struct ghost_api g_ghost_api = {
     .jit_objects_find = jit_objects_find,
     .payload_fault = &g_payload_fault,
     .library = ext_library,
+    .title_user = &g_title_user,
+    .save_prescan = boot_save_prescan,
+    .title_pick = boot_title_pick,
 };

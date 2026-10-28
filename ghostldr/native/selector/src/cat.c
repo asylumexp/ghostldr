@@ -157,7 +157,7 @@ static void copy_str(char *d, const u8 *s, int n, int cap)
 
 /* ---- names ---- */
 
-/* The title's name in its profile: run.py sends every profile it knows
+/* The title's name and flags in its profile: run.py sends every profile it knows
  * (profiles.py boot_bundle) and ghostldr.lua leaves them in the boot
  * context's last u64 (profile.c PROFILE_SLOT); REC_NAME is the profile's
  * "name".  Read in place: blobs of struct prof_hdr + records, ended by a
@@ -172,6 +172,7 @@ static void profile_name(struct plat *P, struct cat_title *c)
             h->total < h->header_size || h->total > 0x10000 || (h->total & 7))
             return;
         if (strncmp(h->title, c->id, sizeof(h->title)) == 0) {
+            c->prof_flags = h->flags;
             for (u32 at = h->header_size; at + sizeof(struct prof_rec) <= h->total;) {
                 const struct prof_rec *r = (const struct prof_rec *)(p + at);
                 if (r->size < sizeof(*r) || at + r->size > h->total)

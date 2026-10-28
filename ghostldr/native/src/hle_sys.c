@@ -310,6 +310,8 @@ static s64 hle_sceVideoOutRegisterBuffers(u64 handle, u64 start, u64 addrs, u64 
     }
     logf("sceVideoOutRegisterBuffers(%lx, start %lu, %lu buffers: %lx %lx) -> %lx", handle, start, num, a[0],
          num > 1 ? a[1] : 0, (u64)r);
+    if (r >= 0)
+        ext_video_buffers((s32)handle, (s32)start, a, (s32)num, (const void *)attr);
     return r;
 }
 TRACE(sceVideoOutSetBufferAttribute, "libSceVideoOut", 8)
@@ -367,6 +369,8 @@ static s64 hle_scePadReadState(s32 handle, u8 *data)
             logf("scePadReadState: clearing INTERCEPTED (buttons %08x, connected %u)", *(u32 *)data, data[0x4c]);
         *(u32 *)data &= ~PAD_INTERCEPTED;
     }
+    if (rc == 0 && data)
+        ext_pad_state(handle, data);
     static u32 last_buttons, presses;
     if (rc == 0 && data && *(u32 *)data != last_buttons) {
         last_buttons = *(u32 *)data;

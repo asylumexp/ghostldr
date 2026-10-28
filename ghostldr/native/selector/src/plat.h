@@ -34,6 +34,7 @@ struct cat_title {
     u8 name_src;         /* NAME_* of name; 0: none (the ID is shown) */
     u64 total, cap;
     u32 containers, flags;
+    u32 prof_flags; /* its profile's PF_* (PF_SAVE_TOOL: a save tool asks whose saves) */
     struct {
         u64 off, size;
     } file[NFILES];
@@ -79,6 +80,14 @@ struct plat {
     /* pad */
     s32 pad;
     s32 (*pad_read)(s32, u8 *);
+    u64 prev, next_clock; /* the last step; the next clock reading */
+    /* the console's users (a save tool asks whose saves to open) */
+    s32 user;             /* the user running SWRR */
+    s32 (*us_registered)(s32 *list16);
+    s32 (*us_login)(s32 *list4);
+    s32 (*us_name)(s32, char *, size_t);
+    u64 next_users, scan_frame;
+    int pick_rc;          /* ghost_api.title_pick's answer; 1: not asked yet */
     /* system modules this module loaded (0: none or not ours) */
     u32 mod_png, mod_font, mod_fontft;
     /* libScePngDec */

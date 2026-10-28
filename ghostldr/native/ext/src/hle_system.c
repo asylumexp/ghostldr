@@ -8,7 +8,8 @@
  * to the real service; what is addressed to the app (invitations, add-ons,
  * PlayGo, launch links, game intents) is SWRR's and is dropped; calls that
  * would end SWRR (LoadExec, LaunchApp) are refused; the LOGIN events SWRR
- * consumed are synthesized for every logged-in user.
+ * consumed are synthesized for every logged-in user.  Registry writes
+ * (libSceRegMgr) are refused.
  * Spec: research/hle-specs/system-appcontent.md sections 4 and 5.
  */
 #include "sys_title.h"
@@ -191,6 +192,94 @@ static volatile bool g_primed;
 
 static bool user_valid(s32 u) { return u != -1 && u != 0xFF; }
 
+static s32 swrr_user(void)
+{
+    static s32 u = -1;
+    if (u == -1) {
+        US_REAL(s32(*)(s32 *), "sceUserServiceGetInitialUser");
+        s32 v = -1;
+        if (real && real(&v) == 0)
+            u = v;
+    }
+    return u;
+}
+
+static u32 picked(void)
+{
+    u32 *p = G->size >= __builtin_offsetof(struct ghost_api, title_user) + sizeof(void *) ? G->title_user : NULL;
+    return p ? *p : 0;
+}
+
+s32 title_user(void)
+{
+    u32 p = picked();
+    return p ? (s32)p : swrr_user();
+}
+
+bool title_user_picked(void)
+{
+    u32 p = picked();
+    return p && (s32)p != swrr_user();
+}
+
+/* sceUserServiceGetInitialUser: the user the title runs for */
+static s32 hle_sceUserServiceGetInitialUser(s32 *user)
+{
+    if (!user)
+        return US_INVALID_ARGUMENT;
+    s32 u = title_user();
+    if (u == -1)
+        return (s32)0x80960002; /* NOT_INITIALIZED */
+    *user = u;
+    static u32 said;
+    if (title_user_picked() && !said++)
+        logf("sceUserService: the title runs for user %x (picked in the game selector; SWRR runs for %x)", (u32)u,
+             (u32)swrr_user());
+    return 0;
+}
+
+/* scePadOpen / scePadGetHandle: a title running for a picked user reads the
+ * controller of the user running SWRR, who picked it in the game selector
+ * (on a PS5 every signed-in user has a controller of their own).  As the
+ * core's scePadOpen otherwise: SWRR has the pad open already, so a refused
+ * open gets SWRR's handle. */
+static s32 pad_user(s32 user)
+{
+    static u32 said;
+    if (!title_user_picked() || user != title_user())
+        return user;
+    if (!said++)
+        logf("pad: the title opens the pad of user %x: the controller of user %x (SWRR's) instead", (u32)user,
+             (u32)swrr_user());
+    return swrr_user();
+}
+
+static s32 hle_scePadGetHandle(s32 user, s32 type, s32 index)
+{
+    static s32 (*get)(s32, s32, s32);
+    if (!get)
+        get = host_real_in("libScePad", "scePadGetHandle");
+    return get ? get(pad_user(user), type, index) : (s32)0x80920001;
+}
+
+static s32 hle_scePadOpen(s32 user, s32 type, s32 index, const void *param)
+{
+    static s32 (*real)(s32, s32, s32, const void *);
+    if (!real)
+        real = host_real_in("libScePad", "scePadOpen");
+    if (!real)
+        return (s32)0x80920001;
+    user = pad_user(user);
+    s32 h = real(user, type, index, param);
+    if (h < 0) {
+        s32 existing = hle_scePadGetHandle(user, type, index);
+        logf("scePadOpen(%x,%d,%d) -> %x, reusing handle %x", (u32)user, type, index, (u32)h, (u32)existing);
+        if (existing >= 0)
+            return existing;
+    }
+    return h;
+}
+
 static bool synthesized(s32 u)
 {
     for (u32 i = 0; i < g_nsynth; i++)
@@ -309,6 +398,66 @@ static s32 hle_sceUserServiceGetRegisteredUserIdList(s32 *list)
     return rc;
 }
 
+/* libSceRegMgr: reads go to the console's registry; writes are refused
+ * whatever the console would allow a game.  What homebrew writes there is
+ * the console's own state (offline account activation writes a user's
+ * account ID, NP environment and sign-in flag), and a title in SWRR has no
+ * business changing it. */
+static s32 regmgr_set(u32 key)
+{
+    static u32 said;
+    static volatile int noticed;
+    if (said++ < 8)
+        logf("regmgr: the title's write to registry key %x refused", key);
+    ov_notice(&noticed, "The console's system settings (registry) can't be changed from SWRR on a stock console:\n"
+                        "the change was not made (e.g. account activation).");
+    return (s32)0x80020001; /* EPERM */
+}
+
+/* reads pass to the console's registry; when SWRR may not read a key (a
+ * user's account or name, the parental passcode), the title is told on
+ * screen what that costs it, once */
+static volatile int g_reg_noticed;
+static void regmgr_read_said(const char *fn, u32 key, s32 rc)
+{
+    static u32 said;
+    if (said++ < 8)
+        logf("regmgr: %s(%x) -> %x", fn, key, (u32)rc);
+    if (rc != 0)
+        ov_notice(&g_reg_noticed, "The console's system settings (registry) can't be read from SWRR on a stock console:\n"
+                                  "user accounts and passcodes kept there aren't available (e.g. account activation).");
+}
+
+static s32 hle_sceRegMgrGetStr(u32 key, char *out, u32 size)
+{
+    static s32 (*real)(u32, char *, u32);
+    if (!real)
+        real = host_real_in("libSceRegMgr", "sceRegMgrGetStr");
+    s32 rc = real ? real(key, out, size) : (s32)0x80020001;
+    regmgr_read_said("sceRegMgrGetStr", key, rc);
+    return rc;
+}
+
+static s32 hle_sceRegMgrGetBin(u32 key, void *out, u32 size)
+{
+    static s32 (*real)(u32, void *, u32);
+    if (!real)
+        real = host_real_in("libSceRegMgr", "sceRegMgrGetBin");
+    s32 rc = real ? real(key, out, size) : (s32)0x80020001;
+    regmgr_read_said("sceRegMgrGetBin", key, rc);
+    return rc;
+}
+
+static s32 hle_sceRegMgrGetInt(u32 key, s32 *out)
+{
+    static s32 (*real)(u32, s32 *);
+    if (!real)
+        real = host_real_in("libSceRegMgr", "sceRegMgrGetInt");
+    s32 rc = real ? real(key, out) : (s32)0x80020001;
+    regmgr_read_said("sceRegMgrGetInt", key, rc);
+    return rc;
+}
+
 #define SS "libSceSystemService"
 #define US "libSceUserService"
 #define E(lib, fn) {lib, #fn, hle_##fn, NULL}
@@ -328,11 +477,20 @@ static const struct ext_hle_ent k_hle[] = {
     {"libSceSystemServiceSuspend", "sceSystemServiceDisableSuspendNotification", ss_ok, NULL},
     {"libSceSystemServiceSuspend", "sceSystemServiceDeclareReadyForSuspend", ss_ok, NULL},
     E("libSceSystemServiceWebBrowser", sceSystemServiceLaunchWebBrowser),
+    E(US, sceUserServiceGetInitialUser),
     E(US, sceUserServiceInitialize),
     E(US, sceUserServiceInitialize2),
     E(US, sceUserServiceTerminate),
     E(US, sceUserServiceGetEvent),
     E("libSceUserServiceRegisteredUserIdList", sceUserServiceGetRegisteredUserIdList),
+    E("libScePad", scePadOpen),
+    E("libScePad", scePadGetHandle),
+    E("libSceRegMgr", sceRegMgrGetStr),
+    E("libSceRegMgr", sceRegMgrGetBin),
+    E("libSceRegMgr", sceRegMgrGetInt),
+    {"libSceRegMgr", "sceRegMgrSetInt", regmgr_set, NULL},
+    {"libSceRegMgr", "sceRegMgrSetStr", regmgr_set, NULL},
+    {"libSceRegMgr", "sceRegMgrSetBin", regmgr_set, NULL},
 };
 
 EXT_FAMILY("system", k_hle, NULL);

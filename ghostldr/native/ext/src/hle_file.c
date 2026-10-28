@@ -97,11 +97,51 @@ static bool watched(s32 fd)
 
 /* ---- paths ---- */
 
+/* "/mnt/sandbox/<TITLE>_000/x" is "/x": the title's own sandbox as seen from
+ * outside it, which homebrew made for jailbroken consoles uses for its own
+ * files (Apollo reads "/mnt/sandbox/APOL00004_000/app0/assets/..."); inside
+ * SWRR that tree is SWRR's, so the title's path is used instead.  Only the
+ * title's own ID (title_ident) matches; buf receives the result. */
+const char *title_sandbox_path(const char *path, char *buf, size_t size)
+{
+    static const char pre[] = "/mnt/sandbox/";
+    if (!path || strncmp(path, pre, sizeof(pre) - 1) != 0)
+        return path;
+    const char *id = title_ident(), *t = path + sizeof(pre) - 1;
+    size_t n = strlen(id);
+    if (!n || strncmp(t, id, n) != 0 || t[n] != '_')
+        return path;
+    t += n + 1;
+    for (int k = 0; k < 3; k++, t++)
+        if (*t < '0' || *t > '9')
+            return path;
+    if (*t != '/' && *t != 0)
+        return path;
+    fmt(buf, size, "%s", *t ? t : "/");
+    static u32 said;
+    if (said++ < 8)
+        logf("path %s is the title's own %s", path, buf);
+    return buf;
+}
+
+/* the virtual devices and files a jailbroken title sees (hle_jbc.c; not in the ELF loader's extension) */
+bool jbc_open(const char *path, int flags, int mode, s64 *fd) HIDDEN __attribute__((weak));
+bool jbc_stat(const char *path, void *st, s32 *rc) HIDDEN __attribute__((weak));
+void jbc_close(s32 fd) HIDDEN __attribute__((weak));
+
+#define ALIAS(var)                                                                                                    \
+    char var##_alias[512];                                                                                            \
+    var = (u64)title_sandbox_path((const char *)var, var##_alias, sizeof(var##_alias))
+
 static NOINLINE u64 h_open(u64 path, u64 flags, u64 mode, u64 d, u64 e, u32 i)
 {
+    ALIAS(path);
     int gfd;
     if (gfs_open((const char *)path, (int)flags, &gfd) == 0)
         return ret(i, gfd);
+    s64 jfd;
+    if (jbc_open && jbc_open((const char *)path, (int)flags, (int)mode, &jfd))
+        return ret(i, jfd);
     char buf[512];
     const char *p = remap_path((const char *)path, buf, sizeof(buf));
     s32 fd = (s32)pass(i, (u64)p, flags, mode, 0, 0);
@@ -117,35 +157,76 @@ static NOINLINE u64 h_open(u64 path, u64 flags, u64 mode, u64 d, u64 e, u32 i)
     return (u64)(s64)fd;
 }
 
+/* A directory above a path namespace the title's paths are mapped into
+ * (hle_appcontent.c: /mnt above /mnt/usb0, /mnt/usb1): SWRR's sandbox may not show it,
+ * but a title that makes /mnt/usb0/x/y one directory at a time checks it. */
+static bool ns_parent(const char *path)
+{
+    return strncmp(path, "/mnt", 4) == 0 && (!path[4] || (path[4] == '/' && !path[5]));
+}
+
 static NOINLINE u64 h_stat(u64 path, u64 st, u64 c, u64 d, u64 e, u32 i)
 {
+    ALIAS(path);
     int grc;
     if (gfs_stat((const char *)path, (void *)st, &grc) == 0)
         return ret(i, grc);
+    s32 jrc;
+    if (jbc_stat && jbc_stat((const char *)path, (void *)st, &jrc))
+        return ret(i, jrc);
     char buf[512];
-    return pass(i, (u64)remap_path((const char *)path, buf, sizeof(buf)), st, 0, 0, 0);
+    s64 rc = (s64)pass(i, (u64)remap_path((const char *)path, buf, sizeof(buf)), st, 0, 0, 0);
+    if (rc != 0 && st && ns_parent((const char *)path)) {
+        memset((void *)st, 0, 0x78);
+        *(u16 *)(st + 8) = 040755; /* st_mode: a directory */
+        return 0;
+    }
+    return (u64)rc;
 }
 
 /* access(path, mode) and sceKernelCheckReachability(path): ghostfs is read-only */
 static NOINLINE u64 h_access(u64 path, u64 mode, u64 c, u64 d, u64 e, u32 i)
 {
+    ALIAS(path);
     u8 st[0x78];
     int grc;
     if (gfs_stat((const char *)path, st, &grc) == 0)
         return ret(i, grc ? grc : ((i & PX) && (mode & 2)) ? E_ROFS : 0);
+    s32 jrc;
+    if (jbc_stat && jbc_stat((const char *)path, st, &jrc))
+        return ret(i, jrc);
     char buf[512];
-    return pass(i, (u64)remap_path((const char *)path, buf, sizeof(buf)), mode, 0, 0, 0);
+    const char *p = remap_path((const char *)path, buf, sizeof(buf));
+    s64 rc = (s64)pass(i, (u64)p, mode, 0, 0, 0);
+    if (rc != 0 && K.stat && K.stat(p, st) == 0) {
+        /* SWRR's access() refuses some paths stat() finds (seen on a PS5: its /temp0) */
+        static u32 said;
+        if (__atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 8)
+            logf("access(%s): stat finds %s", (const char *)path, p);
+        return 0;
+    }
+    if (rc != 0 && ns_parent((const char *)path))
+        return 0;
+    return (u64)rc;
 }
 
 /* calls that only need the /app0 and /savedata remapping */
 static NOINLINE u64 h_path(u64 path, u64 b, u64 c, u64 d, u64 e, u32 i)
 {
+    ALIAS(path);
     char buf[512];
-    return pass(i, (u64)remap_path((const char *)path, buf, sizeof(buf)), b, c, 0, 0);
+    const char *p = remap_path((const char *)path, buf, sizeof(buf));
+    s64 rc = (s64)pass(i, (u64)p, b, c, 0, 0);
+    static u32 said;
+    if (rc < 0 && __atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 64)
+        logf("path call %u on %s (%s) -> %lx", i & 0xFF, (const char *)path, p, (u64)rc);
+    return (u64)rc;
 }
 
 static NOINLINE u64 h_rename(u64 from, u64 to, u64 c, u64 d, u64 e, u32 i)
 {
+    ALIAS(from);
+    ALIAS(to);
     char a[512], b[512];
     return pass(i, (u64)remap_path((const char *)from, a, sizeof(a)), (u64)remap_path((const char *)to, b, sizeof(b)),
                 0, 0, 0);
@@ -201,6 +282,8 @@ static NOINLINE u64 h_close(u64 fd, u64 b, u64 c, u64 d, u64 e, u32 i)
 {
     if (gfs_close((int)fd) == 0)
         return 0;
+    if (jbc_close)
+        jbc_close((s32)fd);
     if (watched((s32)fd)) {
         logf("close(fd %x)", (u32)fd);
         for (u32 k = 0; k < ARRAY_SIZE(g_watch_fd); k++)
@@ -221,12 +304,29 @@ static NOINLINE u64 h_dents(u64 fd, u64 buf, u64 n, u64 basep, u64 e, u32 i)
     return ret(i, gfs_getdents((int)fd, (void *)buf, (int)n));
 }
 
-/* F_GETFD 1, F_SETFD 2, F_GETFL 3 (O_RDONLY) answered; others EINVAL */
+/* ghostfs fds: F_GETFD 1, F_SETFD 2, F_GETFL 3 (O_RDONLY) answered; others
+ * EINVAL.  Others go to SWRR, but for one case: on a PS5, F_SETFL on an
+ * internet socket SWRR got from the JIT compiler (hle_net.c) is EACCES, so
+ * O_NONBLOCK goes through the socket option that also sets it (SO_NBIO). */
+#define F_SETFL_ 4
+#define O_NONBLOCK_ 4
+#define SOL_SOCKET_ 0xFFFF
+#define SO_NBIO_ 0x1200
 static NOINLINE u64 h_fcntl(u64 fd, u64 cmd, u64 arg, u64 d, u64 e, u32 i)
 {
     if (gfs_owns((int)fd))
         return (s32)cmd >= 1 && (s32)cmd <= 3 ? 0 : ret(i, E_INVAL);
-    return pass(i, fd, cmd, arg, 0, 0);
+    s64 rc = (s64)pass(i, fd, cmd, arg, 0, 0);
+    if ((s32)rc >= 0 || (s32)cmd != F_SETFL_)
+        return (u64)rc;
+    s32 err = (i & PX) ? *K.errno_fn() : (s32)rc;
+    int (*sso)(int, int, int, const void *, u32) = host_real("setsockopt");
+    int on = (arg & O_NONBLOCK_) != 0;
+    if ((err == 13 || err == E_ACCES) && sso && sso((int)fd, SOL_SOCKET_, SO_NBIO_, &on, sizeof(on)) == 0) {
+        logf("fcntl(%d, F_SETFL, %lx): SO_NBIO", (s32)fd, arg);
+        return 0;
+    }
+    return (u64)rc;
 }
 
 /* a copy of a ghostfs fd, or a dup2 over one, would act on the placeholder */

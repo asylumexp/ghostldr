@@ -147,6 +147,10 @@ class SystemFamiliesOnHost(unittest.TestCase):
         out = self.run_mode("users")
         self.assertIn("dropped a second LOGIN for user 1002", out)
 
+    def test_a_picked_user_runs_the_title_on_swrrs_controller(self) -> None:
+        out = self.run_mode("picked")
+        self.assertIn("pad: the title opens the pad of user 1002: the controller of user 1001 (SWRR's) instead", out)
+
     def test_playgo_without_chunk_file(self) -> None:
         self.run_mode("playgo")
 

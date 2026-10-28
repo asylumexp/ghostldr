@@ -12,6 +12,11 @@
  * need more than (docs/ps4.md): every game's dump (TITLE_DUMP) has its tile
  * greyed with a warning sign, and Cross on one asks first, No selected.
  *
+ * A save tool (TITLE_SAVE_TOOL: Apollo Save Tool) asks whose saves to open,
+ * listing the console's users (those not signed in greyed, with why), and
+ * the platform then runs the save scan, whose progress shows as a bar with
+ * the time left when it is long (ui_scan_*).
+ *
  * Frames are drawn only when something changes, and then only the rows that
  * changed (S->changed: the top bar, the row and the text under it, or
  * everything).
@@ -44,6 +49,11 @@
 #define PANEL_W 720
 #define ASK_W 860                      /* the PS4 question */
 #define ASK_H 410
+#define USERS_W 980                    /* a save tool's questions: whose saves, then the scan */
+#define USERS_HEAD 184                 /* the title's icon and the question above the users */
+#define USERS_ROW 84
+#define USERS_ROWS 7                   /* users shown at once (more scroll) */
+#define SCAN_H 312
 
 /* timing (microseconds) */
 #define SPRING_W 26.0f      /* focus movement: a critically damped spring, rad/s (~0.3 s to settle) */
@@ -56,6 +66,10 @@
 #define ASK_US 160000.0f
 #define ASK_FOCUS_US 110000.0f
 #define TOAST_US 150000.0f
+#define USERS_US 160000.0f
+#define SCAN_SHOW_AFTER 1500000u /* a scan shows its bar once it has taken this long, */
+#define SCAN_SHOW_LONG 2500000u  /* or as soon as it looks like taking this long in all */
+#define SCAN_HOLD 450000u        /* a shown bar stays full this long when the scan ends */
 
 #define WHITE 0xFFFFFFFFu
 #define SOFT 0xDCFFFFFFu
@@ -374,6 +388,135 @@ static float approach(float v, float target, float step)
     return v - step < target ? target : v - step;
 }
 
+/* ---- a save tool: whose saves to open, then the save scan ---- */
+
+/* a user's name as shown: their own, else "User N" (a user who isn't signed
+ * in has no name to read, or one in a script the font lacks) */
+static const char *user_label(struct sel *S, int i, char *buf, int cap)
+{
+    const struct sel_user *u = &S->users[i];
+    if (u->name[0] && text_fits_font(S, u->name))
+        return u->name;
+    sel_fmt(buf, cap, "User %d", i + 1);
+    return buf;
+}
+
+/* the user to focus: keep if still there, else the user running SWRR, else
+ * the first signed in */
+static int user_default(const struct sel *S, s32 keep)
+{
+    for (int pass = 0; pass < 3; pass++)
+        for (int i = 0; i < S->nusers; i++) {
+            const struct sel_user *u = &S->users[i];
+            if (pass == 0 ? u->id == keep && keep != -1 : pass == 1 ? u->signed_in && u->current : u->signed_in)
+                return i;
+        }
+    return 0;
+}
+
+int ui_set_users(struct sel *S, const struct sel_user *users, int n)
+{
+    n = clampi(n, 0, SEL_MAX_USERS);
+    int same = n == S->nusers;
+    for (int i = 0; same && i < n; i++) {
+        const struct sel_user *a = &users[i], *b = &S->users[i];
+        same = a->id == b->id && a->signed_in == b->signed_in && a->current == b->current;
+        for (int k = 0; same && k < (int)sizeof(a->name) && (a->name[k] || b->name[k]); k++)
+            same = a->name[k] == b->name[k];
+    }
+    if (same)
+        return 0;
+    s32 keep = S->nusers ? S->users[S->user_focus].id : -1;
+    for (int i = 0; i < n; i++)
+        S->users[i] = users[i];
+    S->nusers = n;
+    if (!S->user_chosen)
+        S->user_focus = user_default(S, keep);
+    S->changed |= CH_ALL;
+    return 1;
+}
+
+static void open_users(struct sel *S)
+{
+    struct title *t = &S->titles[S->sel];
+    S->panel_open = 0, S->toast_until_us = 0;
+    if (!S->nusers) { /* nobody to ask about: the title opens the saves of the user running SWRR */
+        sel_log(S, "save tool: no users known: title %d (%s) starts for the user running SWRR", S->sel, t->id);
+        S->launching = 1;
+        return;
+    }
+    S->users_open = 1, S->user_chosen = 0;
+    S->user_focus = user_default(S, -1);
+    if (S->users_a == 0)
+        S->user_y = (float)S->user_focus;
+    S->changed |= CH_ALL;
+    sel_log(S, "save tool: asking whose saves to open for title %d (%s): %d user(s)", S->sel, t->id, S->nusers);
+}
+
+void ui_ask_user(struct sel *S, int fixed)
+{
+    S->users_fixed = fixed;
+    open_users(S);
+}
+
+void ui_scan_start(struct sel *S, u64 now)
+{
+    S->scan_req = 0, S->scanning = 1, S->scan_shown = 0, S->scan_cancel = 0;
+    S->scan_done = S->scan_total = 0, S->scan_per = 0, S->scan_left = 0, S->scan_hold = 0;
+    S->scan_t0 = S->scan_prev = now;
+}
+
+int ui_scan_progress(struct sel *S, u64 now, u32 done, u32 total)
+{
+    if (done > total)
+        done = total;
+    if (!done) {
+        S->scan_prev = now; /* the candidates are known: titles are timed from here */
+    } else if (done > S->scan_done) {
+        /* the measured rate, refined as it goes: the recent pace (per title
+         * since the last report, smoothed), steadied by the average */
+        u64 d = (now - S->scan_prev) / (done - S->scan_done), avg = (now - S->scan_t0) / done;
+        S->scan_per = S->scan_per ? (S->scan_per * 3 + d) / 4 : d;
+        S->scan_left = (done < 4 ? avg : (S->scan_per + avg) / 2) * (total - done);
+        S->scan_prev = now;
+    }
+    S->scan_done = done, S->scan_total = total;
+    u64 spent = now - S->scan_t0;
+    if (!S->scan_shown && total && done < total &&
+        (spent >= SCAN_SHOW_AFTER || (done && spent + S->scan_left >= SCAN_SHOW_LONG))) {
+        S->scan_shown = 1;
+        sel_log(S, "save tool: a long scan (%u of %u after %u ms, about %u s left): its progress is shown", done, total,
+                (u32)(spent / 1000), (u32)(S->scan_left / 1000000));
+    }
+    S->changed |= CH_ALL;
+    return S->scan_cancel;
+}
+
+void ui_scan_end(struct sel *S, u64 now, int result)
+{
+    S->scanning = 0;
+    sel_log(S, "save tool: scan %s after %u of %u titles, %u ms: %d", S->scan_cancel ? "cancelled" : "done",
+            S->scan_done, S->scan_total, (u32)((now - S->scan_t0) / 1000), result);
+    if (S->scan_cancel) { /* back to the question; the title stays (it is mounted now) */
+        S->scan_shown = 0, S->user_chosen = 0, S->users_fixed = 1, S->users_open = 1;
+    } else if (S->scan_shown) {
+        S->scan_done = S->scan_total, S->scan_left = 0;
+        S->scan_hold = now + SCAN_HOLD;
+    } else {
+        S->launching = 1;
+    }
+    S->changed |= CH_ALL;
+}
+
+/* the title starts, or a save tool asks whose saves first */
+static void start(struct sel *S)
+{
+    if (S->titles[S->sel].flags & TITLE_SAVE_TOOL)
+        open_users(S);
+    else
+        S->launching = 1;
+}
+
 /* Cross on the selected title: boot it, ask first (a game's dump on a PS4),
  * or say why it can't start */
 static void choose(struct sel *S, u64 now)
@@ -387,20 +530,23 @@ static void choose(struct sel *S, u64 now)
         S->toast_until_us = 0;
         sel_log(S, "PS4: asking before title %d (%s), a game's dump, boots", S->sel, t->id);
     } else {
-        S->launching = 1;
         S->panel_open = 0;
+        start(S);
     }
 }
 
-int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int *boot)
+int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int stick_y, int *boot)
 {
     u32 pressed = buttons & ~S->held;
     S->held = buttons;
     if (dt > 200000)
         dt = 200000;
 
-    /* left / right with key repeat (d-pad or left stick), L1 / R1 jump */
-    int dir = (buttons & PAD_LEFT) || stick_x < 64 ? -1 : (buttons & PAD_RIGHT) || stick_x > 192 ? 1 : 0;
+    /* left / right with key repeat (d-pad or left stick), L1 / R1 jump; up /
+     * down in the list of users */
+    int users = S->users_open && !S->user_chosen;
+    int dir = users ? ((buttons & PAD_UP) || stick_y < 64 ? -1 : (buttons & PAD_DOWN) || stick_y > 192 ? 1 : 0)
+                    : (buttons & PAD_LEFT) || stick_x < 64 ? -1 : (buttons & PAD_RIGHT) || stick_x > 192 ? 1 : 0;
     int step = 0;
     if (dir && dir != S->repeat_dir) {
         step = dir;
@@ -411,8 +557,35 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int *boot)
     }
     S->repeat_dir = dir;
 
-    if (S->launching) {
+    if (S->launching || S->scan_hold) {
         /* nothing more to choose */
+    } else if (S->scanning || S->user_chosen) {
+        /* the save scan: Circle cancels it */
+        if ((pressed & PAD_CIRCLE) && S->scanning && !S->scan_cancel) {
+            S->scan_cancel = 1;
+            S->changed |= CH_ALL;
+            sel_log(S, "save tool: Circle: cancelling the scan at %u of %u", S->scan_done, S->scan_total);
+        }
+    } else if (users) {
+        /* whose saves: every user can have the focus, only those signed in be chosen */
+        int f = clampi(S->user_focus + step, 0, S->nusers - 1);
+        if (f != S->user_focus)
+            S->user_focus = f, S->changed |= CH_ALL;
+        const struct sel_user *u = &S->users[S->user_focus];
+        if ((pressed & PAD_CROSS) && u->signed_in) {
+            S->user_chosen = 1, S->scan_req = 1, S->toast_until_us = 0;
+            S->changed |= CH_ALL;
+            sel_log(S, "save tool: user %x chosen for title %d (%s)", (u32)u->id, S->sel, S->titles[S->sel].id);
+        } else if (pressed & PAD_CROSS) {
+            char msg[96], label[72];
+            const char *who = user_label(S, S->user_focus, label, sizeof(label));
+            sel_fmt(msg, sizeof(msg), "%s isn\xE2\x80\x99t signed in: sign them in with another controller first",
+                    str_len(who) <= 24 ? who : "This user");
+            toast(S, now, msg);
+        } else if ((pressed & PAD_CIRCLE) && !S->users_fixed) {
+            S->users_open = 0, S->toast_until_us = 0;
+            S->changed |= CH_ALL;
+        }
     } else if (S->ask_open) {
         /* the question: Yes on the left, No on the right; Circle is No */
         int yes = S->ask_yes;
@@ -427,7 +600,8 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int *boot)
             sel_log(S, "PS4: %s for title %d (%s)%s", go ? "Yes" : "No", S->sel, S->titles[S->sel].id,
                     go ? ": booting it" : "");
             S->ask_open = 0;
-            S->launching = go;
+            if (go)
+                start(S);
             S->changed |= CH_ALL;
         }
     } else {
@@ -467,7 +641,14 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int *boot)
     if (S->pos != before)
         S->changed |= CH_ROW;
     float panel_before = S->panel, fade_before = S->bg_fade, ask_before = S->ask, focus_before = S->ask_focus;
-    float toast_before = S->toast_a;
+    float toast_before = S->toast_a, users_before = S->users_a, user_y_before = S->user_y, scan_before = S->scan_a;
+    /* one card at a time: the question fades out before the scan's card fades in, and back */
+    S->users_a = approach(S->users_a, S->users_open && !S->scan_shown && S->scan_a == 0 ? 1.0f : 0.0f,
+                          (float)dt / USERS_US);
+    S->scan_a = approach(S->scan_a, S->scan_shown && S->users_a == 0 ? 1.0f : 0.0f, (float)dt / USERS_US);
+    S->user_y = approach(S->user_y, (float)S->user_focus, (float)dt / ASK_FOCUS_US);
+    if (S->scan_hold && now >= S->scan_hold)
+        S->scan_hold = 0, S->launching = 1;
     S->panel = approach(S->panel, S->panel_open ? 1.0f : 0.0f, (float)dt / PANEL_US);
     S->bg_fade = approach(S->bg_fade, 1.0f, (float)dt / FADE_US);
     S->ask = approach(S->ask, S->ask_open ? 1.0f : 0.0f, (float)dt / ASK_US);
@@ -482,9 +663,14 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int *boot)
         S->changed |= CH_ALL;
     }
     if (S->panel != panel_before || S->bg_fade != fade_before || S->ask != ask_before ||
-        S->ask_focus != focus_before || S->toast_a != toast_before)
+        S->ask_focus != focus_before || S->toast_a != toast_before || S->users_a != users_before ||
+        S->user_y != user_y_before || S->scan_a != scan_before)
         S->changed |= CH_ALL;
 
+    /* nothing more is read once a save tool's user is chosen: the title is
+     * mounted for its scan */
+    if (S->user_chosen || S->scanning)
+        return S->changed != 0;
     /* the selected game's backdrop once the row has settled */
     if (S->bg_title != S->sel && S->pos == target && now - S->last_move_us >= BG_SETTLE && !S->launching)
         ui_prepare_bg(S, S->sel);
@@ -551,7 +737,16 @@ static int hint(struct sel *S, surface *s, int x, int base, int button, const ch
 static void hints(struct sel *S, surface *s)
 {
     int base = SCREEN_H - 64, x = SCREEN_W - MARGIN;
-    if (S->ask > 0.5f) {
+    if (S->scan_a > 0.5f) {
+        if (S->scanning && !S->scan_cancel) /* the pad is read between titles: a held Circle is seen */
+            hint(S, s, x, base, PAD_CIRCLE, "Hold to cancel", SOFT);
+    } else if (S->users_a > 0.5f) {
+        if (!S->user_chosen) {
+            if (!S->users_fixed)
+                x = hint(S, s, x, base, PAD_CIRCLE, "Back", SOFT) - 44;
+            hint(S, s, x, base, PAD_CROSS, "Select", S->users[S->user_focus].signed_in ? SOFT : 0x60FFFFFFu);
+        }
+    } else if (S->ask > 0.5f) {
         x = hint(S, s, x, base, PAD_CIRCLE, "Back", SOFT) - 44;
         hint(S, s, x, base, PAD_CROSS, "Select", SOFT);
     } else if (S->panel > 0.5f) {
@@ -588,6 +783,31 @@ static void clock_text(struct sel *S, char *out, int cap)
     }
 }
 
+/* a user's disc: their initial on a colour of their name's, or a figure for
+ * a name in a script the font lacks; grey: not signed in */
+static void avatar(struct sel *S, surface *s, float cx, float cy, float r, const char *name, u32 a, int grey)
+{
+    const char *p = name;
+    u32 cp = utf8_next(&p);
+    char ini[8] = {0};
+    if (cp >= 'a' && cp <= 'z')
+        cp -= 32;
+    if (cp < 0x80 && cp > ' ')
+        ini[0] = (char)cp;
+    u32 tint = grey ? 0xFF4A4F58u : title_tint(name, 0);
+    draw_disc(s, cx, cy + 2 * r / 23, r + 2 * r / 23, 0, fade(0x50000000u, a));
+    draw_disc(s, cx, cy, r, 0, fade(mix_rgb(tint, 0xFFFFFFFFu, 40), a));
+    draw_disc(s, cx, cy, r, 1.6f, fade(grey ? 0x50FFFFFFu : 0x90FFFFFFu, a));
+    u32 ink = fade(grey ? 0xB0FFFFFFu : WHITE, a);
+    if (ini[0]) {
+        int px = (int)(r * 22 / 23), w = text_width(S, px, ini);
+        draw_text(S, s, px, (int)cx - w / 2, (int)cy + (int)(r * 8 / 23), ini, ink, 0);
+    } else {
+        draw_disc(s, cx, cy - r * 5 / 23, r * 6.5f / 23, 0, fade(0xE6FFFFFFu, a));
+        draw_disc(s, cx, cy + r * 13 / 23, r * 10.5f / 23, 0, fade(0xE6FFFFFFu, a));
+    }
+}
+
 /* the top bar: ghostldr's mark on the left; the user (a disc with their
  * initial and their name) and the clock on the right */
 static void top_bar(struct sel *S, surface *s)
@@ -612,25 +832,7 @@ static void top_bar(struct sel *S, surface *s)
             text_shadowed(S, s, USER_PX, x, TOP_Y, S->user, SOFT, 420);
             x -= 16;
         }
-        const char *p = S->user;
-        u32 cp = utf8_next(&p);
-        char ini[8] = {0};
-        if (cp >= 'a' && cp <= 'z')
-            cp -= 32;
-        if (cp < 0x80 && cp > ' ')
-            ini[0] = (char)cp;
-        float cx = (float)x - 23, cy = TOP_Y - 10;
-        u32 tint = title_tint(S->user, 0);
-        draw_disc(s, cx, cy + 2, 25, 0, 0x50000000u);
-        draw_disc(s, cx, cy, 23, 0, mix_rgb(tint, 0xFFFFFFFFu, 40));
-        draw_disc(s, cx, cy, 23, 1.6f, 0x90FFFFFFu);
-        if (ini[0]) {
-            int w = text_width(S, 22, ini);
-            draw_text(S, s, 22, (int)cx - w / 2, (int)cy + 8, ini, WHITE, 0);
-        } else { /* a name in a script the font lacks: a figure */
-            draw_disc(s, cx, cy - 5, 6.5f, 0, 0xE6FFFFFFu);
-            draw_disc(s, cx, cy + 13, 10.5f, 0, 0xE6FFFFFFu);
-        }
+        avatar(S, s, (float)x - 23, TOP_Y - 10, 23, S->user, 255, 0);
     }
 }
 
@@ -944,6 +1146,131 @@ static void ask_dialog(struct sel *S, surface *s, float k)
     }
 }
 
+/* a save tool's cards: centred, under the dim ui_draw puts over the screen */
+static void card(surface *s, int x, int y, int w, int h, float e)
+{
+    u32 a = (u32)(e * 255);
+    draw_shadow(s, x, y + 14, w, h, 28, 60, (int)(170 * e));
+    draw_rrect(s, x, y, w, h, 28, fade(0xF6202530u, a));
+    draw_rring(s, x, y, w, h, 28, 1, fade(0x30FFFFFFu, a));
+}
+
+/* the title's icon at the card's top left, the heading beside it in up to
+ * two lines (and a line under a one-line heading); returns the heading's
+ * line count */
+static int card_head(struct sel *S, surface *s, int x, int y, const char *head, const char *sub, u32 a)
+{
+    const struct title *t = &S->titles[S->sel];
+    int is = 104, ix = x + 48, iy = y + 44;
+    draw_shadow(s, ix, iy + 5, is, is, 14, 20, (int)(a / 2));
+    if (t->icon_state)
+        draw_scale(s, ix, iy, is, is, &t->icon, (int)(a + (a >> 7)), 256, 0);
+    else
+        draw_rrect(s, ix, iy, is, is, 14, fade(t->tint, a));
+    char lines[2][128];
+    int tx = ix + is + 32, tw = x + USERS_W - 48 - tx;
+    int n = wrap_lines(S, 32, tw, head, lines, 2);
+    int ty = iy + (n == 1 && sub ? 42 : n == 1 ? 64 : 42);
+    for (int i = 0; i < n; i++, ty += 44)
+        text_bold(S, s, 32, tx, ty, lines[i], fade(WHITE, a), tw);
+    if (n == 1 && sub)
+        draw_text(S, s, 24, tx, ty - 2, sub, fade(DIM, a), tw);
+    return n;
+}
+
+/* a save tool: whose saves to open.  Every user is listed; those not signed
+ * in are greyed with why (the save service opens only a signed-in user's
+ * saves), and the focus, a light row, slides between them. */
+static void users_dialog(struct sel *S, surface *s, float k)
+{
+    float e = 1 - (1 - k) * (1 - k);
+    u32 a = (u32)(e * 255);
+    int n = S->nusers, vis = n < USERS_ROWS ? n : USERS_ROWS;
+    int h = USERS_HEAD + vis * USERS_ROW + 36;
+    int x = (SCREEN_W - USERS_W) / 2, y = (SCREEN_H - h) / 2 - 24 + (int)((1 - e) * 28);
+    card(s, x, y, USERS_W, h, e);
+    char q[200];
+    sel_fmt(q, sizeof(q), "Which user\xE2\x80\x99s saves to open %s for?", display_name(S, &S->titles[S->sel]));
+    card_head(S, s, x, y, q, S->user_chosen ? "Looking for saves\xE2\x80\xA6" : 0, a);
+    draw_rect_blend(s, x + 48, y + USERS_HEAD - 20, USERS_W - 96, 1, fade(0x30FFFFFFu, a));
+
+    int first = n > vis ? clampi(S->user_focus - vis / 2, 0, n - vis) : 0, ry0 = y + USERS_HEAD - 6;
+    float fy = clampf(S->user_y - (float)first, -0.6f, (float)vis - 0.4f);
+    int rx = x + 28, rw = USERS_W - 56, can = S->users[S->user_focus].signed_in;
+    /* light on a user who can be chosen; only a faint row on one who can't */
+    draw_rrect(s, rx, ry0 + (int)(fy * USERS_ROW) + 4, rw, USERS_ROW - 8, 22,
+               fade(!can ? 0x2EFFFFFFu : S->user_chosen ? 0xFFDCE3EEu : 0xFFF4F6F8u, a));
+    for (int r = 0; r < vis; r++) {
+        int i = first + r, ry = ry0 + r * USERS_ROW;
+        const struct sel_user *u = &S->users[i];
+        float d = S->user_y - (float)i;
+        int lit = can ? (int)(clampf(1 - (d < 0 ? -d : d), 0, 1) * 256) : 0; /* how much of the light row is under it */
+        char label[72];
+        const char *name = user_label(S, i, label, sizeof(label));
+        avatar(S, s, (float)rx + 52, (float)ry + USERS_ROW / 2.0f, 27, u->name[0] ? u->name : name, a, !u->signed_in);
+        int tx = rx + 100, tw = rw - 100 - 28;
+        u32 c = mix_rgb(u->signed_in ? WHITE : 0xFF8C929Bu, INK, lit);
+        draw_text(S, s, 29, tx, ry + 37, name, fade(c, a), tw);
+        const char *why = !u->signed_in ? "Not signed in \xC2\xB7 sign in with another controller to open their saves"
+                        : u->current ? "Signed in \xC2\xB7 playing now" : "Signed in";
+        u32 sc = mix_rgb(u->signed_in ? 0xFFB4BAC4u : 0xFF7C828Bu, 0xFF4A515Cu, lit);
+        draw_text(S, s, 21, tx, ry + 66, why, fade(sc, a), tw);
+    }
+    /* more above or below */
+    if (first > 0)
+        draw_text(S, s, 22, x + USERS_W - 64, ry0 + 4, "\xE2\x86\x91", fade(DIM, a), 0);
+    if (first + vis < n)
+        draw_text(S, s, 22, x + USERS_W - 64, ry0 + vis * USERS_ROW - 8, "\xE2\x86\x93", fade(DIM, a), 0);
+}
+
+/* "About 2 min 10 s left", from the estimate */
+static void time_left(struct sel *S, char *out, int cap)
+{
+    u64 sec = (S->scan_left + 500000) / 1000000;
+    if (!S->scanning)
+        str_copy(out, S->scan_cancel ? "Cancelled" : "Done", cap);
+    else if (S->scan_cancel)
+        str_copy(out, "Cancelling\xE2\x80\xA6", cap);
+    else if (!S->scan_left)
+        str_copy(out, "Working out the time left\xE2\x80\xA6", cap);
+    else if (sec < 10)
+        str_copy(out, "A few seconds left", cap);
+    else if (sec < 60)
+        sel_fmt(out, cap, "About %u seconds left", (u32)((sec + 2) / 5 * 5));
+    else if (sec < 600 && (sec + 5) / 10 * 10 % 60)
+        sel_fmt(out, cap, "About %u min %u s left", (u32)((sec + 5) / 10 * 10 / 60), (u32)((sec + 5) / 10 * 10 % 60));
+    else
+        sel_fmt(out, cap, "About %u min left", (u32)((sec + 30) / 60));
+}
+
+/* a save tool: the save scan, when it is long */
+static void scan_card(struct sel *S, surface *s, float k)
+{
+    float e = 1 - (1 - k) * (1 - k);
+    u32 a = (u32)(e * 255);
+    int x = (SCREEN_W - USERS_W) / 2, y = (SCREEN_H - SCAN_H) / 2 - 24 + (int)((1 - e) * 28);
+    card(s, x, y, USERS_W, SCAN_H, e);
+    char head[160], sub[200], label[72];
+    sel_fmt(head, sizeof(head), "Looking for %s\xE2\x80\x99s saves", user_label(S, S->user_focus, label, sizeof(label)));
+    sel_fmt(sub, sizeof(sub), "%s starts when this is done.", display_name(S, &S->titles[S->sel]));
+    card_head(S, s, x, y, head, sub, a);
+
+    int bx = x + 48, bw = USERS_W - 96, by = y + 204, bh = 16;
+    u32 total = S->scan_total ? S->scan_total : 1;
+    int fill = (int)((u64)bw * (S->scan_done < total ? S->scan_done : total) / total);
+    draw_rrect(s, bx, by, bw, bh, bh / 2, fade(0x30FFFFFFu, a));
+    if (fill > 0) {
+        draw_halo(s, bx, by, fill < bh ? bh : fill, bh, bh / 2, 14, (int)(60 * e), 0xFFFFFF);
+        draw_rrect(s, bx, by, fill < bh ? bh : fill, bh, bh / 2, fade(0xFFF4F6F8u, a));
+    }
+    char count[64], left[64];
+    sel_fmt(count, sizeof(count), "%u of %u games checked", S->scan_done, S->scan_total);
+    time_left(S, left, sizeof(left));
+    draw_text(S, s, 25, bx, by + 66, count, fade(SOFT, a), bw / 2);
+    int lw = text_width(S, 25, left);
+    draw_text(S, s, 25, bx + bw - lw, by + 66, left, fade(SOFT, a), 0);
+}
+
 /* a message at the bottom (why a title can't start), fading in and out */
 static void toast_card(struct sel *S, surface *s, float k)
 {
@@ -964,7 +1291,8 @@ void ui_draw(struct sel *S)
     surface *s = &S->back;
     /* the rows to redraw: everything, or the top bar and / or the row */
     int y0 = 0, y1 = SCREEN_H;
-    if (S->drawn_once && !(S->changed & CH_ALL) && S->panel == 0 && S->ask == 0 && S->toast_a == 0) {
+    if (S->drawn_once && !(S->changed & CH_ALL) && S->panel == 0 && S->ask == 0 && S->toast_a == 0 &&
+        S->users_a == 0 && S->scan_a == 0) {
         y0 = SCREEN_H, y1 = 0;
         if (S->changed & CH_TOP)
             y0 = 0, y1 = TOP_BAND;
@@ -993,6 +1321,14 @@ void ui_draw(struct sel *S)
     details(S, s);
     if (S->panel > 0)
         info_panel(S, s, S->panel);
+    float cards = S->users_a > S->scan_a ? S->users_a : S->scan_a;
+    if (cards > 0) {
+        draw_dim(s, 0, SCREEN_W, 0, SCREEN_H, (int)(150 * (1 - (1 - cards) * (1 - cards))));
+        if (S->users_a > 0)
+            users_dialog(S, s, S->users_a);
+        if (S->scan_a > 0)
+            scan_card(S, s, S->scan_a);
+    }
     if (S->toast_a > 0)
         toast_card(S, s, S->toast_a);
     if (S->ask > 0)

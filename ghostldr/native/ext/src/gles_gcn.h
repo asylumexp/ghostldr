@@ -1,0 +1,40 @@
+/* GCN gfx7 code of ghostldr's GPU shaders (native/ext/gcn), made by
+ * tools/mkgcn.py with LLVM's llvm-mc: do not edit. */
+#pragma once
+
+/* gles_vs.s sha256 7123ee38b58e05da3a93f40850e347e3bb611f55f0d4e2d5072b6cfb0901e8b7 */
+#define GCN_GLES_VS_VGPRS 11
+#define GCN_GLES_VS_SGPRS 7 /* with VCC */
+static const u32 k_gles_vs[15] = {
+    0x4a000004, 0xe0382000, 0x80000100, 0xe0382010, 0x80000500, 0xbf8c0f70,
+    0x7e120280, 0x7e1402f2, 0xf800020f, 0x0a090403, 0xf800021f, 0x08070605,
+    0xf80008cf, 0x0a090201, 0xbf810000,
+};
+
+/* gles_ps.s sha256 b80f599679fbeb8e542399738a7ea83611b3222119dc165fdb3859f7c899b8be */
+#define GCN_GLES_PS_VGPRS 14
+#define GCN_GLES_PS_SGPRS 22 /* with VCC */
+static const u32 k_gles_ps[33] = {
+    0xbefc0302, 0xc0c20100, 0xc0860108, 0xc088010c, 0xc8080000, 0xc8090001,
+    0xc80c0100, 0xc80d0101, 0xc8200400, 0xc8210401, 0xc8240500, 0xc8250501,
+    0xc8280600, 0xc8290601, 0xc82c0700, 0xc82d0701, 0xbf8c007f, 0xf09c0f00,
+    0x00610402, 0x10101010, 0x10121211, 0x10141412, 0x10161613, 0xbf8c0f70,
+    0x10081104, 0x100a1305, 0x100c1506, 0x100e1707, 0x5e180b04, 0x5e1a0f06,
+    0xf8001c0f, 0x00000d0c, 0xbf810000,
+};
+
+/* gles_ps_yuv.s sha256 330996c07f3e71082ed8989d88d023460851bb6592c2e88462e6955f593ba32e */
+#define GCN_GLES_PS_YUV_VGPRS 21
+#define GCN_GLES_PS_YUV_SGPRS 58 /* with VCC */
+static const u32 k_gles_ps_yuv[58] = {
+    0xbefc0302, 0xc0c20100, 0xc0860108, 0xc0c8010c, 0xc08c0114, 0xc0ce0118,
+    0xc0920120, 0xc1140124, 0xc8080000, 0xc8090001, 0xc80c0100, 0xc80d0101,
+    0xc8200400, 0xc8210401, 0xc8240500, 0xc8250501, 0xc8280600, 0xc8290601,
+    0xc82c0700, 0xc82d0701, 0xbf8c007f, 0xf09c0100, 0x00610c02, 0xf09c0100,
+    0x00c41002, 0xf09c0100, 0x01271402, 0x10101028, 0x10121229, 0x1014142a,
+    0x1016162b, 0xbf8c0f70, 0x0618182c, 0x0620202d, 0x0628282e, 0x1008182f,
+    0x3e082032, 0x3e082835, 0x100a1830, 0x3e0a2033, 0x3e0a2836, 0x100c1831,
+    0x3e0c2034, 0x3e0c2837, 0xd2ae0004, 0x03c90104, 0xd2ae0005, 0x03c90105,
+    0xd2ae0006, 0x03c90106, 0x10081104, 0x100a1305, 0x100c1506, 0x5e180b04,
+    0x5e1a1706, 0xf8001c0f, 0x00000d0c, 0xbf810000,
+};

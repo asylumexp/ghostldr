@@ -384,6 +384,9 @@ static s32 fake_real_delete(const u8 *req)
     return 0;
 }
 
+/* dlg_overlay.c's banner: logged */
+void ov_banner(const char *text, u32 seconds) { logf("banner: %s", text); }
+
 static s32 fake_initial_user(s32 *out)
 {
     *out = FAKE_USER0;
@@ -592,6 +595,38 @@ static int k_gettimeofday(s64 *tv)
 
 static int k_usleep(u32 us) { return 0; }
 
+/* hle_system.c's title user: the game selector's pick (fake_pick_user) */
+static s32 g_picked = -1;
+void fake_pick_user(s32 user) { g_picked = user; }
+s32 title_user(void) { return g_picked >= 0 ? g_picked : FAKE_USER0; }
+bool title_user_picked(void) { return g_picked >= 0 && g_picked != FAKE_USER0; }
+static int k_getpid(void) { return 77; }
+
+/* the host's own sceKernelGetAppInfo: SWRR US */
+static s32 k_app_info(s32 pid, u8 *info)
+{
+    if (pid != 77)
+        return E_INTERNAL;
+    strlcpy((char *)info + 0x10, "CUSA03474", 10);
+    return 0;
+}
+
+/* the real save service for other titles: none of them has saves here */
+static u32 g_real_searches, g_real_mounts;
+static s32 fake_real_search(const u8 *cond, u8 *result)
+{
+    g_real_searches++;
+    *(u32 *)result = 0;         /* hitNum */
+    *(u32 *)(result + 0x14) = 0; /* setNum */
+    return 0;
+}
+static s32 fake_real_mount(const u8 *m, u8 *result)
+{
+    g_real_mounts++;
+    return (s32)0x809F0008; /* NOT_FOUND */
+}
+u32 fake_real_calls(void) { return g_real_searches + g_real_mounts; }
+
 void *host_real(const char *name)
 {
     static const struct {
@@ -602,6 +637,7 @@ void *host_real(const char *name)
         {"sceKernelPwrite", k_pwrite},   {"sceKernelStat", k_stat},     {"sceKernelMkdir", k_mkdir},
         {"sceKernelUnlink", k_unlink},   {"sceKernelRmdir", k_rmdir},   {"sceKernelRename", k_rename},
         {"sceKernelGetdents", k_getdents}, {"sceKernelGettimeofday", k_gettimeofday},
+        {"sceKernelGetAppInfo", k_app_info},
     };
     for (u32 i = 0; i < ARRAY_SIZE(t); i++)
         if (!strcmp(t[i].name, name))
@@ -614,6 +650,10 @@ void *host_real_in(const char *mod, const char *name)
 {
     if (!strcmp(mod, "libSceSaveData") && !strcmp(name, "sceSaveDataDelete"))
         return fake_real_delete;
+    if (!strcmp(mod, "libSceSaveData") && !strcmp(name, "sceSaveDataDirNameSearch"))
+        return fake_real_search;
+    if (!strcmp(mod, "libSceSaveData") && !strcmp(name, "sceSaveDataMount"))
+        return fake_real_mount;
     if (!strcmp(mod, "libSceUserService") && !strcmp(name, "sceUserServiceGetInitialUser"))
         return fake_initial_user;
     logf("FAKE: host_real_in(%s, %s) is not faked", mod, name);
@@ -772,6 +812,7 @@ void fake_init(const char *root, bool gfs, const char *prefix, u32 sdk_version)
     g_boot.app_root = (u64)g_app_root;
     g_ctx = &g_boot;
     K.usleep = k_usleep;
+    K.getpid = k_getpid;
     memset(&g_mod, 0, sizeof(g_mod));
     g_mod.proc_param = (u64)g_procparam;
     g_main_mod = &g_mod;

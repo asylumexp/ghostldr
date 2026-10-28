@@ -11,6 +11,7 @@
  * Spec: research/hle-specs/system-appcontent.md section 6.
  */
 #include "sys_title.h"
+#include "savedata_hooks.h"
 
 #define AC_PARAMETER ((s32)0x80D90002)
 #define AC_NOT_FOUND ((s32)0x80D90005)
@@ -318,6 +319,48 @@ static const char *remap_download0(const char *path, char *buf, size_t size)
     return buf;
 }
 
+/* /data: a jailbroken console's data partition, where homebrew made for one
+ * keeps its files (Apollo: /data/apollo).  SWRR's sandbox has no /data on a
+ * stock console, so there the title's /data is a save container of its own,
+ * kept across sessions (savedata_data_root: <prefix>D000SAVE), or where there
+ * is none, /temp0/ghostldr/<TITLE>/data (wiped when SWRR closes).  Where
+ * SWRR does see a /data (a dev console with an unjailed SWRR), paths go to it
+ * as before. */
+static volatile s32 g_data_real = -1; /* -1 unknown, 0 remapped, 1 real */
+static volatile bool g_data_made;
+
+static const char *remap_data(const char *path, char *buf, size_t size)
+{
+    if (path[5] != '/' && path[5] != 0)
+        return NULL;
+    if (g_data_real < 0 && kfs()) {
+        u8 st[0x78];
+        s32 rc = kf.stat("/data", st);
+        g_data_real = rc == 0 ? 1 : 0;
+        logf("ext: /data %s (stat %x)", rc == 0 ? "is SWRR's own: titles use it" : "is not in SWRR's sandbox: the "
+                                                 "title's /data is a save container of its own", (u32)rc);
+    }
+    if (g_data_real != 0)
+        return NULL;
+    const char *kept = savedata_data_root();
+    if (kept) {
+        fmt(buf, size, "%s%s", kept, path + 5);
+        return buf;
+    }
+    if (!__atomic_exchange_n(&g_data_made, true, __ATOMIC_ACQ_REL))
+        title_dir_make("/data");
+    fmt(buf, size, "/temp0/ghostldr/%s/data%s", title_ident(), path + 5);
+    return buf;
+}
+
+const char *title_path(const char *path, char *buf, size_t size)
+{
+    const char *r = strncmp(path, "/data", 5) == 0 ? remap_data(path, buf, size) : NULL;
+    return r ? r : remap_path(path, buf, size);
+}
+
+const char *usb_title_remap(const char *path, char *buf, size_t size) HIDDEN; /* approot.c */
+
 /* free space on /temp0 in KiB, shared by everything there */
 static u64 temp0_free_kb(void)
 {
@@ -548,8 +591,9 @@ static const struct ext_lib k_libs[] = {
 static int appcontent_init(void)
 {
     if (path_remap_add &&
-        (path_remap_add("/temp0", remap_temp0) != 0 || path_remap_add("/download0", remap_download0) != 0))
-        logf("ext: no room for the /temp0 and /download0 remaps");
+        (path_remap_add("/temp0", remap_temp0) != 0 || path_remap_add("/download0", remap_download0) != 0 ||
+         path_remap_add("/data", remap_data) != 0 || path_remap_add("/mnt/usb", usb_title_remap) != 0))
+        logf("ext: no room for the /temp0, /download0, /data and /mnt/usb remaps");
     return 0;
 }
 

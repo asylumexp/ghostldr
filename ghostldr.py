@@ -385,6 +385,16 @@ def cmd_install(args, extra: list[str]) -> int:
                           env=env).returncode
 
 
+# ---- resign ----
+
+def cmd_resign(args, extra: list[str]) -> int:
+    import resign
+    argv = list(args.rest)
+    if getattr(args, "console", None) and "--host" not in argv:
+        argv += ["--host", args.console]
+    return resign.main(argv)
+
+
 # ---- the command line ----
 
 def parser() -> argparse.ArgumentParser:
@@ -479,6 +489,15 @@ def parser() -> argparse.ArgumentParser:
             "Other gfs_install.py options pass through (python3 ghostldr/host/gfs_install.py --help).")
     p.add_argument("dump", metavar="DUMP", help="the game's folder: the one with eboot.bin in it (or its parent)")
     p.add_argument("--title", metavar="ID", help="the title ID, when the dump doesn't say (no param.sfo)")
+
+    p = add("resign", "put another account's save into your own save of the game (PS5)",
+            "Resign a PS4 save with no jailbreak: the other save's files, decrypted (an Apollo export, or a folder of "
+            "the save's files), go into your own save of the game, which keeps your account and the game's keystone "
+            "(docs/save-resign.md). Start SWRR's loader (HALL OF FAME) first; close SWRR afterwards to save it.",
+            "  ghostldr.py resign SOURCE [--game ID] [--dir NAME]   write it into your save\n"
+            "  ghostldr.py resign SOURCE --check                    after SWRR restarted: compare\n\n"
+            "python3 ghostldr/host/resign.py --help shows every option.")
+    p.add_argument("rest", nargs=argparse.REMAINDER, metavar="SOURCE ...", help="the other save and options")
     return ap
 
 
@@ -519,7 +538,7 @@ def split_passthrough(ap: argparse.ArgumentParser, argv: list[str]) -> tuple[lis
 
 
 COMMANDS = {"doctor": cmd_doctor, "copy": cmd_copy, "check": cmd_check, "boot": cmd_boot, "logs": cmd_logs,
-            "elfldr": cmd_elfldr, "clear-cache": cmd_clear_cache, "install": cmd_install}
+            "elfldr": cmd_elfldr, "clear-cache": cmd_clear_cache, "install": cmd_install, "resign": cmd_resign}
 PASS_THROUGH = {"doctor", "boot", "logs", "elfldr", "clear-cache", "install"}
 
 

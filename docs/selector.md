@@ -4,6 +4,8 @@ When more than one title is installed, ghostldr shows a game picker before it lo
 
 On a PS4, where SWRR gets only 2.5 GiB of memory, every game's dump is greyed with a warning sign and asks before it boots; homebrew isn't ([On a PS4](#on-a-ps4)).
 
+A save tool such as Apollo Save Tool asks first whose saves to open, listing the console's users, and then looks for that user's saves with a progress bar when that takes long, before the tool starts ([Save tools](#save-tools-apollo-save-tool)). It does so even when it is the only title installed.
+
 Each game shows its real name and art: from the game's own files when it has them, otherwise from what was stored with the install (`<prefix>META`, below), which `gfs_install.py --update-meta --fetch-art` can add to an existing install without reinstalling it.
 
 ## Controls
@@ -16,6 +18,8 @@ Each game shows its real name and art: from the game's own files when it has the
 | Options or Triangle | Show the game's information: title ID, version, size, install status, container prefix; for a game on a USB drive, its folder there and any note. |
 | Circle | Close the information panel. |
 | In the PS4 question | Left / Right (d-pad or left stick; Up / Down too) choose Yes or No, No first. Cross takes the one chosen, Circle is No. |
+| In a save tool's question (whose saves) | Up / Down (d-pad or left stick) move between the users. Cross opens the saves of the one chosen; on a user who isn't signed in it says why instead. Circle goes back to the list (not when the save tool is the only title, or after a scan was cancelled). |
+| While a save tool's saves are looked for | Hold Circle to cancel: the question comes back. |
 
 There is no way back to SWRR from the picker: to leave without booting, close SWRR from the PS button menu.
 
@@ -24,7 +28,7 @@ There is no way back to SWRR from the picker: to leave without booting, close SW
 `run.py boot` serves the selector (`build/ghostldr/selector.bin`) next to the extension, on TCP 18196. ghostfs decides whether it is needed (`gfs_init`, docs/ghostfs-catalogue.md):
 
 - **More than one complete title installed and no `--title`:** `gfs_init` mounts nothing and returns 1. `boot.c` closes SWRR's message dialog and releases SWRR's memory, then runs the selector. It mounts the chosen title with `gfs_pick` and goes on with the boot: the title's profile is bound and its memory planned only after the selector has freed everything.
-- **One complete title, or `--title T`:** that title boots as before. The core closes the selector's socket without loading the module.
+- **One complete title, or `--title T`:** that title boots as before. The core closes the selector's socket without loading the module. **Except a save tool** (its profile's `save_tool` feature, [below](#save-tools-apollo-save-tool)): then the selector shows that title alone, with the question whose saves to open already up.
 - **`run.py boot --select`:** the selector shows anyway, even with one title or `--title` (run.py then sends every title profile it knows, so the title picked gets its own, and ignores `--title`). Use it to check the selector on hardware.
 - **No selector** (`--no-selector`, a release without `selector.bin`, or the module fails): several titles stop the boot as before (`pick one with run.py boot --title TITLE`). With `--title`, or one title, that title boots.
 - **Games on a USB drive** (`--app-root auto`, the default, or `usb:/...`; [usb.md](usb.md)): when the extension finds more than one game and no `--title` asks for one, it sets `CTX_FLAG_LIBRARY` and the selector lists what it found (`ghost_api.library()`): every game in the extension's order, second copies of a game each with their folder, and folders that can't start, with the reason. The choice goes back by its place in that list (`approot_pick`), so either copy of a game can be started.
@@ -146,6 +150,50 @@ Doubt goes to "dump": a retail title is never missed, since its ID is a retail o
 
 An install without `<prefix>META` has its `param.sfo` read through its index when its tile first loads, so a title first taken for a dump by its ID can turn out to be homebrew by its `CONTENT_ID`; its tile is then drawn again unmarked, and the log says `homebrew, by its param.sfo`. The offline preview prints what the rule makes of an example: `preview --is-dump ID SFO_TITLE_ID CONTENT_ID`.
 
+## Save tools (Apollo Save Tool)
+
+A save tool works on other games' saves, and those belong to one user. Apollo Save Tool for PS4 is one. Before such a tool starts, the selector asks whose saves it should open, looks for that user's saves, and only then starts the tool, for that user. Nothing on the computer is needed for it: the release's `ghostldr.lua` carries every profile in `ghostldr/data/titles`.
+
+**Which titles:** those whose profile has the `save_tool` feature (`PF_SAVE_TOOL` in the compiled profile; [compatibility.md](compatibility.md)). `ghostldr/data/titles/APOL00004.json`, Apollo Save Tool (title ID `APOL00004`, content ID `IV0000-APOL00004_00-APOLLO0000000PS4`), has it, with no eboot fingerprint, so every build of Apollo gets it. The selector reads the flag from the profiles in place, as it reads their names.
+
+**The question:** Cross on the save tool (after a Yes on a PS4, if it were marked there) opens a card over the screen: the tool's icon, "Which user's saves to open Apollo Save Tool for?" and the console's users, each with the initial on a disc and their name (`sceUserServiceGetUserName`):
+
+- **Who is listed:** every user registered on the console when SWRR may list them (`sceUserServiceGetRegisteredUserIdList`; it may on a 13.60 PS5), else the users signed in now (`sceUserServiceGetLoginUserIdList`), and always the user running SWRR. Up to 16, in the console's order; past seven rows the list scrolls with the focus. The name of a user who isn't signed in can't be read on a PS5: they show as "User 1", "User 2", … by their place in the list.
+- **Signed in:** they can be chosen. The user running SWRR says "Signed in · playing now" and has the focus at first.
+- **Not signed in:** greyed, with one line saying why: "Not signed in · sign in with another controller to open their saves". The save service opens only a signed-in user's saves (any other answers `0x809F0011`, `INVALID_LOGIN_USER`), and on a PS5 a second user is signed in with a second controller. The focus can rest on them, but Cross only says so. Who is signed in is read again every second, so a user who signs in with another controller meanwhile becomes available.
+
+**The scan:** Cross on a user mounts the title at once (`ghost_api.title_pick`: what the core would otherwise do after the selector returns) and runs the save tool's scan (`ghost_api.save_prescan`, the extension's): it asks the save service, title by title, which games the user has saves of, and remembers the answers for the tool. Each question takes about 0.4 s and Apollo knows about 350 titles, so a first scan can take over two minutes; later ones ask only about what the cache doesn't know. While it runs:
+
+- **A short scan shows nothing new:** the card says "Looking for saves…" and the tool starts.
+- **A long one shows its progress:** once it has taken 1.5 s, or as soon as it looks like taking 2.5 s in all, the question gives way to a card with "Looking for <user>'s saves", a bar, "120 of 349 games checked" and the time left ("About 1 min 30 s left"). The time left comes from the measured time per title: the average, and the recent pace smoothed, which it follows as it changes. At the end the full bar stays for a moment.
+- **Hold Circle to cancel.** The pad is read between two titles (the save service blocks the thread while it answers), so a quick tap can be missed: the hint says to hold it. The scan stops after the title it is on, keeps what it found, and the question comes back; the title stays mounted, so there is no going back to the list. Choosing a user again goes on where it stopped.
+
+Then the title starts with the core's `g_title_user` (`ghost_api.title_user`) set to the chosen user: the tool's user service answers, save lists and mounts are for that user (the extension's side), while ghostldr's own containers and the tool's own settings save stay the SWRR user's. Without the selector (`--no-selector`, a release without `selector.bin`) the tool runs for the user running SWRR, with no scan beforehand.
+
+**The interface** (`ghost_api.h`): `title_user` (0: the user running SWRR), `title_pick(title, index)` (once; boot.c doesn't pick again afterwards) and `save_prescan(user, progress, arg)`, which the core forwards to the extension's early entry (`struct ext_early.save_prescan`). The extension's code is placed for it before the title's modules, in the new JIT block it would have had anyway (as for a USB drive's games), and its `ext_init` still runs at its usual place. The scan calls `progress(arg, 0, total)` once it knows how many titles it will ask about, then `progress(arg, done, total)` after each one; a nonzero answer stops it. It runs on the boot thread while the selector's 68 MiB are allocated, after SWRR's emulator memory was released and before the title's memory is planned, so whatever it allocates it frees.
+
+The log says what happened:
+
+```
+selector: users: 2 (registered list 0, signed-in list 0)
+selector: user 10000002 '', not signed in
+selector: user 10000001 'Player', signed in, running SWRR
+selector: save tool: asking whose saves to open for title 0 (APOL00004): 2 user(s)
+selector: save tool: user 10000001 chosen for title 0 (APOL00004)
+selector: title 0 (APOL00004) mounted for its save scan: 0
+ext: code at 904f34000 in a new JIT block: text 74000, data 28000 -> 0
+selector: save tool: a long scan (1 of 24 after 668 ms, about 15 s left): its progress is shown
+selector: save tool: Circle: cancelling the scan at 9 of 24
+selector: save tool: scan cancelled after 9 of 24 titles, 2747 ms: 0
+selector: save tool: user 10000001 chosen for title 0 (APOL00004)
+selector: save tool: scan done after 24 of 24 titles, 6211 ms: 0
+selector: title 0 (APOL00004) opens the saves of user 10000001
+selector: released 70 MiB of direct memory; largest free run 3292 MiB (was 3292 MiB); 5 mounts, 5 unmounts; booting title 0
+boot: saves of user 10000001
+```
+
+(A 13.60 PS5 with the extension's stand-in scan, `ext/src/save_prescan.c`, which reports 24 titles of 250 ms; user IDs and the name replaced.)
+
 ## Text
 
 - **Labels** (`INSTALLED`, the information panel's headings) are small capitals spaced a little apart; the big name is the regular face drawn twice a pixel apart, as Noto Sans has no bold here.
@@ -159,12 +207,12 @@ No Sony font, image or sound is in the repository. The look is drawn by the sele
 The selector is a second runtime module, next to the extension (`ghostldr/native/ext`):
 
 1. `ghostldr.lua` connects a socket to run.py's selector server and passes it in the boot context (`sel_fd`, `sel_size`, `sel_crc`).
-2. In `ghost_boot`, after SWRR's emulator memory and display buffers are released, `sel_run` (`src/sel.c`) reads the module into the staging buffer that the compiler process shares, so the transfer allocates nothing. It checks the CRC, the magic and `GHOST_ABI`. The selector is built against the same `ghost.h` and `ghost_api.h` as the core, like the extension.
+2. In `ghost_boot`, after SWRR's emulator memory and display buffers are released, `sel_run` (`src/sel.c`) reads the module into the staging buffer that the compiler process shares, so the transfer allocates nothing. It checks the CRC, the magic and `GHOST_ABI`, and takes what it needs from the header before `arena_init`: on a PS4 the arena's probes of the JIT buffers copy through the staging buffer's first bytes, over the header (reading the image's offset afterwards sent the compiler to a wild address and SWRR stopped there). The selector is built against the same `ghost.h` and `ghost_api.h` as the core, like the extension.
 3. The module's image is copied through the compiler into the emulator's JIT code buffer, where the title's modules are placed later. The image has **no writable sections and no relocations**: `sel.ld` refuses `.data` and `.bss`, and `tools/mksel.py` refuses relocations. Placing it is one copy, and nothing has to be unmapped later. All its state lives on the stack and in its own heap.
 4. `sel_main(&g_ghost_api, title)` runs on the boot thread, with the same core services the extension gets.
 5. When it returns, the core overwrites the image with zeros and continues the boot.
 
-The core side is about 1 KiB of text: `src/sel.c`, the deferral in `gfs_init` and `gfs_pick` (`ghostfs.c`), a few lines in `boot.c`, and a guard in `arena_init`. The module itself is about 149 KiB: 82 KiB of code and data, and 67 KiB of font.
+The core side is about 1.5 KiB of text: `src/sel.c`, the deferral in `gfs_init` and `gfs_pick` (`ghostfs.c`), a few lines in `boot.c` (with a save tool's `title_pick` and `save_prescan`), and a guard in `arena_init`. The module itself is about 149 KiB: 82 KiB of code and data, and 67 KiB of font.
 
 ### Screen and controller
 
@@ -223,7 +271,7 @@ python3 -m unittest ghostldr.tests.test_selector      # or discover -s ghostldr/
 SELECTOR_SHOTS=/tmp/shots python3 -m unittest ghostldr.tests.test_selector   # keep the screenshots
 ```
 
-- **`ghostldr/tests/selector/preview.c`:** the UI code against a fake catalogue with generated placeholder art: games, one with a very long name, and two homebrew titles. It writes PNG screenshots of a tour (moving along the row, fallbacks, an incomplete title, a clock tick), the information panel, the launch fade, games on a USB drive (`--scene usb --usb`), a PS4 (`--scene ps4 --ps4`: the marked tiles, the question with No selected, No, Circle, a homebrew title and its panel, then Yes), and a long name (`--scene long --start 8`), and prints what frames cost. Without `--ps4` the PS4 scene shows that the first Cross boots. `--meta TITLE=meta.bin` reads a `<prefix>META` file as the console does; `--art TITLE=DIR` takes a dump's `sce_sys` (`icon0.png`, `pic1.png`) or what `gfs_meta.py fetch` saved (`icon.png`, `backdrop.png`); `--user NAME` fills the top bar; `--ps4` runs as on a PS4; `--start N` starts at title N; `--verify` compares every partial frame with a whole redraw; `--is-dump ID SFO_TITLE_ID CONTENT_ID` prints whether the selector takes those for a game's dump. The art is read at run time and never copied.
+- **`ghostldr/tests/selector/preview.c`:** the UI code against a fake catalogue with generated placeholder art: games, one with a very long name, and two homebrew titles. It writes PNG screenshots of a tour (moving along the row, fallbacks, an incomplete title, a clock tick), the information panel, the launch fade, games on a USB drive (`--scene usb --usb`), a PS4 (`--scene ps4 --ps4`: the marked tiles, the question with No selected, No, Circle, a homebrew title and its panel, then Yes), a long name (`--scene long --start 8`), and a save tool (`--scene apollo`: the question, a user who isn't signed in, a long scan with its bar; `apollo-only`: the save tool alone, asked at once, a short scan without a bar; `apollo-cancel`: Circle held during the scan, a tap that is missed, the question again, then the rest), and prints what frames cost. Without `--ps4` the PS4 scene shows that the first Cross boots. `--meta TITLE=meta.bin` reads a `<prefix>META` file as the console does; `--art TITLE=DIR` takes a dump's `sce_sys` (`icon0.png`, `pic1.png`) or what `gfs_meta.py fetch` saved (`icon.png`, `backdrop.png`); `--user NAME` fills the top bar; `--users NAME*,NAME+,NAME` lists the console's users (`*` runs SWRR, `+` signed in too, the rest not signed in); `--scan TITLES:MS` simulates a save tool's scan; `--ps4` runs as on a PS4; `--start N` starts at title N; `--verify` compares every partial frame with a whole redraw; `--is-dump ID SFO_TITLE_ID CONTENT_ID` prints whether the selector takes those for a game's dump. The art is read at run time and never copied.
 
   ```bash
   python3 ghostldr/host/gfs_meta.py fetch CUSA11456 --out ../art/CUSA11456          # outside the repository
@@ -233,7 +281,7 @@ SELECTOR_SHOTS=/tmp/shots python3 -m unittest ghostldr.tests.test_selector   # k
   /tmp/preview --font ghostldr/native/selector/font/notosans.glf --out /tmp/shots --scene tour \
      --meta CUSA11456=/tmp/ghost-meta.bin --user Player --verify
   ```
-- **`ghostldr/tests/selector/host_env.c`:** runs the core's real `sel.c` and the real `selector.bin` in an x86-64 process (Rosetta on Apple silicon) against a fake console. Its `ps4` mode sets `CTX_FLAG_PS4` over three titles (homebrew by its ID, a game, and homebrew by its `CONTENT_ID`) and answers the question No, Circle, then Yes. Its save data is built by the test in ghostfs's formats. Every run must give back every block, close VideoOut and every file, unload what it loaded, unmount every container and leave the image cleared. `SELECTOR_NO_X86=1` skips these runs.
+- **`ghostldr/tests/selector/host_env.c`:** runs the core's real `sel.c` and the real `selector.bin` in an x86-64 process (Rosetta on Apple silicon) against a fake console. Its `ps4` mode sets `CTX_FLAG_PS4` over three titles (homebrew by its ID, a game, and homebrew by its `CONTENT_ID`) and answers the question No, Circle, then Yes. Its `apollo` mode has Apollo (with its real profile) beside a game and two users, the second not signed in: the question, the mount and the scan through fakes of the core's `title_pick` and `save_prescan`, a cancel and the rest, and `title_user` at the end; `apollo-one` has the save tool alone, not requested, as `boot.c` shows it. Its save data is built by the test in ghostfs's formats. Every run must give back every block, close VideoOut and every file, unload what it loaded, unmount every container and leave the image cleared. `SELECTOR_NO_X86=1` skips these runs.
 
 ## Limits
 
@@ -245,3 +293,4 @@ SELECTOR_SHOTS=/tmp/shots python3 -m unittest ghostldr.tests.test_selector   # k
 - **On a PS4, which titles are marked** is a rule over IDs ([A game's dump or homebrew?](#a-games-dump-or-homebrew)), not a measure of what the title needs: a small game is marked too, and homebrew that needs more than 2.5 GiB isn't.
 - **Background art** larger than 2560x1440 isn't decoded; a pic1 at 1920x1080, as PS4 titles ship it, is.
 - At most 64 titles, the catalogue's own limit.
+- **A save tool's scan** reads the pad only between two titles: Circle has to be held to cancel it. Its users are the console's 16 at most. The extension's code is placed before the title's modules for the scan, so a title whose image reaches past the emulator's JIT buffers could meet it; save tools are small homebrew. If the boot stops after the scan, that JIT block isn't given back (as after a USB drive's games).

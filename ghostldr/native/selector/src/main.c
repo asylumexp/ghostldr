@@ -10,7 +10,9 @@
  *   3. opens VideoOut (through the core's override, which takes the output
  *      over from SWRR when needed) and reads the shared pad;
  *   4. runs the UI (ui.c) at up to 30 frames per second, redrawing only when
- *      something moves;
+ *      something moves; for a save tool (its profile's "save_tool"), asks
+ *      whose saves to open, mounts the title (ghost_api.title_pick) and runs
+ *      the save scan (ghost_api.save_prescan) with its progress on screen;
  *   5. tears everything down: closes VideoOut, the system font, unloads the
  *      system modules it loaded, and unmaps and releases both blocks, then
  *      returns the chosen title.  The core then overwrites this image.
@@ -168,7 +170,8 @@ static const char *name_src(u8 src)
 static u32 title_flags(const struct cat_title *c)
 {
     return (c->flags & (CAT_INCOMPLETE | CAT_BAD) ? 0 : TITLE_COMPLETE) | (c->flags & CAT_DUP ? TITLE_COPY : 0) |
-           (title_is_dump(c->id, c->sfo_id, c->content_id) ? TITLE_DUMP : 0);
+           (title_is_dump(c->id, c->sfo_id, c->content_id) ? TITLE_DUMP : 0) |
+           (c->prof_flags & PF_SAVE_TOOL ? TITLE_SAVE_TOOL : 0);
 }
 
 /* what reading a title's META, index or param.sfo taught us */
@@ -182,6 +185,7 @@ static void sync_title(struct sel *S, struct plat *P, int i)
         str_copy(t->version, c->version, sizeof(t->version));
     if (!t->id[0] && c->id[0])
         str_copy(t->id, c->id, sizeof(t->id));
+    t->flags |= title_flags(c) & TITLE_SAVE_TOOL; /* an ID first learnt from param.sfo */
     u32 dump = title_flags(c) & TITLE_DUMP;
     if ((t->flags & TITLE_DUMP) != dump) {
         LOG(P, "title %d (%s): %s, by its param.sfo (%s, %s)", i, c->id, dump ? "a game's dump" : "homebrew",
@@ -400,17 +404,68 @@ static int pad_open(struct plat *P, struct sel *S)
     s32 user = -1;
     if (!initial || !open || !P->pad_read || initial(&user) != 0)
         return -1;
+    P->user = user;
     P->pad = open(user, 0, 0, NULL);
     if (P->pad < 0 && get)
         P->pad = get(user, 0, 0);
     /* the user's name for the top bar */
-    s32 (*get_name)(s32, char *, size_t) = (s32(*)(s32, char *, size_t))sys_sym(P, us, "sceUserServiceGetUserName");
+    P->us_name = (s32(*)(s32, char *, size_t))sys_sym(P, us, "sceUserServiceGetUserName");
     char name[64];
     memset(name, 0, sizeof(name));
-    if (get_name && get_name(user, name, sizeof(name) - 1) == 0)
+    if (P->us_name && P->us_name(user, name, sizeof(name) - 1) == 0)
         ui_set_user(S, name);
     LOG(P, "pad: user %x handle %x", (u32)user, (u32)P->pad);
+    if (P->pad >= 0) { /* a save tool asks whose saves: every user the console has, and who is signed in */
+        P->us_registered = (s32(*)(s32 *))sys_sym(P, us, "sceUserServiceGetRegisteredUserIdList");
+        P->us_login = (s32(*)(s32 *))sys_sym(P, us, "sceUserServiceGetLoginUserIdList");
+    }
     return P->pad >= 0 ? 0 : -1;
+}
+
+/* ---- the console's users (a save tool asks whose saves to open) ---- */
+static int user_add(struct sel_user *u, int n, s32 id)
+{
+    if (id == -1 || id == 0 || id == 0xFF || n >= SEL_MAX_USERS) /* none, or SCE_USER_SERVICE_USER_ID_SYSTEM */
+        return n;
+    for (int i = 0; i < n; i++)
+        if (u[i].id == id)
+            return n;
+    u[n].id = id;
+    return n + 1;
+}
+
+/* the registered users when SWRR may list them (else the signed-in ones),
+ * each with its name and whether it is signed in now; logged when it changes */
+static void users_load(struct sel *S, struct plat *P)
+{
+    struct sel_user u[SEL_MAX_USERS];
+    s32 reg[16], login[4];
+    memset(u, 0, sizeof(u));
+    memset(reg, 0xFF, sizeof(reg));
+    memset(login, 0xFF, sizeof(login));
+    s32 rr = P->us_registered ? P->us_registered(reg) : -1, lr = P->us_login ? P->us_login(login) : -1;
+    if (lr != 0) /* at least the user running SWRR */
+        login[0] = P->user;
+    int n = 0;
+    for (int i = 0; rr == 0 && i < 16; i++)
+        n = user_add(u, n, reg[i]);
+    for (int i = 0; i < 4; i++)
+        n = user_add(u, n, login[i]);
+    n = user_add(u, n, P->user);
+    for (int i = 0; i < n; i++) {
+        u[i].current = u[i].id == P->user;
+        u[i].signed_in = u[i].current;
+        for (int k = 0; k < 4; k++)
+            u[i].signed_in |= login[k] == u[i].id;
+        if (P->us_name && P->us_name(u[i].id, u[i].name, sizeof(u[i].name) - 1) != 0)
+            u[i].name[0] = 0;
+    }
+    if (!ui_set_users(S, u, n))
+        return;
+    LOG(P, "users: %d (registered list %x, signed-in list %x)", n, (u32)rr, (u32)lr);
+    for (int i = 0; i < n; i++)
+        LOG(P, "user %x '%s'%s%s", (u32)u[i].id, u[i].name, u[i].signed_in ? ", signed in" : ", not signed in",
+            u[i].current ? ", running SWRR" : "");
 }
 
 /* ---- time ---- */
@@ -435,6 +490,63 @@ static void clock_now(struct sel *S, struct plat *P)
     ui_set_clock(S, (int)(day / 3600), (int)(day / 60 % 60), h24 != 0);
 }
 
+/* ---- one step: the pad, the clock, the users, the UI, a frame if it changed ---- */
+static void tick(struct sel *S, struct plat *P, u64 now, int *boot)
+{
+    u8 pad[0x80];
+    memset(pad, 0, sizeof(pad));
+    u32 buttons = 0;
+    int sx = 128, sy = 128;
+    if (P->pad_read(P->pad, pad) == 0) {
+        buttons = *(u32 *)pad & ~PAD_INTERCEPTED;
+        sx = pad[4], sy = pad[5];
+    }
+    if (now >= P->next_clock) {
+        clock_now(S, P);
+        P->next_clock = now + 1000000;
+    }
+    if (S->users_open && !S->user_chosen && now >= P->next_users) { /* someone signs in with another controller */
+        users_load(S, P);
+        P->next_users = now + 1000000;
+    }
+    if (ui_step(S, now, now - P->prev, buttons, sx, sy, boot))
+        frame(S);
+    P->prev = now;
+}
+
+/* the save scan's progress: a step of the screen at most every 33 ms;
+ * nonzero when Circle cancelled it */
+static int scan_progress(void *arg, u32 done, u32 total)
+{
+    struct sel *S = arg;
+    struct plat *P = PLAT(S);
+    u64 now = P->proc_time();
+    ui_scan_progress(S, now, done, total);
+    if (now - P->scan_frame >= 33333) {
+        P->scan_frame = now;
+        tick(S, P, now, NULL);
+    }
+    return S->scan_cancel;
+}
+
+/* A save tool's user is chosen: the title is mounted (once) and its save
+ * scan runs while this screen shows its progress. */
+static void run_scan(struct sel *S, struct plat *P, int t, int index)
+{
+    const struct ghost_api *a = P->api;
+    const struct sel_user *u = &S->users[S->user_focus];
+    u64 now = P->proc_time();
+    ui_scan_start(S, now);
+    P->scan_frame = now;
+    if (P->pick_rc == 1) {
+        P->pick_rc = a->title_pick(P->cat[t].id, index);
+        LOG(P, "title %d (%s) mounted for its save scan: %d", index, P->cat[t].id, P->pick_rc);
+    }
+    int rc = P->pick_rc == 0 ? a->save_prescan((u32)u->id, scan_progress, S) : -1;
+    ui_scan_end(S, P->proc_time(), rc);
+    frame(S);
+}
+
 /* ---- entry ---- */
 extern const u8 sel_font_glf[];
 
@@ -457,7 +569,11 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     P.ctx = *api->ctx;
     P.k = api->k;
     int force = (P.ctx->flags & CTX_FLAG_SELECT) != 0;
+    /* the core has the title already and it is a save tool (the only title,
+     * or run.py --title): only whose saves is asked */
+    int ask_only = !force && (api->profile_has(PF_SAVE_TOOL) & PF_SAVE_TOOL);
     P.ps4 = (P.ctx->flags & CTX_FLAG_PS4) != 0;
+    P.pick_rc = 1;
     u32 lk = (u32)P.ctx->libkernel_handle;
     P.proc_time = (u64(*)(void))sys_sym(&P, lk, "sceKernelGetProcessTime");
     P.gettimeofday = (s32(*)(void *, void *))sys_sym(&P, lk, "sceKernelGettimeofday");
@@ -470,8 +586,9 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     int n = cat_count(&P);
     LOG(&P, "module at %p: %d title(s) installed (%s)%s%s", (void *)sel_main, n,
         P.library ? P.root : !P.ghostfs ? "app root" : P.catalogue ? "GFSCATALOG" : P.legacy[0] ? P.legacy : "nothing",
-        force ? ", shown on request" : "", P.ps4 ? "; a PS4: game dumps are marked and ask before they boot" : "");
-    if (n <= 0 || (n == 1 && !force))
+        force ? ", shown on request" : ask_only ? ", a save tool: whose saves to open" : "",
+        P.ps4 ? "; a PS4: game dumps are marked and ask before they boot" : "");
+    if (n <= 0 || (n == 1 && !force && !ask_only))
         return -1;
     if (n > SEL_MAX_TITLES)
         n = SEL_MAX_TITLES;
@@ -490,7 +607,7 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     LOG(&P, "largest free run %lx+%lu MiB; heap %lu MiB at %p (phys %lx), video %lu MiB at %p (phys %lx)",
         (u64)run, (u64)run_len >> 20, P.heap_size >> 20, P.heap, P.heap_phys, P.video_size >> 20, P.video,
         P.video_phys);
-    int choice = -1;
+    int choice = -1, first = 0; /* first: the title shown alone (ask_only) */
     struct sel *S = NULL;
     if (!P.heap || !P.video)
         goto out;
@@ -548,7 +665,15 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     if (png_init(&P) != 0)
         LOG(&P, "libScePngDec unavailable: tiles and backgrounds use the built-in fallback");
     ui_set_platform(S, P.ps4 ? SEL_PS4 : SEL_PS5);
-    if (ui_init(S, titles, n, 0) != 0)
+    if (ask_only) { /* the core's title alone */
+        const char *id = api->title_id();
+        for (int i = 0; n > 1 && i < n; i++)
+            if (id[0] && strcmp(P.cat[i].id, id) == 0)
+                first = i;
+        P.cat += first, P.ncat = n = 1; /* index 0 is it from here; the choice goes back as first */
+        titles[first].flags |= TITLE_SAVE_TOOL;
+    }
+    if (ui_init(S, titles + first, n, 0) != 0)
         goto out;
     for (int i = 0; i < n && i < 2; i++) /* the first icons; the rest load while the row is on screen */
         ui_load_icon(S, i);
@@ -562,32 +687,28 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         LOG(&P, "no pad: booting the default title");
         goto out;
     }
+    users_load(S, &P);
+    if (ask_only)
+        ui_ask_user(S, 1);
 
     /* 5. the loop: 30 fps at most, frames drawn only when something changed */
-    u64 now = P.proc_time(), prev = now, next_clock = 0, started = now;
+    u64 now = P.proc_time(), started = now;
+    P.prev = now;
     frame(S);
     for (;;) {
-        u8 pad[0x80];
-        memset(pad, 0, sizeof(pad));
-        u32 buttons = 0;
-        int stick = 128;
-        if (P.pad_read(P.pad, pad) == 0) {
-            buttons = *(u32 *)pad & ~PAD_INTERCEPTED;
-            stick = pad[4];
-        }
         now = P.proc_time();
-        if (now >= next_clock) {
-            clock_now(S, &P);
-            next_clock = now + 1000000;
-        }
         int boot = -1;
-        if (ui_step(S, now, now - prev, buttons, stick, &boot))
-            frame(S);
-        prev = now;
+        tick(S, &P, now, &boot);
+        if (S->scan_req)
+            run_scan(S, &P, S->sel, first + S->sel);
         if (boot >= 0) {
-            choice = boot;
+            choice = first + boot;
             memcpy(chosen, P.cat[boot].id, 16);
-            LOG(&P, "Cross on title %d (%s) after %lu s; heap peak %lu MiB of %lu, %u glyphs, %u mounts", boot,
+            if (S->user_chosen) {
+                *api->title_user = (u32)S->users[S->user_focus].id;
+                LOG(&P, "title %d (%s) opens the saves of user %x", choice, P.cat[boot].id, *api->title_user);
+            }
+            LOG(&P, "Cross on title %d (%s) after %lu s; heap peak %lu MiB of %lu, %u glyphs, %u mounts", choice,
                 P.cat[boot].id, (now - started) / 1000000, P.heap_peak >> 20, P.heap_size >> 20, S->fc.misses,
                 P.mounts);
             if (P.frames)

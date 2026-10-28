@@ -290,6 +290,7 @@ Each command says what went wrong and what to do; these are the common ones.
 - **`approot: … holds no games`, or `… is not among the games`:** the PS5 found no game, or not that one, on the drive. `python3 ghostldr.py check` on the computer shows what it finds there and what is wrong with any folder; the log lists every folder it couldn't start, with the reason.
 - **`approot: stopped looking after 256 folders`:** the drive has many folders; keep games near its top, or boot with `--folder "My Games"`.
 - **`approot: libSceUsbStorage lacks what mounting needs`:** USB drives were tested on a 13.60 PS5, and this console's firmware differs. Use [the saved-data way](#the-saved-data-way) instead.
+- **`ghostfs: … no index <prefix>INDEX (809f0008)`:** the console's save list has no entry for the game's index: it was deleted, or the console's saved-data database was put back from a copy made before the install (the files can still be there, unopenable). Install the game again (`install`, or `gfs_install.py --title ID --force`): it sends what the console can't open. Installing doesn't touch its progress (`<prefix>SAVE`).
 - **Not sure where it fails:** `python3 ghostldr.py doctor` checks Python, the prebuilt files, the computer's ports, the PS5's loader and the USB drives mounted here in one go.
 - **The PS5 asks for the disc:** the SWRR disc must be in the console that runs it.
 

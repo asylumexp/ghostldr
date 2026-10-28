@@ -170,6 +170,32 @@ def read_catalogue(rx) -> tuple[gc.Catalogue, list[Install], list[str]]:
     return cat, legacy, adopted
 
 
+def relabel(new: Install, layout: dict, index: bytes, prefix: str) -> bytes:
+    """The same pack under another prefix: its container names, and the
+    prefix in its index header (nothing else in a pack depends on it)."""
+    new.prefix, new.name = prefix, gc.index_name(prefix)
+    layout["prefix"] = prefix
+    for k, job in enumerate(layout["containers"]):
+        job["dir"] = gc.data_name(prefix, k)
+    b = bytearray(index)
+    b[40:56] = prefix.encode().ljust(16, b"\0")
+    return bytes(b)
+
+
+def keep_installed_prefix(rx, new: Install, layout: dict, index: bytes) -> bytes:
+    """A title installed before the default prefix took the whole title ID
+    (G00004, now GAPOL00004) keeps its prefix: its progress <P>SAVE is there.
+    Only that change is followed; any other difference is refused by survey."""
+    import profiles
+    entry = read_catalogue(rx)[0].find(new.title)
+    if (entry and entry.prefix != new.prefix and new.prefix == profiles.default_prefix(new.title)
+            and entry.prefix == profiles.legacy_prefix(new.title)):
+        log(f"{new.title} is installed with the prefix {entry.prefix} (the default before prefixes took the whole "
+            f"title ID): it keeps it, and its progress {gc.save_name(entry.prefix)}")
+        return relabel(new, layout, index, entry.prefix)
+    return index
+
+
 def survey(rx, new: Install, jobs: list, force: bool = False) -> State:
     """What the console has, for installing `new`."""
     cat, legacy, adopted = read_catalogue(rx)
@@ -273,7 +299,8 @@ def plan_remove(entry: gc.Entry, legacy: list[Install], saves: bool) -> list[tup
     for h in legacy:                      # a stale legacy index of the same title
         if h.prefix == entry.prefix and h.name != entry.index:
             steps.append(("delete", h.name))
-    steps += [("delete_data", entry.prefix), ("delete_meta", entry.prefix), ("drop", entry.title)]
+    steps += [("delete_data", entry.prefix, entry.title), ("delete_meta", entry.prefix, entry.title),
+              ("drop", entry.title)]
     if saves:
         steps.append(("delsaves", entry.prefix))
     return steps
@@ -441,6 +468,38 @@ def delete_quiet(rx, name: str) -> bool:
     return rc == 0
 
 
+def delete_owned(rx, prefix: str, ks, layout_ids: set[int], untagged_below: int = 0) -> tuple[int, list[str]]:
+    """Delete the data containers <prefix>k (k in ks) that are this title's:
+    their gfs.tag names one of its layouts and that k, or (k below
+    untagged_below, inside the catalogued title's own range) they have no tag
+    yet.  Others are left, and named: another title's that happens to use
+    the same names (prefixes were not unique before 2026-10-28), or one
+    nothing identifies.  Names that don't exist are not deleted at all: the
+    console answers 0 for a missing one, so a blind delete can't tell.  Stops
+    after 4 missing names in a row (containers are numbered from 0)."""
+    gone, left, missing = 0, [], 0
+    for k in ks:
+        name = gc.data_name(prefix, k)
+        exists, tag = rx.probe(name)
+        if not exists:
+            missing += 1
+            if missing >= 4:
+                break
+            continue
+        missing = 0
+        mine = False
+        if tag and len(tag) >= 12:
+            lid, kk = struct.unpack_from("<QI", tag)
+            mine = lid in layout_ids and kk == k
+        elif k < untagged_below:
+            mine = True
+        if mine and delete_quiet(rx, name):
+            gone += 1
+        elif not mine:
+            left.append(name)
+    return gone, left
+
+
 def execute(rx, steps: list[tuple], st: State, new: Install | None = None, layout: dict | None = None,
             index: bytes = b"", src: Path | None = None) -> None:
     cat = st.catalogue
@@ -461,11 +520,21 @@ def execute(rx, steps: list[tuple], st: State, new: Install | None = None, layou
         elif s[0] == "delete":
             log(f"deleted {s[1]}: {rx.delete(s[1]):#x}")
         elif s[0] == "delete_data":
-            gone = sum(delete_quiet(rx, gc.data_name(s[1], k)) for k in range(MAX_CONTAINERS))
+            e = cat.find(s[2]) if len(s) > 2 else None
+            ids = {e.layout_id} if e else set()
+            gone, left = delete_owned(rx, s[1], range(MAX_CONTAINERS), ids, e.containers if e else 0)
             log(f"deleted {gone} data containers {s[1]}000..")
+            if left:
+                log(f"left {', '.join(left)}: not this title's (their tags name another layout, or none): delete "
+                    f"them in the manager if you know they are")
         elif s[0] == "delete_meta":
-            if delete_quiet(rx, gc.meta_name(s[1])):
-                log(f"deleted {gc.meta_name(s[1])} (its name and art)")
+            name = gc.meta_name(s[1])
+            info = gm.parse(rx.read(name, gm.META_FILE, gm.HEADER_SIZE))
+            title = s[2] if len(s) > 2 else ""
+            if info and title and info["title"] != title:
+                log(f"left {name}: it is {info['title']}'s name and art")
+            elif info and delete_quiet(rx, name):
+                log(f"deleted {name} (its name and art)")
         elif s[0] == "meta":
             data = Path(layout["meta"]["file"]).read_bytes()
             rc = gm.put_meta(rx, cat, new.title, new.prefix, data)
@@ -518,9 +587,14 @@ def execute(rx, steps: list[tuple], st: State, new: Install | None = None, layou
                 f"(console {millis / 1000:.0f} s); avg {rate / 1e6:.1f} MB/s, "
                 f"ETA {(total - sent) / max(rate, 1) / 60:.0f} min")
         elif s[0] == "sweep":
-            gone = sum(delete_quiet(rx, gc.data_name(new.prefix, k)) for k in range(new.containers, MAX_CONTAINERS))
+            ids = {new.layout_id} | ({st.current.layout_id} if st.current else set()) | \
+                  ({st.entry.layout_id} if st.entry else set())
+            gone, left = delete_owned(rx, new.prefix, range(new.containers, MAX_CONTAINERS), ids)
             if gone:
                 log(f"deleted {gone} leftover {new.prefix} containers past {gc.data_name(new.prefix, new.containers - 1)}")
+            if left:
+                log(f"left {', '.join(left)}: past this title's containers, and not this title's (their tags name "
+                    f"another layout, or none)")
         elif s[0] == "index":
             status, _, _ = rx.put(idx_name, gc.INDEX_FILE, layout["index_blocks"], len(index), [index])
             if status:
@@ -680,6 +754,7 @@ def main() -> int:
     fit_check(src, args.title, args.no_fit_check)
 
     rx = connect(args)
+    index = keep_installed_prefix(rx, new, layout, index)
     st = survey(rx, new, jobs, args.force)
     steps = plan(st, new, layout, args.force)
     log(f"installing {new.describe()}")

@@ -46,9 +46,10 @@ EXT_OBJS := $(patsubst ext/src/%.c,$(OUT)/ext/%.o,$(EXT_SRCS)) $(OUT)/ext/rt.o
 # The ELF loader's own extension, ext-elfldr.bin (in ghostldr-elfldr.bin):
 # the families a payload binds to and none of a game's, no FTP server
 # (ext/elfldr_only.c stands in for ftp.c) and no NID table (docs/elfldr.md)
-ELFLDR_EXT_SRCS := ext_main selftest elfldr elfldr_sys payload ftp_sys hle_file hle_homebrew hle_tsd hle_kernel \
+ELFLDR_EXT_SRCS := ext_main selftest elfldr elfldr_sys payload ftp_sys hle_file hle_homebrew hle_tsd hle_kernel hle_rawsys \
 	hle_module hle_libc_heap hle_libc_stdio
-ELFLDR_EXT_OBJS := $(patsubst %,$(OUT)/ext/%.o,$(ELFLDR_EXT_SRCS)) $(OUT)/ext/rt.o $(OUT)/ext-elfldr/elfldr_only.o
+# built for size (-Os): it takes new JIT memory, and test_bundle keeps it under 160 KiB
+ELFLDR_EXT_OBJS := $(patsubst %,$(OUT)/ext-elfldr/%.o,$(ELFLDR_EXT_SRCS)) $(OUT)/ext/rt.o $(OUT)/ext-elfldr/elfldr_only.o
 LINKED_core := $(OBJS)
 LINKED_ext := $(EXT_OBJS)
 LINKED_ext-elfldr := $(ELFLDR_EXT_OBJS)
@@ -91,7 +92,11 @@ $(OUT)/ext.bin: $(OUT)/ext.elf ../tools/mkext.py ../tools/elf64.py ../tools/gen_
 
 $(OUT)/ext-elfldr/elfldr_only.o: ext/elfldr_only.c $(wildcard ext/include/*.h) ext/src/kmod.h $(HEADERS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(EXT_CFLAGS) -Iext/include -Iext/src -c $< -o $@
+	$(CC) $(CFLAGS) -Os $(EXT_CFLAGS) -Iext/include -Iext/src -c $< -o $@
+
+$(OUT)/ext-elfldr/%.o: ext/src/%.c $(wildcard ext/include/*.h) $(wildcard ext/src/*.h) $(HEADERS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Os $(EXT_CFLAGS) -Iext/include -c $< -o $@
 
 $(OUT)/ext-elfldr.elf: $(ELFLDR_EXT_OBJS) $(OUT)/ext-elfldr.objs ext/ext.ld
 	$(LD) $(LDFLAGS) -T ext/ext.ld -o $@ $(ELFLDR_EXT_OBJS)

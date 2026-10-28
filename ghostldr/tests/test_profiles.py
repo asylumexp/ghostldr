@@ -98,7 +98,8 @@ class ProfileTests(unittest.TestCase):
         [b] = profiles.read_blobs(blob)
         self.assertEqual(b["title"], "CUSA11456")
         self.assertEqual(b["fingerprint"], GHOST_FP)
-        self.assertEqual(b["flags"], profiles.PF_PLAN | profiles.PF_HOOKS | profiles.PF_DIAG | profiles.PF_OWN)
+        self.assertEqual(b["flags"], profiles.PF_PLAN | profiles.PF_HOOKS | profiles.PF_DIAG | profiles.PF_OWN
+                         | profiles.PF_DIALOG_AUTO)   # a GPU title: its dialogs are answered at once
         self.assertEqual(b["app_params"], [3, 11456, 0, 0, 0])   # cache/t11456.dat
         self.assertEqual((b["save_blocks"], b["runtime_reserve_mib"], b["video_reserve_mib"], b["flex_mib"]),
                          (256, 32, 100, 0))
@@ -162,8 +163,12 @@ class ProfileTests(unittest.TestCase):
             (src / "sce_sys/param.sfo").write_bytes(b"garbage")
             self.assertEqual(profiles.param_sfo(src), {})
             self.assertIsNone(profiles.detect_title(src))
-        self.assertEqual(profiles.default_prefix("CUSA12345"), "G12345")
+        self.assertEqual(profiles.default_prefix("CUSA12345"), "GCUSA12345")
+        self.assertNotEqual(profiles.default_prefix("APOL00004"), profiles.default_prefix("CUSA00004"))
         self.assertEqual(profiles.default_prefix("HB-TEST_1"), "GHBTEST1")
+        self.assertEqual(profiles.default_prefix("FSXX00001"), "TFSXX00001")        # not one of ghostldr's GFS names
+        self.assertEqual(profiles.default_prefix("HOMEBRWD123"), "GHOMEBRWD12X")  # never ends like a save directory
+        self.assertEqual(profiles.legacy_prefix("CUSA12345"), "G12345")             # what installs before 2026-10-28 used
         self.assertEqual(profiles.normalize_title(" lapy10010 "), "LAPY10010")
 
     def test_openorbis_homebrew(self) -> None:

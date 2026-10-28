@@ -13,6 +13,7 @@
 
 long write(int fd, const void *buf, unsigned long n);
 int vsnprintf(char *buf, unsigned long size, const char *fmt, __builtin_va_list ap);
+int snprintf(char *buf, unsigned long size, const char *fmt, ...);
 void *calloc(unsigned long n, unsigned long size);
 void free(void *p);
 char *strcat(char *d, const char *s);
@@ -31,6 +32,9 @@ static struct module *g_modules_p, *g_main_p;
 static u64 g_dmem;
 const struct ghost_api *G;
 static int g_failed;
+
+/* hle_jbc.c is not part of this build: no virtual devices */
+bool jbc_ioctl(s32 fd, u64 req, u64 arg, s64 *rc) { return false; }
 
 /* ---- the harness side ---- */
 static const struct ext_family *g_fam[8];
@@ -149,13 +153,19 @@ static const char k_data[] = "first line\nsecond line\nthird line\n";
 #define GDIR 101
 static s64 g_pos;
 static int g_dents_done;
+#define GROOT 102
+static int g_root_done;
 static int gfs_open_(const char *path, int flags, int *fd)
 {
+    if (strcmp(path, "/app0") == 0) {
+        *fd = GROOT, g_root_done = 0;
+        return 0;
+    }
     if (strncmp(path, "/app0/", 6) != 0)
         return 1;
     if (flags & 3)
         *fd = (int)0x8002001e; /* EROFS */
-    else if (strcmp(path, "/app0/data.txt") == 0)
+    else if (strcmp(path, "/app0/data.txt") == 0 || strcmp(path, "/app0/Font.TTF") == 0)
         *fd = GFD, g_pos = 0;
     else if (strcmp(path, "/app0/dir") == 0)
         *fd = GDIR, g_dents_done = 0;
@@ -163,7 +173,7 @@ static int gfs_open_(const char *path, int flags, int *fd)
         *fd = (int)0x80020002; /* ENOENT */
     return 0;
 }
-static bool gfs_owns_(int fd) { return fd == GFD || fd == GDIR; }
+static bool gfs_owns_(int fd) { return fd == GFD || fd == GDIR || fd == GROOT; }
 static int gfs_close_(int fd) { return gfs_owns_(fd) ? 0 : 1; }
 static s64 gfs_pread_(int fd, void *buf, u64 n, s64 off)
 {
@@ -205,6 +215,17 @@ static int gfs_stat_(const char *path, void *st, int *rc)
 }
 static int gfs_getdents_(int fd, void *buf, int size)
 {
+    if (fd == GROOT) { /* /app0: dir/ and Font.TTF */
+        if (g_root_done++)
+            return 0;
+        u8 *d = buf;
+        memset(d, 0, 48);
+        *(u32 *)d = 2, *(u16 *)(d + 4) = 16, d[6] = 4, d[7] = 3;
+        memcpy(d + 8, "dir", 4);
+        *(u32 *)(d + 16) = 3, *(u16 *)(d + 20) = 24, d[22] = 8, d[23] = 8;
+        memcpy(d + 24, "Font.TTF", 9);
+        return 40;
+    }
     if (fd != GDIR)
         return (int)0x80020016;
     if (g_dents_done++)
@@ -216,6 +237,29 @@ static int gfs_getdents_(int fd, void *buf, int size)
     return 24;
 }
 static const char *remap_path_(const char *path, char *buf, size_t size) { return path; }
+static int vfs_open_(const char *path, int flags, int mode)
+{
+    int fd;
+    return gfs_open_(path, flags & 3, &fd) == 0 ? fd : (int)0x80020002;
+}
+
+/* hle_file.c's (not built here): the title's own sandbox path, for TEST00000 */
+const char *title_sandbox_path(const char *path, char *buf, size_t size)
+{
+    static const char pre[] = "/mnt/sandbox/TEST00000_000/";
+    if (!path || strncmp(path, pre, sizeof(pre) - 1) != 0)
+        return path;
+    snprintf(buf, size, "/%s", path + sizeof(pre) - 1);
+    return buf;
+}
+int fmt(char *buf, size_t size, const char *f, ...)
+{
+    __builtin_va_list ap;
+    __builtin_va_start(ap, f);
+    int n = vsnprintf(buf, size, f, ap);
+    __builtin_va_end(ap);
+    return n;
+}
 
 /* ---- SWRR's functions: recorders ---- */
 static char g_host_called[64];
@@ -322,6 +366,7 @@ static void setup(void)
         .gfs_stat = gfs_stat_, .gfs_read = gfs_read_, .gfs_pread = gfs_pread_, .gfs_lseek = gfs_lseek_,
         .gfs_fstat = gfs_fstat_, .gfs_getdents = gfs_getdents_, .ghost_thread_create = fake_thread,
         .hle_lookup = hle_lookup_, .flex_map = flex_map, .flex_unmap = flex_unmap, .arena_alloc = arena_alloc_,
+        .vfs_open = vfs_open_, .vfs_getdents = gfs_getdents_, .vfs_close = gfs_close_,
         .thread_dtors = &g_thread_dtors_v,
     };
     G = &g_api;
@@ -624,6 +669,16 @@ static void scenario_homebrew(void)
     expect(nf((void *)1, "/system/font.ttf", 0, &face) == 0 && strcmp(g_host_called, "FT_New_Face") == 0,
            "other fonts: SWRR's FT_New_Face");
     expect(nf((void *)1, "/app0/missing.ttf", 0, &face) == 1, "a missing title font: cannot open");
+    g_mem_face_size = 0;
+    expect(nf((void *)1, "/mnt/sandbox/TEST00000_000/app0/data.txt", 0, &face) == 0 &&
+               g_mem_face_size == sizeof(k_data) - 1,
+           "FT_New_Face on the title's own sandbox path: the title file, from ghostfs");
+    g_host_ret = 1; /* SWRR's sandbox has no such font */
+    g_mem_face_size = 0;
+    expect(nf((void *)1, "/preinst/common/font/DFHEI5-SONY.ttf", 0, &face) == 0 &&
+               g_mem_face_size == sizeof(k_data) - 1,
+           "a system font SWRR lacks: the title's own font (/app0/Font.TTF) instead");
+    g_host_ret = 0;
 }
 
 int main(int argc, char **argv)

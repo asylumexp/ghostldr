@@ -5,11 +5,22 @@
  *
  *   preview --font notosans.glf --out DIR [--meta TITLE=FILE]... [--art TITLE=DIR]...
  *           [--titles N] [--scene NAME] [--user NAME] [--ps4] [--start N]
+ *           [--users NAME*,NAME+,NAME] [--scan TITLES:MS]
  *   preview --is-dump ID SFO_TITLE_ID CONTENT_ID   (prints "dump" or "homebrew")
  *
  * --ps4 runs the UI as on a PS4: game dumps marked, a question before one
  * boots.  The fake catalogue has games (CUSA IDs), one with a very long
- * name, and two homebrew titles.
+ * name, two homebrew titles and a save tool (APOL00004, last).
+ *
+ * A save tool asks whose saves to open: --users lists the console's users
+ * (* the one running SWRR, + another signed in, the rest not signed in;
+ * the apollo scenes have four), and the scan after the choice is simulated
+ * here with --scan TITLES:MS (titles to search, milliseconds each; a scan
+ * cancelled with Circle leaves the rest for the next one, as the cache
+ * does).  The scenes: apollo (the question, a user not signed in, a long
+ * scan with its progress), apollo-only (the save tool alone: the question
+ * at once, a short scan without a bar), apollo-cancel (Circle during the
+ * scan, then the question again).
  *
  * Art: --meta TITLE=FILE reads a meta.bin (host/gfs_meta.py) as the console
  * reads <prefix>META, QOI and all; --art TITLE=DIR takes icon0.png / pic1.png
@@ -308,7 +319,9 @@ static const struct fake FAKES[] = {
                   "Definitive Collector's Edition", "01.02", "G00008", 33.0, 1, 2, ""},
     {"HBPR00002", "hbprobe (system malloc)", "01.00", "G00002H", 0.004, 1, 0, "IV0000-HBPR00002_00-HBPROBE000000000"},
     {"LAPY20001", "PS4-Xplorer", "01.34", "G20001", 0.09, 1, 3, ""},
+    {"APOL00004", "Apollo Save Tool", "02.40", "GAPOL00004", 0.03, 1, 2, "IV0000-APOL00004_00-APOLLO0000000PS4"},
 };
+#define FAKE_SAVE_TOOL 11 /* its profile has "save_tool" */
 
 static u8 *read_file(const char *path, u64 *n)
 {
@@ -357,55 +370,105 @@ struct event {
     const char *shot; /* write a screenshot at this time */
 };
 
-static void run(struct sel *S, const struct event *ev, int nev, const char *outdir, const char *prefix)
+/* a scripted run: the events so far, as time goes on */
+struct script {
+    const struct event *ev;
+    int nev, e;
+    u32 buttons;
+    int stick;
+    const char *outdir, *prefix;
+    u32 scan_titles, scan_ms; /* --scan: the simulated save scan */
+};
+
+static void events(struct sel *S, struct script *sc, u64 now)
+{
+    while (sc->e < sc->nev && (u64)sc->ev[sc->e].ms * 1000 <= now) {
+        const struct event *ev = &sc->ev[sc->e];
+        if (ev->shot && ev->shot[0] == '@') { /* "@clock": the minute changes */
+            ui_set_clock(S, S->clock_h, (S->clock_m + 1) % 60, S->clock_24h);
+        } else if (ev->shot) {
+            ui_draw(S);
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/%s%s.png", sc->outdir, sc->prefix, ev->shot);
+            png_write(path, &S->back);
+            fprintf(stderr, "wrote %s\n", path);
+        } else {
+            sc->buttons = ev->buttons, sc->stick = ev->stick ? ev->stick : 128;
+        }
+        sc->e++;
+    }
+}
+
+/* a step of the UI and its frame, timed, and checked against a whole redraw */
+static void step_draw(struct sel *S, struct script *sc, u64 now, u64 dt, int *boot)
+{
+    if (!ui_step(S, now, dt, sc->buttons, sc->stick, 128, boot))
+        return;
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    ui_draw(S);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    struct plat *P = S->plat;
+    u64 ns = (u64)(b.tv_sec - a.tv_sec) * 1000000000ull + (u64)b.tv_nsec - (u64)a.tv_nsec;
+    if (S->damage_y1 > S->damage_y0) {
+        P->frames++;
+        P->partial += S->damage_y1 - S->damage_y0 < SCREEN_H;
+        P->draw_ns += ns;
+        if (ns > P->draw_max_ns)
+            P->draw_max_ns = ns;
+    }
+    if (P->verify && S->damage_y1 - S->damage_y0 < SCREEN_H) {
+        u64 bytes = (u64)SCREEN_W * SCREEN_H * 4;
+        memcpy(P->check, S->back.px, bytes);
+        S->drawn_once = 0, S->changed = CH_ALL;
+        ui_draw(S);
+        if (memcmp(P->check, S->back.px, bytes)) {
+            P->mismatches++;
+            fprintf(stderr, "partial frame at %llu ms differs from a whole redraw\n", (unsigned long long)(now / 1000));
+        }
+    }
+}
+
+/* the save scan as the console's main.c runs it (ghost_api.save_prescan),
+ * simulated: TITLES searches of MS each, a little uneven; a frame at most
+ * every 33 ms; titles searched before a cancel are not searched again */
+static void fake_scan(struct sel *S, struct script *sc, u64 *now)
+{
+    static u32 cached;
+    u32 total = sc->scan_titles > cached ? sc->scan_titles - cached : 0, done = 0;
+    u64 last = *now;
+    ui_scan_start(S, *now);
+    fprintf(stderr, "scan: user %x, %u titles to search\n", (u32)S->users[S->user_focus].id, total);
+    for (int cancel = total ? ui_scan_progress(S, *now, 0, total) : 0; !cancel && done < total;) {
+        *now += (u64)sc->scan_ms * (900 + (done * 37) % 200); /* 0.9 to 1.1 times MS */
+        done++;
+        events(S, sc, *now);
+        cancel = ui_scan_progress(S, *now, done, total);
+        if (*now - last >= 33333) {
+            step_draw(S, sc, *now, *now - last, NULL);
+            last = *now;
+            cancel |= S->scan_cancel;
+        }
+    }
+    cached += done;
+    ui_scan_end(S, *now, (int)(done / 3));
+    step_draw(S, sc, *now, *now - last, NULL);
+}
+
+static void run(struct sel *S, struct script *sc)
 {
     u64 now = 0, step = 33333;
-    int e = 0, boot = -1;
-    u32 buttons = 0;
-    int stick = 128;
-    for (int frame = 0; frame < 30 * 60 && e < nev; frame++) {
-        while (e < nev && (u64)ev[e].ms * 1000 <= now) {
-            if (ev[e].shot && ev[e].shot[0] == '@') { /* "@clock": the minute changes */
-                ui_set_clock(S, S->clock_h, (S->clock_m + 1) % 60, S->clock_24h);
-            } else if (ev[e].shot) {
-                ui_draw(S);
-                char path[1024];
-                snprintf(path, sizeof(path), "%s/%s%s.png", outdir, prefix, ev[e].shot);
-                png_write(path, &S->back);
-                fprintf(stderr, "wrote %s\n", path);
-            } else {
-                buttons = ev[e].buttons, stick = ev[e].stick ? ev[e].stick : 128;
-            }
-            e++;
-        }
-        if (ui_step(S, now, step, buttons, stick, &boot)) {
-            struct timespec a, b;
-            clock_gettime(CLOCK_MONOTONIC, &a);
-            ui_draw(S);
-            clock_gettime(CLOCK_MONOTONIC, &b);
-            struct plat *P = S->plat;
-            u64 ns = (u64)(b.tv_sec - a.tv_sec) * 1000000000ull + (u64)b.tv_nsec - (u64)a.tv_nsec;
-            if (S->damage_y1 > S->damage_y0) {
-                P->frames++;
-                P->partial += S->damage_y1 - S->damage_y0 < SCREEN_H;
-                P->draw_ns += ns;
-                if (ns > P->draw_max_ns)
-                    P->draw_max_ns = ns;
-            }
-            if (P->verify && S->damage_y1 - S->damage_y0 < SCREEN_H) {
-                u64 bytes = (u64)SCREEN_W * SCREEN_H * 4;
-                memcpy(P->check, S->back.px, bytes);
-                S->drawn_once = 0, S->changed = CH_ALL;
-                ui_draw(S);
-                if (memcmp(P->check, S->back.px, bytes)) {
-                    P->mismatches++;
-                    fprintf(stderr, "partial frame at %llu ms differs from a whole redraw\n",
-                            (unsigned long long)(now / 1000));
-                }
-            }
-        }
+    int boot = -1;
+    sc->stick = 128;
+    for (int frame = 0; frame < 30 * 60 && sc->e < sc->nev; frame++) {
+        events(S, sc, now);
+        step_draw(S, sc, now, step, &boot);
+        if (S->scan_req)
+            fake_scan(S, sc, &now);
         if (boot >= 0) {
             fprintf(stderr, "boot title %d (%s) at %llu ms\n", boot, S->titles[boot].id, (unsigned long long)(now / 1000));
+            if (S->user_chosen)
+                fprintf(stderr, "title_user %x\n", (u32)S->users[S->user_focus].id);
             break;
         }
         now += step;
@@ -417,6 +480,9 @@ int main(int argc, char **argv)
     const char *font = NULL, *out = ".", *scene_name = "tour", *prefix = "", *write_art = NULL, *user = NULL;
     int ntitles = (int)(sizeof(FAKES) / sizeof(FAKES[0])), clock_h = 21, clock_m = 47, h24 = 1, usb = 0, ps4 = 0;
     int start = 0;
+    const char *users = NULL;
+    u32 scan_titles = 349, scan_ms = 400;
+    int scan_given = 0;
     static struct plat P;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--font") && i + 1 < argc)
@@ -437,6 +503,14 @@ int main(int argc, char **argv)
             ps4 = 1;
         else if (!strcmp(argv[i], "--start") && i + 1 < argc)
             start = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--users") && i + 1 < argc)
+            users = argv[++i];
+        else if (!strcmp(argv[i], "--scan") && i + 1 < argc) {
+            char *colon = NULL;
+            scan_titles = (u32)strtoul(argv[++i], &colon, 10);
+            scan_ms = colon && *colon == ':' ? (u32)strtoul(colon + 1, NULL, 10) : 400;
+            scan_given = 1;
+        }
         else if (!strcmp(argv[i], "--is-dump") && i + 3 < argc) { /* the selector's rule (sfo.c) */
             printf("%s\n", title_is_dump(argv[i + 1], argv[i + 2], argv[i + 3]) ? "dump" : "homebrew");
             return 0;
@@ -472,8 +546,9 @@ int main(int argc, char **argv)
             if (eq)
                 *eq = 0, P.art[P.nart].id = a, P.art[P.nart].meta = meta, P.art[P.nart++].dir = eq + 1;
         } else {
-            fprintf(stderr, "usage: preview --font F.glf --out DIR [--scene tour|info|single|launch|usb|ps4|long] [--usb] "
-                            "[--ps4] [--titles N] [--start N] [--art TITLE=DIR] [--meta TITLE=meta.bin] [--user NAME] "
+            fprintf(stderr, "usage: preview --font F.glf --out DIR [--scene tour|info|single|launch|usb|ps4|long|apollo|"
+                            "apollo-only|apollo-cancel] [--usb] [--ps4] [--titles N] [--start N] [--art TITLE=DIR] "
+                            "[--meta TITLE=meta.bin] [--user NAME] [--users NAME*,NAME+,NAME] [--scan TITLES:MS] "
                             "[--12h] [--prefix P]\n       preview --is-dump ID SFO_TITLE_ID CONTENT_ID\n");
             return 2;
         }
@@ -486,6 +561,12 @@ int main(int argc, char **argv)
     }
     if (ntitles < 1 || ntitles > (int)(sizeof(FAKES) / sizeof(FAKES[0])))
         ntitles = (int)(sizeof(FAKES) / sizeof(FAKES[0]));
+    int apollo = !strncmp(scene_name, "apollo", 6), only = !strcmp(scene_name, "apollo-only");
+    const struct fake *fakes = FAKES;
+    if (only) /* the save tool alone, as when it is the only title installed; its saves mostly known already */
+        fakes = &FAKES[FAKE_SAVE_TOOL], ntitles = 1, scan_titles = scan_given ? scan_titles : 3;
+    else if (apollo)
+        start = FAKE_SAVE_TOOL;
     P.size = 192ull << 20;
     P.heap = malloc(P.size);
     P.check = malloc((u64)SCREEN_W * SCREEN_H * 4);
@@ -493,13 +574,14 @@ int main(int argc, char **argv)
     S.plat = &P;
     struct title *titles = sel_alloc(&S, sizeof(struct title) * ntitles);
     for (int i = 0; i < ntitles; i++) {
-        const struct fake *f = &FAKES[i];
+        const struct fake *f = &fakes[i];
         str_copy(titles[i].id, f->id, 16);
         str_copy(titles[i].name, f->name, 128);
         str_copy(titles[i].version, f->version, 16);
         str_copy(titles[i].prefix, f->prefix, 16);
         titles[i].size = (u64)(f->gib * (1u << 30));
-        titles[i].flags = (f->complete ? TITLE_COMPLETE : 0) | (title_is_dump(f->id, "", f->content_id) ? TITLE_DUMP : 0);
+        titles[i].flags = (f->complete ? TITLE_COMPLETE : 0) | (title_is_dump(f->id, "", f->content_id) ? TITLE_DUMP : 0) |
+                          (f == &FAKES[FAKE_SAVE_TOOL] ? TITLE_SAVE_TOOL : 0);
         P.procedural[i] = f->art;
         if (usb) { /* as main.c fills them from the extension's list */
             titles[i].size = 0;
@@ -525,12 +607,39 @@ int main(int argc, char **argv)
         return 1;
     }
     ui_set_clock(&S, clock_h, clock_m, h24);
+    if (!users && apollo)
+        users = "User A*,User B+,User C,User D";
+    if (users) { /* the console's users: NAME* runs SWRR, NAME+ is signed in too */
+        struct sel_user u[SEL_MAX_USERS];
+        int n = 0;
+        memset(u, 0, sizeof(u));
+        for (const char *p = users; *p && n < SEL_MAX_USERS; n++) {
+            int len = 0;
+            while (p[len] && p[len] != ',')
+                len++;
+            int mark = len && (p[len - 1] == '*' || p[len - 1] == '+') ? p[len - 1] : 0;
+            snprintf(u[n].name, sizeof(u[n].name), "%.*s", len - (mark != 0), p);
+            u[n].id = 0x10000001 + n;
+            u[n].current = mark == '*', u[n].signed_in = mark != 0;
+            p += len + (p[len] == ',');
+        }
+        ui_set_users(&S, u, n);
+        if (!user)
+            for (int i = 0; i < n; i++)
+                if (u[i].current)
+                    ui_set_user(&S, u[i].name);
+    }
     if (user)
         ui_set_user(&S, user);
+    if (only)
+        ui_ask_user(&S, 1);
     if (write_art) /* sample art for selector_host: DIR/t<N>/sce_sys/{icon0,pic1}.png */
         return dump_art(&S, write_art, ntitles);
     u64 base = P.used;
     fprintf(stderr, "heap after init: %llu MiB\n", (unsigned long long)(base >> 20));
+    struct script sc = {0};
+    sc.outdir = out, sc.prefix = prefix, sc.scan_titles = scan_titles, sc.scan_ms = scan_ms;
+#define RUN(EV) (sc.ev = (EV), sc.nev = (int)(sizeof(EV) / sizeof((EV)[0])), sc.e = 0, run(&S, &sc))
 
     if (!strcmp(scene_name, "tour")) {
         static const struct event ev[] = {
@@ -547,14 +656,14 @@ int main(int argc, char **argv)
             {7500, PAD_CROSS, 0, NULL}, {7580, 0, 0, NULL}, {7900, 0, 0, "toast"},
             {8000, 0, 0, NULL},
         };
-        run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
+        RUN(ev);
     } else if (!strcmp(scene_name, "info")) {
         static const struct event ev[] = {
             {800, PAD_RIGHT, 0, NULL}, {880, 0, 0, NULL},
             {2000, PAD_OPTIONS, 0, NULL}, {2080, 0, 0, NULL}, {2600, 0, 0, "info"},
             {2700, PAD_CIRCLE, 0, NULL}, {2780, 0, 0, NULL}, {3300, 0, 0, "info-closed"},
         };
-        run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
+        RUN(ev);
     } else if (!strcmp(scene_name, "usb")) { /* with --usb: a second copy's panel, a folder that can't start */
         static const struct event ev[] = {
             {800, PAD_RIGHT, 0, NULL}, {880, 0, 0, NULL},
@@ -565,7 +674,7 @@ int main(int argc, char **argv)
             {4500, PAD_CROSS, 0, NULL}, {4580, 0, 0, NULL}, {4900, 0, 0, "usb-why"},
             {5000, PAD_OPTIONS, 0, NULL}, {5080, 0, 0, NULL}, {5600, 0, 0, "usb-bad-info"},
         };
-        run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
+        RUN(ev);
     } else if (!strcmp(scene_name, "ps4")) { /* with --ps4: marked dumps; No, Circle, then Yes boots; homebrew unmarked */
         static const struct event ev[] = {
             {1000, 0, 0, "ps4-home"},
@@ -582,21 +691,50 @@ int main(int argc, char **argv)
             {8400, PAD_LEFT, 0, NULL}, {8480, 0, 0, NULL}, {8800, 0, 0, "ps4-ask-yes"},
             {8900, PAD_CROSS, 0, NULL}, {8980, 0, 0, NULL}, {10000, 0, 0, NULL},
         };
-        run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
+        RUN(ev);
     } else if (!strcmp(scene_name, "long")) { /* a very long name (start at it): the row, then its information */
         static const struct event ev[] = {
             {1000, 0, 0, "long"}, {1100, PAD_OPTIONS, 0, NULL}, {1180, 0, 0, NULL}, {1700, 0, 0, "long-info"},
         };
-        run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
+        RUN(ev);
+    } else if (!strcmp(scene_name, "apollo")) { /* the save tool: whose saves, a user not signed in, a long scan */
+        static const struct event ev[] = {
+            {1000, 0, 0, "apollo-home"},
+            {1100, PAD_CROSS, 0, NULL}, {1180, 0, 0, NULL}, {1700, 0, 0, "apollo-users"},
+            {1800, PAD_DOWN, 0, NULL}, {1880, 0, 0, NULL}, {2000, PAD_DOWN, 0, NULL}, {2080, 0, 0, NULL},
+            {2500, 0, 0, "apollo-users-greyed"},
+            {2600, PAD_CROSS, 0, NULL}, {2680, 0, 0, NULL}, {3100, 0, 0, "apollo-not-signed-in"},
+            {3200, PAD_UP, 0, NULL}, {3280, 0, 0, NULL}, {3400, PAD_UP, 0, NULL}, {3480, 0, 0, NULL},
+            {6000, PAD_CROSS, 0, NULL}, {6080, 0, 0, NULL},
+            {6500, 0, 0, "apollo-scan-start"}, {26000, 0, 0, "apollo-scan"}, {120000, 0, 0, "apollo-scan-late"},
+            {200000, 0, 0, NULL},
+        };
+        RUN(ev);
+    } else if (!strcmp(scene_name, "apollo-only")) { /* the save tool alone: asked at once, a short scan, no bar */
+        static const struct event ev[] = {
+            {1000, 0, 0, "apollo-only"}, {1100, PAD_CIRCLE, 0, NULL}, {1180, 0, 0, NULL}, {1500, 0, 0, "apollo-only-circle"},
+            {1600, PAD_CROSS, 0, NULL}, {1680, 0, 0, NULL}, {1800, 0, 0, "apollo-only-scan"}, {5000, 0, 0, NULL},
+        };
+        RUN(ev);
+    } else if (!strcmp(scene_name, "apollo-cancel")) { /* Circle during the scan: the question again, then the rest */
+        static const struct event ev[] = {
+            {1100, PAD_CROSS, 0, NULL}, {1180, 0, 0, NULL}, {1600, PAD_CROSS, 0, NULL}, {1680, 0, 0, NULL},
+            {8000, 0, 0, "apollo-scan-hint"},
+            {9000, PAD_CIRCLE, 0, NULL}, {9050, 0, 0, NULL},                 /* a tap between two titles: missed */
+            {10000, PAD_CIRCLE, 0, NULL}, {10450, 0, 0, "apollo-cancelling"}, {10700, 0, 0, NULL}, /* held: seen */
+            {12000, 0, 0, "apollo-cancelled"}, {12100, PAD_CIRCLE, 0, NULL}, {12180, 0, 0, NULL}, /* no list to go back to */
+            {12500, PAD_CROSS, 0, NULL}, {12580, 0, 0, NULL}, {30000, 0, 0, "apollo-resumed"}, {200000, 0, 0, NULL},
+        };
+        RUN(ev);
     } else if (!strcmp(scene_name, "launch")) {
         static const struct event ev[] = {
             {1000, 0, 0, "before"}, {1100, PAD_CROSS, 0, NULL}, {1180, 0, 0, NULL}, {1260, 0, 0, "launching"},
             {3000, 0, 0, NULL},
         };
-        run(&S, ev, sizeof(ev) / sizeof(ev[0]), out, prefix);
+        RUN(ev);
     } else {
         static const struct event ev[] = {{1000, 0, 0, "single"}};
-        run(&S, ev, 1, out, prefix);
+        RUN(ev);
     }
     fprintf(stderr, "heap peak: %llu MiB (persistent %llu MiB), glyphs rendered %u\n",
             (unsigned long long)(P.peak >> 20), (unsigned long long)(base >> 20), S.fc.misses);

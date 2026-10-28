@@ -1,6 +1,8 @@
 /* libSceImeDialog and libSceIme (dialogs.md §8.5-8.6).  A real keyboard
- * would get no focus inside SWRR, so the text is decided here, the same way
- * every time:
+ * would get no focus inside SWRR.  An ImeDialog over frames ghostldr can
+ * draw on is ghostldr's own on-screen keyboard (dlg_overlay.c): the user
+ * types the text.  Otherwise (and for libSceIme) the text is decided here,
+ * the same way every time:
  *   1. an override for the call site (hle_dialog.c) gives its UTF-8 text;
  *   2. passwords, URLs and mail addresses: UserCanceled, buffer untouched;
  *   3. a buffer the title already filled (its own suggestion): kept, Ok;
@@ -33,7 +35,7 @@ typedef u16 char16;
 #define IME_OPT_PASSWORD 4
 #define IME_OPT_OVER_2K 0x4000
 enum { TYPE_DEFAULT, TYPE_BASIC_LATIN, TYPE_URL, TYPE_MAIL, TYPE_NUMBER };
-enum { HOW_KEEP, HOW_TEXT, HOW_NAME, HOW_CANCEL }; /* the text policy's outcome */
+enum { HOW_KEEP, HOW_TEXT, HOW_NAME, HOW_CANCEL, HOW_TYPED }; /* the text policy's outcome */
 enum { END_OK, END_USER_CANCELED, END_ABORTED };
 
 /* What ImeDialogParam and ImeParam share (offsets up to 0x40):
@@ -123,7 +125,7 @@ static void ime_commit(struct ime_session *s)
         u32 n = utf8_to_16(s->buf, s->max, name);
         logf("dialog: IME text is the user name (%u characters)", n);
     }
-    if (s->filter && (s->how == HOW_TEXT || s->how == HOW_NAME)) {
+    if (s->filter && (s->how == HOW_TEXT || s->how == HOW_NAME || s->how == HOW_TYPED)) {
         char16 out[2049];
         u32 n = 0;
         s32 rc = ((s32(*)(char16 *, u32 *, const char16 *, u32))s->filter)(out, &n, s->buf, len16(s->buf, s->max));
@@ -137,7 +139,7 @@ static void ime_commit(struct ime_session *s)
 }
 
 static const char *const k_how[] = {"OK (the title's text kept)", "OK (override text)", "OK (user name)",
-                                    "USER_CANCELED"};
+                                    "USER_CANCELED", "on screen: the user types"};
 
 static void ime_log(const char *lib, const struct ime_session *s, u64 ra, const char16 *title)
 {
@@ -160,7 +162,7 @@ static void panel_size(u32 type, u32 option, bool dialog, u32 *w, u32 *h)
 static struct {
     volatile int lock;
     u32 status, polls, end;
-    bool committing;
+    bool committing, drawn;
     struct ime_session s;
 } g_imed;
 
@@ -193,13 +195,18 @@ static s32 hle_sceImeDialogInit(const void *p, const void *ext)
     s.how = ime_decide(&s, a, otext);
     spin_lock(&g_imed.lock);
     bool busy = g_imed.status != 0;
-    if (!busy) {
-        g_imed.s = s;
-        g_imed.status = 1, g_imed.polls = 1, g_imed.end = END_OK, g_imed.committing = false;
-    }
     spin_unlock(&g_imed.lock);
     if (busy)
         return IME_E_BUSY;
+    /* no override and no --dialog-cancel: the user types, where it can be drawn */
+    bool drawn = a == ANS_BTN1 && !otext &&
+                 ov_ime_open(s.buf, s.max, s.type, s.option, (const char16 *)RDPTR(p, 0x48));
+    if (drawn)
+        s.how = HOW_TYPED;
+    spin_lock(&g_imed.lock);
+    g_imed.s = s;
+    g_imed.status = 1, g_imed.polls = 1, g_imed.end = END_OK, g_imed.committing = false, g_imed.drawn = drawn;
+    spin_unlock(&g_imed.lock);
     if (ext)
         logf("dialog: ImeDialog extended option %x", RD32(ext, 0));
     ime_log("ImeDialog", &s, ra, (const char16 *)RDPTR(p, 0x48));
@@ -208,6 +215,27 @@ static s32 hle_sceImeDialogInit(const void *p, const void *ext)
 
 static u32 hle_sceImeDialogGetStatus(void)
 {
+    if (__atomic_load_n(&g_imed.status, __ATOMIC_ACQUIRE) == 1 && g_imed.drawn) {
+        ov_tick();
+        int st = ov_ime_state(g_imed.s.buf, g_imed.s.max);
+        if (st == 0)
+            return 1;
+        bool commit = false;
+        spin_lock(&g_imed.lock);
+        if (g_imed.status == 1 && !g_imed.committing)
+            commit = g_imed.committing = true;
+        spin_unlock(&g_imed.lock);
+        if (commit) {
+            if (st == 1)
+                ime_commit(&g_imed.s); /* the title's filter */
+            logf("dialog: ImeDialog %s on screen (%u characters)", st == 1 ? "entered" : "backed out of",
+                 len16(g_imed.s.buf, g_imed.s.max));
+            g_imed.end = st == 1 ? END_OK : END_USER_CANCELED;
+            ov_ime_end();
+            __atomic_store_n(&g_imed.status, 2, __ATOMIC_RELEASE);
+        }
+        return __atomic_load_n(&g_imed.status, __ATOMIC_ACQUIRE);
+    }
     bool commit = false;
     spin_lock(&g_imed.lock);
     u32 st = g_imed.status;
@@ -254,6 +282,8 @@ static s32 hle_sceImeDialogAbort(void)
     if (g_imed.status != 1)
         return IMED_E_NOT_RUNNING;
     g_imed.end = END_ABORTED, g_imed.status = 2; /* the buffer stays as it was */
+    if (g_imed.drawn)
+        ov_ime_end();
     logf("dialog: ImeDialog aborted by the title");
     return 0;
 }
@@ -262,6 +292,8 @@ static s32 hle_sceImeDialogForceClose(void)
 {
     if (!g_imed.status)
         return IMED_E_NOT_IN_USE;
+    if (g_imed.drawn && g_imed.status == 1)
+        ov_ime_end();
     g_imed.status = 0;
     return 0;
 }

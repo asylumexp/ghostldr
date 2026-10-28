@@ -126,7 +126,7 @@ class HomebrewPackTests(unittest.TestCase):
             {"TITLE_ID": "BREW00042", "TITLE": "Some Homebrew", "APP_VER": "01.02", "USER_DEFINED_PARAM_1": 5})})
         out = self.pack_main(src)
         info = json.loads((out / "BREW00042/layout.json").read_text())
-        self.assertEqual((info["prefix"], info["name"], info["version"]), ("G00042", "Some Homebrew", "01.02"))
+        self.assertEqual((info["prefix"], info["name"], info["version"]), ("GBREW00042", "Some Homebrew", "01.02"))
         self.assertEqual(info["app_params"], [3, 5, 0, 0, 0])
 
     def test_openorbis_homebrew_without_param_sfo(self) -> None:

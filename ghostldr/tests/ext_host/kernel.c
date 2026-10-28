@@ -235,6 +235,24 @@ static int real_pthread_create(u64 *thr, const void *attr, void *(*fn)(void *), 
     return 0;
 }
 
+/* SWRR's _fcntl on a PS5: F_SETFL on an internet socket from the JIT compiler is EACCES */
+static int g_nbio = -1;
+static s64 real_fcntl(s64 fd, s64 cmd, s64 arg)
+{
+    if (fd == 900 && cmd == 4) {
+        g_errno = 13;
+        return -1;
+    }
+    return 0;
+}
+static int real_setsockopt(int fd, int level, int name, const void *val, u32 len)
+{
+    if (fd != 900 || level != 0xFFFF || name != 0x1200 || len != 4)
+        return -1;
+    g_nbio = *(const int *)val;
+    return 0;
+}
+
 void *host_real(const char *name)
 {
     static const struct {
@@ -253,6 +271,8 @@ void *host_real(const char *name)
         {"sceKernelAioPollRequest", real_poll},
         {"pthread_create", real_pthread_create},
         {"sceKernelGetAppInfo", real_app_info},
+        {"_fcntl", real_fcntl},
+        {"setsockopt", real_setsockopt},
     };
     for (u32 i = 0; i < ARRAY_SIZE(k); i++)
         if (strcmp(k[i].name, name) == 0)
@@ -752,6 +772,16 @@ static void file_tests(void)
     g_errno = 0;
     expect(access("/app0/gfs/a.bin", 4) == 0 && access("/app0/gfs/a.bin", 2) == -1 && g_errno == 30,
            "files: access, read-only");
+    s32 (*ufcntl)(s32, s32, s64) = ext_fn("libkernel", "_fcntl");
+    expect(ufcntl && ufcntl(900, 4, 0x100006) == 0 && g_nbio == 1 && ufcntl(900, 4, 2) == 0 && g_nbio == 0,
+           "files: F_SETFL refused on a socket: O_NONBLOCK through SO_NBIO");
+    s32 (*kstat)(const char *, void *) = ext_fn("libkernel", "stat");
+    u8 dst[0x78];
+    g_errno = 0;
+    expect(access("/mnt", 0) == 0 && access("/mnt/", 0) == 0 && kstat && kstat("/mnt", dst) == 0 &&
+               (*(u16 *)(dst + 8) & 0170000) == 040000,
+           "files: /mnt, above /mnt/usb0, is a directory where SWRR shows none");
+    expect(access("/mntx", 0) == -1 && access("/mnt/usb0x", 0) == -1, "files: other missing paths stay missing");
     void *p = NULL;
     expect(mmap(NULL, 0x10, 1, 2, fd, 0, &p) == 0 && p && memcmp(p, "0123456789abcdef", 16) == 0,
            "files: mmap of a ghostfs file reads it");
@@ -795,6 +825,12 @@ static void identity_tests(void)
     expect(app_info(77, info) == 0 && strcmp((char *)info + 0x10, "CUSA99999") == 0, "AppInfo: the title's id");
     expect(argc() == 1 && strcmp(argv()[0], "/app0/eboot.bin") == 0 && !argv()[1], "getargc, getargv");
     expect(prospero() == 0, "sceKernelIsProspero: a PS4 title");
+    s32 (*reg_int)(u32, s32) = ext_fn("libSceRegMgr", "sceRegMgrSetInt");
+    s32 (*reg_bin)(u32, const void *, u32) = ext_fn("libSceRegMgr", "sceRegMgrSetBin");
+    u64 account = 1;
+    const s32 eperm = (s32)0x80020001;
+    expect(reg_int && reg_bin && reg_int(0x7800, 6) == eperm && reg_bin(0x7801, &account, 8) == eperm,
+           "RegMgr: the title's registry writes are refused");
 }
 
 void kernel_tests(void)

@@ -23,3 +23,8 @@ struct module *mod_by_addr(u64 addr) HIDDEN;
 bool title_vpath(const char *path, char *out, size_t size) HIDDEN;
 /* an IsGame module file ("libSceNpToolkit2.prx"): libSceSysmodule manages it (hle_sysmodule.c) */
 bool sysmod_is_game(const char *file) HIDDEN;
+
+/* the title's ID ("CUSA11456", "APOL00004"; hle_appcontent.c, "" with no title) */
+const char *title_ident(void);
+/* "/mnt/sandbox/<own ID>_000/x" -> "/x" in buf; other paths unchanged (hle_file.c) */
+const char *title_sandbox_path(const char *path, char *buf, size_t size) HIDDEN;

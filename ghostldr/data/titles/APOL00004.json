@@ -1,0 +1,7 @@
+{
+ "title": "APOL00004",
+ "name": "Apollo Save Tool",
+ "status": "in progress",
+ "notes": "Apollo Save Tool for PS4 (bucanero/apollo-ps4, content ID IV0000-APOL00004_00-APOLLO0000000PS4), homebrew. save_tool: the game selector asks whose saves to open and scans them before it starts (docs/selector.md). No eboot fingerprint: every build gets this profile.",
+ "features": ["save_tool"]
+}

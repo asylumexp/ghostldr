@@ -14,7 +14,7 @@
  * Library libSceFreeType is the module libSceFreeTypeOl.sprx provides
  * (resolve.c).
  */
-#include "ext.h"
+#include "kmod.h"
 
 #define TIOCGWINSZ 0x40087468UL
 
@@ -75,8 +75,14 @@ static s64 hb__writev(int fd, const struct iovec *iov, int n)
     return do_writev(fd, iov, n, real);
 }
 
+/* the virtual devices of a jailbroken title (hle_jbc.c; not in the ELF loader's extension) */
+bool jbc_ioctl(s32 fd, u64 req, u64 arg, s64 *rc) HIDDEN __attribute__((weak));
+
 static s64 do_ioctl(int fd, u64 req, u64 arg, fn6 real)
 {
+    s64 rc;
+    if (jbc_ioctl && jbc_ioctl(fd, req, arg, &rc))
+        return rc;
     if ((fd == 1 || fd == 2) && req == TIOCGWINSZ) {
         u16 *ws = (u16 *)arg;
         if (ws)
@@ -128,17 +134,86 @@ static volatile int g_faces_lock;
 
 #define FT_ERR_CANNOT_OPEN 1
 
+/* The first font file (.ttf, .otf, .ttc) among the title's own files, three
+ * directories deep at most: a stand-in for system fonts SWRR's sandbox lacks
+ * (homebrew for jailbroken consoles opens /preinst/common/font/... and
+ * /system_ex/.../fonts/..., which a PS4 app on a PS5 never sees).  "" if none. */
+static char g_title_font[256];
+static bool g_title_font_done;
+
+static bool font_name(const char *n, u32 len)
+{
+    if (len < 5)
+        return false;
+    const char *x = n + len - 4;
+    char e[5];
+    for (int k = 0; k < 4; k++)
+        e[k] = (char)(x[k] >= 'A' && x[k] <= 'Z' ? x[k] + 32 : x[k]);
+    e[4] = 0;
+    return strcmp(e, ".ttf") == 0 || strcmp(e, ".otf") == 0 || strcmp(e, ".ttc") == 0;
+}
+
+static bool font_walk(const char *dir, int depth)
+{
+    char buf[512];
+    int fd = vfs_open(remap_path(dir, buf, sizeof(buf)), 0x20000 /* O_DIRECTORY */, 0);
+    if (fd < 0)
+        return false;
+    static u8 dents[4096];
+    char sub[8][128];
+    u32 nsub = 0;
+    bool found = false;
+    for (int got; !found && (got = vfs_getdents(fd, dents, sizeof(dents))) > 0;)
+        for (int off = 0; off + 8 <= got && !found;) {
+            u16 reclen = *(u16 *)(dents + off + 4);
+            u8 type = dents[off + 6], nlen = dents[off + 7];
+            const char *name = (const char *)dents + off + 8;
+            if (!reclen)
+                break;
+            if (type == 8 && font_name(name, nlen)) {
+                fmt(g_title_font, sizeof(g_title_font), "%s/%s", dir, name);
+                found = true;
+            } else if (type == 4 && depth > 0 && nsub < 8 && name[0] != '.' && strlen(dir) + nlen + 2 < 128)
+                fmt(sub[nsub++], sizeof(sub[0]), "%s/%s", dir, name);
+            off += reclen;
+        }
+    vfs_close(fd);
+    for (u32 k = 0; k < nsub && !found; k++)
+        found = font_walk(sub[k], depth - 1);
+    return found;
+}
+
+static const char *title_font(void)
+{
+    if (!g_title_font_done) {
+        g_title_font_done = true;
+        if (!font_walk("/app0", 3))
+            g_title_font[0] = 0;
+        logf("homebrew: the title's own font for system fonts SWRR lacks: %s",
+             g_title_font[0] ? g_title_font : "none");
+    }
+    return g_title_font;
+}
+
 static s64 hb_FT_New_Face(void *lib, const char *path, s64 index, void **aface)
 {
     HOST("libSceFreeTypeOl", "FT_New_Face");
     static void *volatile mem_slot;
     fn6 mem = host_once(&mem_slot, "libSceFreeTypeOl", "FT_New_Memory_Face");
     int fd = -1;
+    char alias[512];
+    path = title_sandbox_path(path, alias, sizeof(alias));
     if (!path || gfs_open(path, 0, &fd) != 0) {
         /* not ghostfs's: SWRR's file calls reach it once remapped */
         char buf[512];
         const char *p = path ? remap_path(path, buf, sizeof(buf)) : path;
-        return real ? real((u64)lib, (u64)p, (u64)index, (u64)aface, 0, 0) : FT_ERR_CANNOT_OPEN;
+        s64 rc = real ? real((u64)lib, (u64)p, (u64)index, (u64)aface, 0, 0) : FT_ERR_CANNOT_OPEN;
+        const char *f;
+        if (rc != 0 && path && strncmp(path, "/app0/", 6) != 0 && *(f = title_font())) {
+            logf("FT_New_Face(%s) -> %ld: not in SWRR's sandbox; the title's %s instead", path, rc, f);
+            return hb_FT_New_Face(lib, f, index, aface);
+        }
+        return rc;
     }
     if (fd < 0 || !mem) {
         logf("FT_New_Face(%s): %x", path, fd);

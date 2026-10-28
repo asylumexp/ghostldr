@@ -222,7 +222,24 @@ static void *f_dlsym(u32 h, const char *name)
         return g_no_fde ? (void *)us_public_map : (void *)((u64)us_map2 + 0xA0);
     return NULL;
 }
-static void *f_host_real_in(const char *mod, const char *name) { return NULL; }
+/* SWRR's saved data: progress under the old default prefix of CUSA11111
+ * (G11111SAVE, from before prefixes took the whole title ID) */
+static int f_initial_user(int *u) { return *u = 0x1000, 0; }
+static int f_dir_search(const void *cond, void *res)
+{
+    const char *dir = *(const char *const *)((const char *)cond + 16);
+    unsigned hit = dir && strcmp(dir, "G11111SAVE") == 0;
+    *(unsigned *)res = hit;
+    return 0;
+}
+static void *f_host_real_in(const char *mod, const char *name)
+{
+    if (strcmp(name, "sceSaveDataDirNameSearch") == 0)
+        return (void *)f_dir_search;
+    if (strcmp(name, "sceUserServiceGetInitialUser") == 0)
+        return (void *)f_initial_user;
+    return NULL;
+}
 
 /* a path under the mount is the drive folder's */
 static const char *mnt(const char *path, char *buf, size_t size)
@@ -302,6 +319,9 @@ const struct appfs_ops *usb_attach(u32 flags)
     return usbfs_ops();
 }
 #endif
+
+/* the early entry's save scan (ext/src/save_prescan.c): not exercised here */
+int save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg) { return -1; }
 
 extern const struct ext_early g_approot_early;
 bool usb_session_open(void);

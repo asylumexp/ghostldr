@@ -418,6 +418,7 @@ int module_write_text(struct module *m)
         }
         hooks_patch_text(m, buf);
     }
+    ext_patch_text(m, buf, m->text_size);
     int rc = m->bx ? bx_write_text(m, buf) : arena_write(m->base, buf, m->text_size);
     page_free(buf, m->text_size);
     if (rc == 0 && m->relro_shadow) {

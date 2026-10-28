@@ -18,7 +18,8 @@
  * dependency order, on the title's main thread before its entry.  IsGame
  * modules (NpToolkit2, ...) are marked MOD_DEFERRED by the extension's
  * sysmodule family and start at the title's sceSysmoduleLoadModule, as on
- * hardware.  A module starts through its DT_INIT (else e_entry):
+ * hardware.  A module starts through its DT_INIT (else e_entry; a stub prx
+ * whose e_entry is its interpreter's path has nothing to start):
  * int init(size_t argc, const void *argp, int (*start)(size_t, const void *)).
  */
 #include "ghost.h"
@@ -216,6 +217,14 @@ COLD int module_start(struct module *m, u64 argc, const void *argp)
         return 0;
     if (m->has_init && m->init != m->entry)
         logf("%s: DT_INIT %lx differs from e_entry %lx: starting through DT_INIT", m->name, m->init, m->entry);
+    /* OpenOrbis stub prx (empty libc.prx, libSceFios2.prx) with no DT_INIT:
+     * e_entry points at the interpreter's path, not code; nothing to start */
+    if (!m->has_init && memcmp((const void *)(m->base + m->entry), "/libexec/", 9) == 0) {
+        logf("module_start %s: no DT_INIT, and e_entry is the interpreter's path: nothing to start", m->name);
+        m->start_rc = 0;
+        __atomic_store_n(&m->start_state, MOD_STARTED, __ATOMIC_RELEASE);
+        return 0;
+    }
     int (*start)(u64, const void *, void *) = (void *)(m->base + (m->has_init ? m->init : m->entry));
     logf("module_start %s at %p", m->name, start);
     int rc = start(argc, argp, NULL);

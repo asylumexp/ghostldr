@@ -750,7 +750,7 @@ class AppRootTests(unittest.TestCase):
         r = self.run_root("usb:/", *self.ANY, "--title", "CUSA11456")    # the first copy
         root = "/ghostldr_usb/My Games/ghost of tsushima"
         self.assertEqual(r["init"], (0, root, root, False))
-        self.assertEqual((r["profile"], r["saves"], r["eboot"]), ("CUSA11456", "CUSA11456 G11456SAVE", "found 26"))
+        self.assertEqual((r["profile"], r["saves"], r["eboot"]), ("CUSA11456", "CUSA11456 GCUSA11456SAVE", "found 26"))
         r = self.run_root("usb:/", *self.ANY, "--pick-at", "2")         # the selector's second copy
         root = "/ghostldr_usb/ghostldr/CUSA11456/app0"
         self.assertEqual(r["pick"], (0, root, root, False))
@@ -819,7 +819,7 @@ class AppRootTests(unittest.TestCase):
         r = self.run_root("usb:/ghostldr/", *self.MAP, "--title", "CUSA11111")
         root = f"{self.LIB}/CUSA11111/app0"
         self.assertEqual(r["init"], (0, root, root, False))
-        self.assertEqual(r["saves"], "CUSA11111 G11111SAVE")             # gfs_pack.py's default prefix
+        self.assertEqual(r["saves"], "CUSA11111 G11111SAVE")             # its progress from before 2026-10-28
         self.assertEqual(r["eboot"], "found 11")
 
     def test_the_ftp_server_s_drive(self) -> None:
@@ -874,7 +874,7 @@ class AppRootTests(unittest.TestCase):
         self.assertEqual(r["saves"], "CUSA11111 G11111SAVE")
         r = self.run_root("usb:/games/mygame", *self.MAP)                # named by param.sfo
         self.assertEqual(r["init"][:2], (0, "/ghostldr_usb/games/mygame"))
-        self.assertEqual((r["profile"], r["saves"]), ("CUSA44444", "CUSA44444 G44444SAVE"))
+        self.assertEqual((r["profile"], r["saves"]), ("CUSA44444", "CUSA44444 GCUSA44444SAVE"))
         r = self.run_root("usb:/games/nosfo", *self.MAP)                 # nothing names it
         self.assertEqual(r["init"][0], -1)
         self.assertIn("pass run.py --title", r["log"])
@@ -1074,7 +1074,7 @@ class UsbDriveToolTests(unittest.TestCase):
         out = subprocess.run([sys.executable, str(ROOT / "ghostldr/host/gfs_pack.py"), "--src", str(src), "--usb",
                               str(self.drive)], capture_output=True, text=True, timeout=120)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertIn("progress goes to G54321SAVE", out.stdout)
+        self.assertIn("progress goes to GCUSA54321SAVE", out.stdout)
         self.assertIn("checked: 5 file sizes and 3 file(s) byte for byte", out.stdout)
         self.assertIn("python3 ghostldr.py boot CUSA54321", out.stdout)
         self.assertTrue((self.drive / "ghostldr/CUSA54321/app0/eboot.bin").is_file())

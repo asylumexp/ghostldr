@@ -75,7 +75,8 @@ class FakeConsole:
         self.ops.append(("delete", d))
         if self.protected(d):
             return 0xFFFFFFFD
-        return 0 if self.saves.pop(d, None) is not None else NOT_FOUND
+        self.saves.pop(d, None)
+        return 0               # a 13.60 PS5 answers 0 for a name that doesn't exist too
 
     def delsave(self, d: str) -> int:
         self.ops.append(("delsave", d))
@@ -180,27 +181,27 @@ class InstallTests(unittest.TestCase):
     def test_fresh_install_writes_tagged_containers_index_and_catalogue(self) -> None:
         info, index, src = self.title("CUSA11111", {"eboot.bin": b"E" * 100, "data/a.bin": b"A" * 90})
         install(self.console, info, index, src)
-        self.assertEqual(self.console.saves["G11111INDEX"]["index.bin"], index)
+        self.assertEqual(self.console.saves["GCUSA11111INDEX"]["index.bin"], index)
         self.assertNotIn("GFSINDEX", self.console.saves)
         self.assertEqual(payload(self.console, info), b"E" * 100 + b"A" * 90)
         for k, c in enumerate(info["containers"]):
             tag = self.console.saves[c["dir"]]["gfs.tag"]
             self.assertEqual(tag, gi.tag_bytes(int(info["layout_id"], 16), k, c["size"]))
         e = catalogue(self.console).find("CUSA11111")
-        self.assertEqual((e.prefix, e.index, e.containers, e.complete), ("G11111", "G11111INDEX", 3, True))
+        self.assertEqual((e.prefix, e.index, e.containers, e.complete), ("GCUSA11111", "GCUSA11111INDEX", 3, True))
         self.assertEqual(e.layout_id, int(info["layout_id"], 16))
 
     def test_another_title_is_installed_beside_the_first(self) -> None:
         a, ia, sa = self.title("CUSA11111", {"eboot.bin": b"a" * 300})
         install(self.console, a, ia, sa)
-        self.console.saves["G11111SAVE"] = {"sdmemory_0.bin": b"progress"}
-        before = {d: dict(f) for d, f in self.console.saves.items() if d.startswith("G11111")}
+        self.console.saves["GCUSA11111SAVE"] = {"sdmemory_0.bin": b"progress"}
+        before = {d: dict(f) for d, f in self.console.saves.items() if d.startswith("GCUSA11111")}
         b, ib, sb = self.title("CUSA22222", {"eboot.bin": b"b" * 70})
         self.console.ops.clear()
         install(self.console, b, ib, sb)
         touched = {op[1] for op in self.console.changes()}
-        self.assertFalse([d for d in touched if d.startswith("G11111")], touched)
-        self.assertEqual({d: f for d, f in self.console.saves.items() if d.startswith("G11111")}, before)
+        self.assertFalse([d for d in touched if d.startswith("GCUSA11111")], touched)
+        self.assertEqual({d: f for d, f in self.console.saves.items() if d.startswith("GCUSA11111")}, before)
         self.assertEqual(payload(self.console, a), b"a" * 300)
         self.assertEqual(payload(self.console, b), b"b" * 70)
         self.assertEqual(sorted(e.title for e in catalogue(self.console).entries), ["CUSA11111", "CUSA22222"])
@@ -208,26 +209,26 @@ class InstallTests(unittest.TestCase):
     def test_same_title_complete_sends_nothing(self) -> None:
         info, index, src = self.title("CUSA11111", {"eboot.bin": b"x" * 150})
         install(self.console, info, index, src)
-        self.console.saves["G11111000"]["data.bin"] = b"untouched marker"
+        self.console.saves["GCUSA11111000"]["data.bin"] = b"untouched marker"
         self.console.ops.clear()
         steps = install(self.console, info, index, src)
         self.assertEqual(steps, [])
         self.assertEqual(self.console.changes(), [])
-        self.assertEqual(self.console.saves["G11111000"]["data.bin"], b"untouched marker")
+        self.assertEqual(self.console.saves["GCUSA11111000"]["data.bin"], b"untouched marker")
 
     def test_interrupted_install_resumes_and_is_never_bootable_meanwhile(self) -> None:
         info, index, src = self.title("CUSA11111", {"eboot.bin": b"y" * 200})
-        self.console.fail_put = "G11111002"
+        self.console.fail_put = "GCUSA11111002"
         with self.assertRaises(SystemExit):
             install(self.console, info, index, src)
-        hdr = gi.parse_header("G11111INDEX", self.console.saves["G11111INDEX"]["index.bin"])
+        hdr = gi.parse_header("GCUSA11111INDEX", self.console.saves["GCUSA11111INDEX"]["index.bin"])
         self.assertTrue(hdr.incomplete)           # ghostfs.c refuses to boot this
         self.assertFalse(catalogue(self.console).find("CUSA11111").complete)
         self.console.fail_put = None
         steps = install(self.console, info, index, src)
         self.assertEqual([s[1] for s in steps if s[0] == "put"], [2, 3])
         self.assertEqual(payload(self.console, info), b"y" * 200)
-        self.assertFalse(gi.parse_header("G11111INDEX", self.console.saves["G11111INDEX"]["index.bin"]).incomplete)
+        self.assertFalse(gi.parse_header("GCUSA11111INDEX", self.console.saves["GCUSA11111INDEX"]["index.bin"]).incomplete)
         self.assertTrue(catalogue(self.console).find("CUSA11111").complete)
 
     def test_new_layout_replaces_only_its_own_containers(self) -> None:
@@ -235,16 +236,58 @@ class InstallTests(unittest.TestCase):
         install(self.console, a, ia, sa)
         b, ib, sb = self.title("CUSA22222", {"eboot.bin": b"b" * 200})
         install(self.console, b, ib, sb)
-        self.assertIn("G22222003", self.console.saves)
-        self.console.saves["G22222SAVE"] = {"sdmemory_0.bin": b"kept"}
+        self.assertIn("GCUSA22222003", self.console.saves)
+        self.console.saves["GCUSA22222SAVE"] = {"sdmemory_0.bin": b"kept"}
         (sb / "eboot.bin").write_bytes(b"c" * 70)            # a smaller layout of the same title
         b2, ib2, _ = make_title(self.root, "CUSA22222", {"eboot.bin": b"c" * 70})
         install(self.console, b2, ib2, sb)
         self.assertEqual(payload(self.console, b2), b"c" * 70)
-        self.assertNotIn("G22222002", self.console.saves)    # swept: past the new count
-        self.assertNotIn("G22222003", self.console.saves)
-        self.assertEqual(self.console.saves["G22222SAVE"], {"sdmemory_0.bin": b"kept"})
+        self.assertNotIn("GCUSA22222002", self.console.saves)    # swept: past the new count
+        self.assertNotIn("GCUSA22222003", self.console.saves)
+        self.assertEqual(self.console.saves["GCUSA22222SAVE"], {"sdmemory_0.bin": b"kept"})
         self.assertEqual(payload(self.console, a), b"a" * 200)
+
+    def test_deletes_touch_only_this_titles_containers(self) -> None:
+        a, ia, sa = self.title("CUSA11111", {"eboot.bin": b"a" * 200})
+        install(self.console, a, ia, sa)
+        other_tag = gi.tag_bytes(0x1234, 5, 64)                   # another title's, under the same names
+        self.console.saves["GCUSA11111005"] = {"data.bin": b"other", gi.TAG: other_tag}
+        self.console.saves["GCUSA11111006"] = {"data.bin": b"untagged"}
+        a2, ia2, _ = make_title(self.root, "CUSA11111", {"eboot.bin": b"c" * 70})
+        install(self.console, a2, ia2, sa)
+        self.assertNotIn("GCUSA11111003", self.console.saves)    # this title's, past the new count: swept
+        self.assertIn("GCUSA11111005", self.console.saves)       # tagged for another layout: left
+        self.assertIn("GCUSA11111006", self.console.saves)       # no tag, past the title's range: left
+        deletes = [op[1] for op in self.console.changes() if op[0] == "delete"]
+        self.assertFalse([d for d in deletes if d.startswith("GCUSA11111") and d[-3:].isdigit()
+                          and int(d[-3:]) > 6], deletes)          # no blind deletes of names that don't exist
+        remove(self.console, "CUSA11111")
+        self.assertEqual(sorted(d for d in self.console.saves if d.startswith("GCUSA11111")),
+                         ["GCUSA11111005", "GCUSA11111006"])
+
+    def test_titles_with_the_same_digits_have_their_own_containers(self) -> None:
+        a, ia, sa = self.title("APOL00004", {"eboot.bin": b"a" * 100})
+        b, ib, sb = self.title("CUSA00004", {"eboot.bin": b"b" * 100})
+        install(self.console, a, ia, sa)
+        install(self.console, b, ib, sb)
+        self.assertEqual((a["prefix"], b["prefix"]), ("GAPOL00004", "GCUSA00004"))
+        self.assertEqual((payload(self.console, a), payload(self.console, b)), (b"a" * 100, b"b" * 100))
+
+    def test_a_title_installed_with_the_old_default_prefix_keeps_it(self) -> None:
+        old, iold, sold = make_title(self.root, "CUSA11111", {"eboot.bin": b"a" * 200}, prefix="G11111")
+        install(self.console, old, iold, sold)
+        self.console.saves["G11111SAVE"] = {"sdmemory_0.bin": b"progress"}
+        new, inew, snew = make_title(self.root, "CUSA11111", {"eboot.bin": b"d" * 130})
+        self.assertEqual(new["prefix"], "GCUSA11111")
+        inew = gi.keep_installed_prefix(self.console, gi.parse_header(gc.index_name(new["prefix"]), inew), new, inew)
+        install(self.console, new, inew, snew)
+        e = catalogue(self.console).find("CUSA11111")
+        self.assertEqual((e.prefix, e.index), ("G11111", "G11111INDEX"))
+        self.assertEqual(payload(self.console, new), b"d" * 130)
+        self.assertEqual(self.console.saves["G11111SAVE"], {"sdmemory_0.bin": b"progress"})
+        self.assertFalse([d for d in self.console.saves if d.startswith("GCUSA11111")])
+        self.assertEqual(gi.parse_header("G11111INDEX", self.console.saves["G11111INDEX"]["index.bin"]).prefix,
+                         "G11111")
 
     def test_not_enough_space_stops_before_anything_changes(self) -> None:
         a, ia, sa = self.title("CUSA11111", {"eboot.bin": b"a" * 100})
@@ -273,11 +316,11 @@ class InstallTests(unittest.TestCase):
         b, ib, sb = self.title("CUSA22222", {"eboot.bin": b"b" * 100})
         install(self.console, a, ia, sa)
         install(self.console, b, ib, sb)
-        self.console.saves["G11111SAVE"] = {"sdmemory_0.bin": b"progress"}
+        self.console.saves["GCUSA11111SAVE"] = {"sdmemory_0.bin": b"progress"}
         self.console.saves["SLUS-20268"] = {"VMC0.card": b"swrr"}
         remove(self.console, "CUSA11111")
-        self.assertFalse([d for d in self.console.saves if d.startswith("G11111") and d != "G11111SAVE"])
-        self.assertIn("G11111SAVE", self.console.saves)
+        self.assertFalse([d for d in self.console.saves if d.startswith("GCUSA11111") and d != "GCUSA11111SAVE"])
+        self.assertIn("GCUSA11111SAVE", self.console.saves)
         self.assertEqual(payload(self.console, b), b"b" * 100)
         self.assertEqual([e.title for e in catalogue(self.console).entries], ["CUSA22222"])
         self.assertIn("SLUS-20268", self.console.saves)
@@ -285,7 +328,7 @@ class InstallTests(unittest.TestCase):
     def test_remove_with_saves_deletes_the_progress_but_never_swrrs_save(self) -> None:
         a, ia, sa = self.title("CUSA11111", {"eboot.bin": b"a" * 100})
         install(self.console, a, ia, sa)
-        for name in ("G11111SAVE", "G11111D001SAVE", "G11111D002SAVE", "G11111M00SAVE", "SLUS-20268", "SLES-50366"):
+        for name in ("GCUSA11111SAVE", "GCUSA11111D001SAVE", "GCUSA11111D002SAVE", "GCUSA11111M00SAVE", "SLUS-20268", "SLES-50366"):
             self.console.saves[name] = {"x": b"1"}
         remove(self.console, "CUSA11111", saves=True)
         self.assertEqual(sorted(self.console.saves), [gc.CATALOG, "SLES-50366", "SLUS-20268"])
@@ -297,7 +340,7 @@ class InstallTests(unittest.TestCase):
         real = self.console.delete
 
         def flaky(d: str) -> int:
-            if d == "G11111001":
+            if d == "GCUSA11111001":
                 raise SystemExit("connection lost")
             return real(d)
         with mock.patch.object(self.console, "delete", side_effect=flaky):
@@ -314,7 +357,7 @@ class InstallTests(unittest.TestCase):
         gm.write_pack_meta(info, out, profiles.load("CUSA11111"), log=lambda s: None)
         steps = install(self.console, info, index, src)
         self.assertEqual(steps[-2:], [("catalog", steps[-2][1]), ("meta",)])     # after the title is complete
-        meta = self.console.saves["G11111META"][gm.META_FILE]
+        meta = self.console.saves["GCUSA11111META"][gm.META_FILE]
         self.assertEqual(meta, (out / gm.META_FILE).read_bytes())
         self.assertEqual(gm.parse(meta)["sections"][gm.SECT_ICON]["source"], gm.ART_TITLE)
         self.assertEqual(install(self.console, info, index, src), [])           # the same: nothing to send
@@ -323,9 +366,9 @@ class InstallTests(unittest.TestCase):
         gm.write_pack_meta(info, out, profiles.load("CUSA11111"), backdrop=backdrop, log=lambda s: None)
         self.console.ops.clear()
         self.assertEqual(install(self.console, info, index, src), [("meta",)])
-        self.assertEqual(self.console.changes(), [("put", "G11111META")])
+        self.assertEqual(self.console.changes(), [("put", "GCUSA11111META")])
         remove(self.console, "CUSA11111")
-        self.assertNotIn("G11111META", self.console.saves)
+        self.assertNotIn("GCUSA11111META", self.console.saves)
 
     def test_receiver_refuses_to_touch_progress(self) -> None:
         self.console.saves["GHOSTSAVE"] = {"x": b"1"}
@@ -506,7 +549,7 @@ class CommandLineTests(unittest.TestCase):
 
 class CatalogueTests(unittest.TestCase):
     def test_round_trip_keeps_unknown_bytes_and_sorts(self) -> None:
-        cat = gc.Catalogue([gc.Entry("CUSA22222", "G22222", "G22222INDEX", "Zweite", "01.00", 7, 99, 1, 0, 5,
+        cat = gc.Catalogue([gc.Entry("CUSA22222", "GCUSA22222", "GCUSA22222INDEX", "Zweite", "01.00", 7, 99, 1, 0, 5,
                                      b"future"),
                             gc.Entry("CUSA11456", "GHOST", "GFSINDEX", "Ghost of Tsushima", "02.18", 0xe73b, 1, 56,
                                      gc.LEGACY_INDEX)], 3)

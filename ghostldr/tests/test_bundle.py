@@ -169,7 +169,7 @@ class ElfldrExtension(unittest.TestCase):
         import check_ext
         b = check_ext.Blob((OUT / "ext-elfldr.bin").read_bytes())
         self.assertEqual((b.nid_count, b.str_size), (0, 1))
-        self.assertLess(b.image_memsz, 160 << 10)          # the full one needs 432 KiB of executable memory
+        self.assertLess(b.image_memsz, 160 << 10)          # 128 KiB built with -Os; the full one needs 608 KiB
 
     def test_payload_families_only_and_unchanged(self) -> None:
         """The families a payload binds to, as in the full extension (the same
@@ -491,7 +491,7 @@ class BundleCache(FakeConsole):
         self.assertEqual((self.saves / "GLDRCACHE/.blocks").read_text(), "512")   # 16 MiB
         self.assertIn(("mount", "GLDRCACHE 6 512 0"), r["saves"])
         self.assertIn("ghostldr: cached ghostldr-ext.bin in this console's saved data (GLDRCACHE save container "
-                      "16.0 MiB, 2.7 MiB): from now on send ghostldr.lua alone", r["sent"])
+                      f"16.0 MiB, {self.full.stat().st_size / 1048576:.1f} MiB): from now on send ghostldr.lua alone", r["sent"])
         self.assertEqual(r["ctx"][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE)
         self.assertIn("core-ext ok", r["out"])
         # the cache is written before the core has the bundle's memory
@@ -775,7 +775,7 @@ class BundleCache(FakeConsole):
         r = self.boot(f"client={self.full}", platform="PS4", fw="12.02")
         self.assertEqual(self.cached(), self.full.read_bytes())
         self.assertEqual(r["clock"], 0)
-        self.assertIn("received ghostldr-ext.bin (2853066 bytes", "\n".join(r["sent"]))
+        self.assertIn(f"received ghostldr-ext.bin ({self.full.stat().st_size} bytes", "\n".join(r["sent"]))
 
     def test_ps4_ignores_a_cached_elf_loader_bundle(self) -> None:
         self.cache(self.slim.read_bytes())

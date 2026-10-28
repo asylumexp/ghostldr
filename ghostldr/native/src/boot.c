@@ -46,6 +46,32 @@ int ghost_elfldr(void)
     return rc;
 }
 
+/* Save tools (PF_SAVE_TOOL, docs/selector.md): the user whose saves the
+ * title opens, as the game selector chose it; 0: the user running SWRR. */
+u32 g_title_user;
+
+/* The title the game selector chose, mounted once: by the selector itself
+ * before a save tool's scan (ghost_api.title_pick), else after it returns.
+ * g_choose: ghostfs or a library left the choice to the selector (0: the
+ * title is mounted already). */
+static int g_choose, g_pick_rc = 1; /* 1: not yet */
+static bool g_library;
+static const char *g_pick_root;
+
+int boot_title_pick(const char *title, int index)
+{
+    if (g_pick_rc == 1)
+        g_pick_rc = !g_choose ? 0
+                    : g_library ? ext_approot_pick(title, index, &g_pick_root)
+                    : gfs_pick(title) ? -1 : 0;
+    return g_pick_rc;
+}
+
+int boot_save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg)
+{
+    return g_pick_rc ? -1 : ext_save_prescan(user, progress, arg);
+}
+
 int ghost_boot(void)
 {
     const char *root = (const char *)g_ctx->app_root;
@@ -120,13 +146,18 @@ int ghost_boot(void)
     /* ---- game selector (sel.c): it picks the title before its index is
      * loaded and its memory planned, and frees all it used first ---- */
     char title[16];
-    int picked = sel_run(choose || (g_ctx->flags & CTX_FLAG_SELECT), title);
-    if (choose && library && ext_approot_pick(picked >= 0 ? title : NULL, picked, &root) != 0) {
-        ext_abandon();
+    g_choose = choose, g_library = library;
+    /* a save tool (Apollo) asks whose saves even when it is the only title */
+    int picked = sel_run(choose || (g_ctx->flags & CTX_FLAG_SELECT) || profile_has(PF_SAVE_TOOL), title);
+    if (boot_title_pick(picked >= 0 ? title : NULL, picked) != 0) {
+        if (library)
+            ext_abandon();
         return -6;
     }
-    if (choose && !library && gfs_pick(picked >= 0 ? title : NULL) != 0)
-        return -6;
+    if (choose && library)
+        root = g_pick_root;
+    if (g_title_user)
+        logf("boot: saves of user %x", g_title_user);
 
     int rc = modules_load_boot(root, &g_main_mod);
     if (rc != 0)

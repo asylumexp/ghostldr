@@ -238,6 +238,12 @@ static s32 f_receive_event(u8 *ev)
 }
 
 static s32 f_initial_user(s32 *u) { return *u = 0x1001, 0; }
+/* the pad: which user's controller the title opened */
+static s32 g_pad_opened = -1;
+static s32 f_pad_open(s32 user, s32 type, s32 index, const void *param) { return g_pad_opened = user, 0x100 | (user & 0xF); }
+static s32 f_pad_handle(s32 user, s32 type, s32 index) { return 0x200 | (user & 0xF); }
+/* ghost_api.title_user: the user picked in the game selector (0: none) */
+u32 g_title_user;
 static s32 f_login_list(s32 *ids)
 {
     memcpy(ids, g_login, sizeof(g_login));
@@ -279,6 +285,8 @@ void *host_real_in(const char *mod, const char *name)
         {"libSceUserService", "sceUserServiceGetEvent", f_us_get_event},
         {"libSceAppContent", "sceAppContentTemporaryDataGetAvailableSpaceKb", f_temp_space},
         {"libSceNpGameIntent", "sceNpGameIntentInitialize", f_gi_initialize},
+        {"libScePad", "scePadOpen", f_pad_open},
+        {"libScePad", "scePadGetHandle", f_pad_handle},
     };
     for (u32 i = 0; i < ARRAY_SIZE(fakes); i++)
         if (strcmp(fakes[i].mod, mod) == 0 && strcmp(fakes[i].name, name) == 0)
@@ -333,6 +341,7 @@ const struct ghost_api g_ghost_api = {
     .vfs_close = vfs_close,
     .title_id = title_id,
     .path_remap_add = path_remap_add,
+    .title_user = &g_title_user,
 };
 
 /* ---- the families' functions, found as a title's imports would be ---- */
@@ -532,6 +541,24 @@ static void users(void)
            "the registered users, from the login list when the secondary library is out of reach");
 }
 
+/* a save tool started for a user picked in the game selector */
+static void picked(void)
+{
+    s32 (*initial)(s32 *) = FN(s32(*)(s32 *), US, "sceUserServiceGetInitialUser");
+    s32 (*open)(s32, s32, s32, const void *) = FN(s32(*)(s32, s32, s32, const void *), "libScePad", "scePadOpen");
+    s32 (*handle)(s32, s32, s32) = FN(s32(*)(s32, s32, s32), "libScePad", "scePadGetHandle");
+    s32 u = 0;
+    expect(initial(&u) == 0 && u == 0x1001 && open(u, 0, 0, NULL) == 0x101 && g_pad_opened == 0x1001,
+           "nobody picked: SWRR's user and its pad");
+    g_title_user = 0x1002;
+    expect(initial(&u) == 0 && u == 0x1002, "the picked user is the title's initial user");
+    expect(open(u, 0, 0, NULL) == 0x101 && g_pad_opened == 0x1001 && handle(u, 0, 0) == 0x201,
+           "its pad is the controller of SWRR's user (who picked)");
+    expect(open(0x1003, 0, 0, NULL) == 0x103 && g_pad_opened == 0x1003, "another user's pad stays that user's");
+    g_title_user = 0x1001;
+    expect(initial(&u) == 0 && u == 0x1001 && open(u, 0, 0, NULL) == 0x101, "SWRR's user picked: nothing changes");
+}
+
 static void playgo(bool dat)
 {
     s32 (*init)(const u64 *) = FN(s32(*)(const u64 *), PG, "scePlayGoInitialize");
@@ -666,6 +693,8 @@ int main(int argc, char **argv)
         events();
     else if (strcmp(mode, "users") == 0)
         users();
+    else if (strcmp(mode, "picked") == 0)
+        picked();
     else if (strcmp(mode, "playgo") == 0 || strcmp(mode, "playgo-dat") == 0)
         playgo(strcmp(mode, "playgo-dat") == 0);
     else if (strcmp(mode, "discmap") == 0)

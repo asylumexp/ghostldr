@@ -78,6 +78,7 @@ The first opens TCP 9021 on the PS5 and waits five minutes for the second; a jai
 - [FTP server](docs/ftp.md): the console's files over FTP while a title runs.
 - [ELF loader](docs/elfldr.md): run ELF payloads in SWRR without a game, and build them.
 - [Web manager](docs/manager.md): save backup and restore from a browser.
+- [Resign a save](docs/save-resign.md): another account's PS4 save into your own save of the game, with no jailbreak (tested on a PS5).
 - [Host tooling](docs/host-tooling.md): `ghostldr.py`'s commands, `run.py doctor`, the boot preflight, the stub report.
 - [ghostfs](docs/ghostfs-catalogue.md): container names and the title catalogue.
 - [PS4](docs/ps4.md): status and the diagnostic to run.

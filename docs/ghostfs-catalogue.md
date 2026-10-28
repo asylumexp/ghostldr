@@ -14,7 +14,8 @@ Everything here lives in SWRR's saved data for the signed-in user, in the SWRR r
 
 Each title has a **prefix**: 1–12 characters of `A`–`Z 0-9`, unique among the installed titles.
 
-- The default is `G` and the five digits of a normal title ID (`CUSA12345` → `G12345`); other IDs get `G` and their first 11 letters and digits. A profile can set its own (Ghost of Tsushima: `GHOST`), and so can `gfs_pack.py --prefix`.
+- The default is `G` and the title ID's letters and digits (`CUSA12345` → `GCUSA12345`), the first 11 of them for a longer ID; one that would start with `GFS` starts with `T` instead, and one that would end like a save directory (below) ends in `X`. A profile can set its own (Ghost of Tsushima: `GHOST`), and so can `gfs_pack.py --prefix`.
+- **Before 2026-10-28 the default was `G` and only the five digits** (`CUSA12345` → `G12345`), so two titles with the same digits (`APOL00004`, `CUSA00004`) got the same names. Titles installed or played then keep that prefix: `gfs_install.py` installs a title under the prefix its catalogue entry already has when the only difference is this rule (the pack's container names and index header are relabelled; its progress `<old>SAVE` stays its own), and a title run from a USB drive without a `prefix` file uses the old prefix when its progress is there and none is under the new one (`approot.c`).
 - A prefix must not start with `GFS` (ghostldr's shared names) and must not end with `D` and 3 digits or `M` and 2 digits (that would make its `<prefix>SAVE` look like another title's save directory).
 - The prefix also names the title's progress, so it must not change once the title has been played.
 
@@ -90,11 +91,11 @@ Readers take `header_size` and `entry_size` from the header (a later version may
   2. catalogue: add or update `T`'s entry, flags `INCOMPLETE`;
   3. `<P>INDEX`: a header-only index with its `INCOMPLETE` flag;
   4. if `T` was a legacy install (`GFSINDEX`/`GHOSTIDX` with prefix `<P>`) and its data is about to change, delete that legacy index;
-  5. the data containers `<P>000` … (each gets `gfs.tag` when complete; a rerun keeps the tagged ones), then delete `<P>` data containers past the new count;
+  5. the data containers `<P>000` … (each gets `gfs.tag` when complete; a rerun keeps the tagged ones), then delete `<P>` data containers past the new count that are this title's: their `gfs.tag` names one of its layouts (the old or the new) and that container number. A container that is there but not attributable (another layout's tag, or none) is left and named in the log. A 13.60 PS5 answers 0 to a delete of a name that doesn't exist, so a name is deleted only after a read shows it exists;
   6. the full `<P>INDEX`;
   7. catalogue: clear `INCOMPLETE`, set the layout id, size and count.
   Other titles' containers are never deleted to make room.
-- **Removing** title `T`: mark its entry `INCOMPLETE`, delete its index container, then `<P>000` … `<P>095`, then `<P>META`, then drop the entry. `<P>SAVE`, `<P>D<nnn>SAVE` and `<P>M<nn>SAVE` are deleted only when the user asks for the progress to go too (`--remove-saves`).
+- **Removing** title `T`: mark its entry `INCOMPLETE`, delete its index container, then those of `<P>000` … `<P>095` that are its own (tagged with its layout, or untagged inside its catalogued count), then `<P>META` if it names `T`, then drop the entry. `<P>SAVE`, `<P>D<nnn>SAVE` and `<P>M<nn>SAVE` are deleted only when the user asks for the progress to go too (`--remove-saves`).
 - **No catalogue** (an install made by v0.1.x tools): the only title is the one in `GFSINDEX`, else `GHOSTIDX`. The installer writes the catalogue, with that title as a legacy entry, the first time it runs.
 - **A lost or damaged catalogue** (bad magic, size not `header_size + count × entry_size`): treat it as missing. `gfs_install.py` rebuilds it from the index headers it can find (the legacy names and the prefixes of the titles it knows).
 

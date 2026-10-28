@@ -244,6 +244,21 @@ HIDDEN const char *usb_ftp_home(void)
     return m ? USB_MOUNT : "/";
 }
 
+/* "/mnt/usb0/x": where a jailbroken PS4's apps see its first USB drive, and
+ * homebrew made for one looks for it.  The drive ghostldr mounts in SWRR's
+ * sandbox (usb_ftp_home: mounted now if it was plugged in later) stands in
+ * for it; with no drive the path stays as it is and isn't found. */
+HIDDEN const char *usb_title_remap(const char *path, char *buf, size_t size)
+{
+    if (strncmp(path, "/mnt/usb0", 9) != 0 || (path[9] != '/' && path[9] != 0))
+        return NULL;
+    const char *home = usb_ftp_home();
+    if (strcmp(home, USB_MOUNT) != 0)
+        return NULL;
+    fmt(buf, size, "%s%s", USB_MOUNT, path + 9);
+    return buf;
+}
+
 static bool is_file(const char *dir, const char *name)
 {
     char p[320];
@@ -384,9 +399,63 @@ static void profile_prefix(const char *title, char prefix[16])
     }
 }
 
+/* the host's own save directory name exists (one exact DirNameSearch) */
+static bool host_save_exists(const char *name)
+{
+    s32 (*search)(const void *, void *) = host_real_in("libSceSaveData", "sceSaveDataDirNameSearch");
+    s32 (*initial)(s32 *) = host_real_in("libSceUserService", "sceUserServiceGetInitialUser");
+    s32 user = -1;
+    if (!search || !initial || initial(&user) != 0)
+        return false;
+    struct {
+        s32 user;
+        u32 pad;
+        const char *title, *dir;
+        u32 key, order;
+        u8 reserved[32];
+    } c;
+    struct {
+        u32 hits, pad;
+        char *dirs;
+        u32 ndirs, set;
+        void *params, *infos;
+        u8 reserved[12];
+    } r;
+    char dirs[32];
+    memset(&c, 0, sizeof(c)), memset(&r, 0, sizeof(r));
+    c.user = user, c.dir = name;
+    r.dirs = dirs, r.ndirs = 1;
+    return search(&c, &r) == 0 && r.hits > 0;
+}
+
+/* G + the title ID's letters and digits, at most 12 (host/profiles.py
+ * default_prefix); legacy: before 2026-10-28, G + only the digits of a
+ * CUSA-style ID (legacy_prefix), which two titles could share */
+static void default_prefix(const char *title, char prefix[16], bool legacy)
+{
+    bool cusa = strlen(title) == 9;
+    for (u32 i = 0; i < 9 && cusa; i++)
+        cusa = i < 4 ? title[i] >= 'A' && title[i] <= 'Z' : title[i] >= '0' && title[i] <= '9';
+    u32 k = 1;
+    prefix[0] = 'G';
+    for (const char *c = legacy && cusa ? title + 4 : title; *c && k < 12; c++) {
+        char u = *c >= 'a' && *c <= 'z' ? (char)(*c - 32) : *c;
+        if ((u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9'))
+            prefix[k++] = u;
+    }
+    prefix[k] = 0;
+    if (!legacy && strncmp(prefix, "GFS", 3) == 0)
+        prefix[0] = 'T';
+    char *e = prefix + k;
+    if (!legacy && ((k >= 4 && e[-4] == 'D' && e[-3] >= '0' && e[-3] <= '9' && e[-2] >= '0' && e[-2] <= '9' &&
+                     e[-1] >= '0' && e[-1] <= '9') ||
+                    (k >= 3 && e[-3] == 'M' && e[-2] >= '0' && e[-2] <= '9' && e[-1] >= '0' && e[-1] <= '9')))
+        e[-1] = 'X';
+}
+
 /* the save container's prefix: <folder>/prefix, else the title's profile's,
- * else gfs_pack.py's default (G and a CUSA-style ID's digits, else G and
- * its first 11 letters and digits) */
+ * else the default; a title played before the default took the whole title
+ * ID keeps the legacy prefix its progress is under */
 static void title_prefix(const char *dir, const char *title, char prefix[16])
 {
     char b[16];
@@ -399,15 +468,20 @@ static void title_prefix(const char *dir, const char *title, char prefix[16])
         profile_prefix(title, prefix);
     if (prefix[0] && strncmp(prefix, "GFS", 3) != 0)
         return;
-    bool cusa = strlen(title) == 9;
-    for (u32 i = 0; i < 9 && cusa; i++)
-        cusa = i < 4 ? title[i] >= 'A' && title[i] <= 'Z' : title[i] >= '0' && title[i] <= '9';
-    k = 1;
-    prefix[0] = 'G';
-    for (const char *c = cusa ? title + 4 : title; *c && k < 12; c++)
-        if ((*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9'))
-            prefix[k++] = *c;
-    prefix[k] = 0;
+    char legacy[16], save[32];
+    default_prefix(title, prefix, false);
+    default_prefix(title, legacy, true);
+    if (strcmp(prefix, legacy) == 0)
+        return;
+    fmt(save, sizeof(save), "%sSAVE", prefix);
+    if (host_save_exists(save))
+        return;
+    fmt(save, sizeof(save), "%sSAVE", legacy);
+    if (host_save_exists(save)) {
+        logf("approot: %s's progress is in %s (its prefix before prefixes took the whole title ID): kept", title,
+             save);
+        strlcpy(prefix, legacy, 16);
+    }
 }
 
 /* ---- the games under a folder, found by their contents ----
@@ -821,5 +895,8 @@ static int usb_open(const char *path, char *out, size_t size)
     return 0;
 }
 
+/* a save tool's scan before the title loads (ghost_api.save_prescan) */
+int save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg) HIDDEN;
+
 const struct ext_early g_approot_early HIDDEN = {EXT_EARLY_MAGIC, sizeof(struct ext_early), approot_init,
-                                                  approot_pick, lib_get};
+                                                  approot_pick, lib_get, save_prescan};

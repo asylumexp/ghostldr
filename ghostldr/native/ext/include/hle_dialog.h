@@ -18,6 +18,14 @@
  * Every answer is logged with the message text: the log is the user
  * interface.  A per-call-site override table (hle_dialog.c) and two ctx flags
  * adjust it.
+ *
+ * Drawn dialogs (dlg_overlay.c): when the screen shows a frame the title (or
+ * ghostldr's software Piglet) drew with the CPU into a linear buffer it can
+ * write, a MsgDialog (messages, yes/no, progress, wait) and an ImeDialog (an
+ * on-screen keyboard) are drawn over the title's frames and the user answers
+ * them with the controller, which the title does not see meanwhile.  GPU
+ * titles (Ghost: tiled buffers, flips through Gnm), an override for the call
+ * site and the ctx flags keep the answers above.
  */
 #pragma once
 #include "ext.h"
@@ -28,9 +36,10 @@
 #define DLG_MINSIZE_BEGIN _Pragma("clang attribute push(__attribute__((minsize)), apply_to = function)")
 #define DLG_MINSIZE_END _Pragma("clang attribute pop")
 
-/* ctx flags (run.py --dialog-cancel, --ime-fixed-name) */
+/* ctx flags (run.py --dialog-cancel, --ime-fixed-name, --dialog-auto) */
 #define CTX_FLAG_DIALOG_CANCEL 0x80   /* every dialog with buttons answers CANCEL (to bisect title hangs) */
 #define CTX_FLAG_IME_FIXED_NAME 0x100 /* IME text is "Player", never the console user's name */
+#define CTX_FLAG_DIALOG_AUTO 0x400000 /* never draw dialogs: answer them at once, as for GPU titles */
 
 /* status of every CommonDialog client and of ErrorDialog */
 #define DLG_NONE 0
@@ -47,6 +56,7 @@ enum {
     ANS_BTN2,   /* result OK, buttonId 2 (NO / BUTTON2) */
     ANS_CANCEL, /* result USER_CANCELED (1), buttonId INVALID */
     ANS_HOLD,   /* no buttons: RUNNING until Close or Terminate, ANS_CLOSE after DLG_HOLD_US */
+    ANS_USER,   /* drawn (dlg_overlay.c): RUNNING until the user answers or the title closes it */
 };
 
 /* library ids: the CommonDialog slot owner, and the override table's key */
@@ -89,6 +99,7 @@ struct dlg {
     u8 id;     /* DLG_* */
     u8 client; /* holds the CommonDialog slot from Initialize to Terminate */
     u8 stalled, timed_out;
+    u8 drawn; /* on screen (dlg_overlay.c): no hold timeout, the user answers */
     volatile int lock;
     u32 status, answer, polls;
     s32 result; /* once FINISHED */
@@ -152,6 +163,33 @@ u32 dlg_title_sdk(void) HIDDEN; /* the title's SDK version (proc param), 0 if un
     {                                                                                                        \
         return dlg_open_cancel(&var, p, (u64)__builtin_return_address(0), "Open");                           \
     }
+
+/* The user answered a drawn dialog (dlg_overlay.c): FINISHED with answer. */
+void dlg_user_answer(struct dlg *d, u32 answer) HIDDEN;
+
+/* ---- drawn dialogs (dlg_overlay.c) ---- */
+struct ov_msg {
+    const char *text;
+    const char *label[2]; /* buttons, left to right (NULL: fewer) */
+    u8 answer[2];         /* ANS_* of each button */
+    u8 focus;             /* the button with focus at first */
+    u8 cancel;            /* ANS_* of Circle (the back button) */
+    u8 progress;          /* 1: a progress bar */
+    u8 wait;              /* 1: busy dots (no buttons, or a Cancel button) */
+};
+/* Draw d as m until it leaves RUNNING: true when it is on screen. */
+bool ov_msg_open(struct dlg *d, const struct ov_msg *m) HIDDEN;
+void ov_msg_progress(struct dlg *d, s32 value, const char *msg) HIDDEN; /* value < 0: unchanged */
+void ov_end(struct dlg *d) HIDDEN;                                       /* d left RUNNING */
+/* A drawn dialog's tick (its status polls): the controller, and the screen
+ * when the title is not flipping meanwhile. */
+void ov_tick(void) HIDDEN;
+/* ImeDialog: true when the keyboard is on screen; ov_ime_state is 0 while it
+ * is, 1 when the user entered the text (written to out, max + 1 char16), 2
+ * when they backed out. */
+bool ov_ime_open(const u16 *text, u32 max, u32 type, u32 option, const u16 *title) HIDDEN;
+int ov_ime_state(u16 *out, u32 max) HIDDEN;
+void ov_ime_end(void) HIDDEN;
 
 /* sysmodule ids whose libraries the dialog families implement completely
  * (every import of them binds here or to a denied stub): loading one may

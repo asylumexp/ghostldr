@@ -454,6 +454,8 @@ struct prof_hdr {
 #define PF_DIAG 8        /* watchdog reads of the title's globals (needs the fingerprint) */
 #define PF_TRACE_OPENS 16 /* log every file the title opens (capture_order.py) */
 #define PF_OWN 32        /* the title has its own profile */
+#define PF_DIALOG_AUTO 64 /* never draw the title's dialogs: answer them at once (hle_dialog.h) */
+#define PF_SAVE_TOOL 128 /* a save tool (Apollo): the game selector asks whose saves, then scans (docs/selector.md) */
 struct prof_rec {
     u16 kind, size; /* size includes this header, a multiple of 8 */
     u32 reserved;
@@ -626,7 +628,8 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
  * 262144 the app root is a library, 65536 no automatic memory plan, 131072
  * the automatic plan even over a manual one, 524288 forget the learned
  * memory plan (automem.c), 1048576 the USB storage session is open
- * (approot.c) or the ELF loader, 2097152 the extension came in a bundle;
+ * (approot.c) or the ELF loader, 2097152 the extension came in a bundle,
+ * 4194304 dialogs are never drawn (hle_dialog.h, run.py --dialog-auto);
  * bits 32-47 hold the ELF loader's port, bits 48-63 the FTP server's
  * (CTX_FTP_PORT) */
 #define CTX_FLAG_NO_AUTO_MEM 65536      /* plan-free titles keep the plain budget (run.py --no-auto-memory) */
@@ -714,6 +717,16 @@ u64 ext_hle_lookup(const char *lib, const char *nid, const char *name);
 const struct ext_lib *ext_lib_policy(const char *lib);
 void ext_note_sysmodule(u32 id, s32 rc); /* a failed sysmodule load, for the extension's families */
 void ext_title_starting(void); /* the title's main thread is next: the extension's last boot step (its FTP server) */
+void ext_patch_text(struct module *m, u8 *text, u64 size); /* a module's text before it is written */
+void ext_video_buffers(s32 handle, s32 start, const u64 *addrs, s32 num, const void *attr); /* drawn dialogs */
+void ext_pad_state(s32 handle, u8 *data); /* a pad state the title read: drawn dialogs take the controller */
 
 /* ---- game selector (sel.c; module interface in sel_api.h) ---- */
 int sel_run(bool show, char title[16]); /* the chosen title's catalogue index and ID, or -1 */
+/* boot.c: a save tool's user (ghost_api.title_user; 0: SWRR's), the
+ * selector's choice mounted (ghost_api.title_pick) and the save scan
+ * (ghost_api.save_prescan, the extension's: ext.c) */
+extern u32 g_title_user;
+int boot_title_pick(const char *title, int index);
+int boot_save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg);
+int ext_save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg);

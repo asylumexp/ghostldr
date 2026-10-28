@@ -45,11 +45,13 @@ TITLE_RE = re.compile(r"[A-Z0-9_-]{1,15}")    # 15: the 16-byte title fields kee
 NID_RE = re.compile(r"[A-Za-z0-9+-]{11}")
 
 # blob header flags (ghost.h PF_*)
-PF_REQUESTED, PF_PLAN, PF_HOOKS, PF_DIAG, PF_TRACE_OPENS, PF_OWN = 1, 2, 4, 8, 16, 32
+PF_REQUESTED, PF_PLAN, PF_HOOKS, PF_DIAG, PF_TRACE_OPENS, PF_OWN, PF_DIALOG_AUTO, PF_SAVE_TOOL = 1, 2, 4, 8, 16, 32, 64, 128
 FEATURES = {
     "ghost_hooks": PF_HOOKS,        # hooks.c: inline diagnostic hooks at fixed eboot offsets
     "ghost_diagnostics": PF_DIAG,   # crash.c / hle.c: watchdog reads of globals at fixed eboot offsets
     "trace_opens": PF_TRACE_OPENS,  # log every file open (capture_order.py turns run.log into an order file)
+    "dialogs_auto": PF_DIALOG_AUTO,  # never draw its dialogs over its frames: answer them at once (dlg_overlay.c)
+    "save_tool": PF_SAVE_TOOL,      # a save tool (Apollo): the game selector asks whose saves, then scans them
 }
 # features whose C code was written against one title's executable
 FEATURE_TITLE = {"ghost_hooks": "CUSA11456", "ghost_diagnostics": "CUSA11456"}
@@ -171,9 +173,24 @@ def normalize_title(text: str | None) -> str | None:
 
 def default_prefix(title: str) -> str:
     """Container prefix for a title without one in its profile: G + the
-    digits of a normal ID (CUSA12345 -> G12345), else G + its first 11 letters
-    and digits.  The prefix also names the title's progress container
-    (<prefix>SAVE), so it must not change once a title has been played."""
+    title ID's letters and digits (CUSA12345 -> GCUSA12345), the first 11 of
+    them for longer IDs.  Unique per title ID: the digits alone, the rule
+    before 2026-10-28 (legacy_prefix), gave APOL00004 and CUSA00004 the same
+    containers.  The prefix also names the title's progress container
+    (<prefix>SAVE), so a title keeps the prefix it was installed or played
+    with (gfs_install.py reuses the catalogue's; approot.c finds its legacy
+    progress)."""
+    p = ("G" + re.sub(r"[^A-Z0-9]", "", title.upper()))[:12]
+    if p.startswith("GFS"):                  # ghostldr's own names
+        p = "T" + p[1:]
+    if re.search(r"D\d{3}$|M\d{2}$", p):      # would look like another title's save directory
+        p = p[:-1] + "X"
+    return p
+
+
+def legacy_prefix(title: str) -> str:
+    """The default prefix before 2026-10-28: G + the digits of a normal ID
+    (CUSA12345 -> G12345), else G + its first 11 letters and digits."""
     if re.fullmatch(r"[A-Z]{4}\d{5}", title):
         return "G" + title[4:]
     return ("G" + re.sub(r"[^A-Z0-9]", "", title))[:12]

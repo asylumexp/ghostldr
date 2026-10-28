@@ -40,6 +40,7 @@ static inline int surf_y1(const surface *s) { return s->cy1 > 0 && s->cy1 < s->h
 #define TITLE_COMPLETE 1u /* fully installed: can boot */
 #define TITLE_DUMP 2u     /* a game's dump, not homebrew (title_is_dump): marked on a PS4 */
 #define TITLE_COPY 4u     /* a second copy of a game on the USB drive (note: which one boots by ID) */
+#define TITLE_SAVE_TOOL 8u /* a save tool (its profile's "save_tool"): asks whose saves, then scans them */
 
 /* where a picture came from (host/gfs_meta.py ART_*) */
 #define ART_TITLE 1     /* the title's own sce_sys/icon0.png, pic1.png */
@@ -82,6 +83,15 @@ struct title {
     u8 marked;        /* the PS4 warning is drawn into icon and icon_small */
     char where[128];  /* a game on a USB drive: its folder there; empty: installed */
     char note[96];    /* why it can't start, or about this copy; may be empty */
+};
+
+/* ---- the console's users (a save tool asks whose saves to open) ---- */
+#define SEL_MAX_USERS 16
+struct sel_user {
+    s32 id;        /* SceUserServiceUserId */
+    u8 signed_in;  /* logged in now: the save service opens only their saves */
+    u8 current;    /* the user running SWRR */
+    char name[64]; /* UTF-8; empty: unknown */
 };
 
 /* ---- outline font (font.c) ---- */
@@ -148,6 +158,20 @@ struct sel {
     /* PS4: the question before a game dump boots */
     int ask_open, ask_yes;   /* the dialog is up; Yes has the focus (No at first) */
     float ask, ask_focus;    /* 0..1: the dialog fading in; the focus moving from No (0) to Yes (1) */
+    /* a save tool (TITLE_SAVE_TOOL): whose saves to open, then the save scan */
+    struct sel_user users[SEL_MAX_USERS];
+    int nusers;
+    int users_open, user_focus; /* the question is up; the focused user */
+    int users_fixed;            /* the title can't change any more: no going back to the list */
+    int user_chosen;            /* Cross on a user: the scan is about to run (ui_scan_*) */
+    float users_a, user_y;      /* 0..1 fading in; the focus, moving between rows */
+    int scan_req;               /* the platform should run the scan for users[user_focus] */
+    int scanning, scan_shown, scan_cancel;
+    u32 scan_done, scan_total;
+    u64 scan_t0, scan_prev, scan_per; /* microseconds: the start, the last progress, per title (smoothed) */
+    u64 scan_left;              /* microseconds left (estimate); 0: not known yet */
+    u64 scan_hold;              /* a shown scan that ended: its full bar stays until then */
+    float scan_a;               /* 0..1 the progress card fading in */
     /* top bar */
     int clock_h, clock_m, clock_24h, clock_valid;
     char user[64];           /* the signed-in user's name; empty: not shown */
@@ -241,9 +265,21 @@ int qoi_decode(const u8 *d, u64 n, surface *out);
 
 /* ---- the UI (ui.c) ---- */
 int ui_init(struct sel *S, struct title *titles, int n, int initial);
-/* advance by dt microseconds with the given pad buttons; returns 1 when the
- * frame changed, and sets *boot to the chosen title once the launch fade ends */
-int ui_step(struct sel *S, u64 now_us, u64 dt_us, u32 buttons, int stick_x, int *boot);
+/* advance by dt microseconds with the given pad buttons and left stick;
+ * returns 1 when the frame changed, and sets *boot to the chosen title once
+ * the launch fade ends */
+int ui_step(struct sel *S, u64 now_us, u64 dt_us, u32 buttons, int stick_x, int stick_y, int *boot);
+/* A save tool: the console's users (again when who is signed in changes),
+ * the question asked at once for the selected title (it is the only one, or
+ * the core has it already: fixed, no going back to the list), and the scan
+ * the platform runs once S->scan_req is set: start, its progress (returns
+ * nonzero when Circle cancelled it) and its end (back to the question when
+ * cancelled, else the launch, after a moment of full bar if it was shown). */
+int ui_set_users(struct sel *S, const struct sel_user *users, int n); /* 1: something changed */
+void ui_ask_user(struct sel *S, int fixed);
+void ui_scan_start(struct sel *S, u64 now);
+int ui_scan_progress(struct sel *S, u64 now, u32 done, u32 total);
+void ui_scan_end(struct sel *S, u64 now, int result);
 void ui_set_clock(struct sel *S, int h, int m, int h24);
 void ui_set_user(struct sel *S, const char *name);
 void ui_set_platform(struct sel *S, int platform); /* SEL_PS5 (the default) or SEL_PS4, before ui_init */

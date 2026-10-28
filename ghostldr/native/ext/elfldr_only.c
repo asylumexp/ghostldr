@@ -20,8 +20,14 @@ HIDDEN void usb_ftp_prepare(void) {}
 HIDDEN const char *usb_ftp_home(void) { return "/"; }
 
 /* ext_main.c's ext_early: no app root here (ext.c refuses a zero magic) */
-const struct ext_early g_approot_early HIDDEN = {0, 0, NULL, NULL, NULL};
+const struct ext_early g_approot_early HIDDEN = {0, 0, NULL, NULL, NULL, NULL};
 
 /* hle_module.c: whether a title module is a sysmodule game module; a
  * payload never is */
 bool sysmod_is_game(const char *file) { return false; }
+
+/* hle_appcontent.c's title identity: a payload runs with no title */
+const char *title_ident(void) { return ""; }
+
+/* hle_net.c's pool of sockets for a title: a payload has its own (elfldr_sys.c) */
+HIDDEN void net_pool_fill(void) {}

@@ -168,6 +168,30 @@ struct ghost_api {
      * ext/src/approot.c, docs/usb.md), as the game selector lists them:
      * their count, 0 for none */
     int (*library)(const struct lib_title **list);
+    /* ---- save tools: a profile's "save_tool" feature (PF_SAVE_TOOL, Apollo
+     * Save Tool; docs/selector.md "Save tools") ----
+     * title_user is the core's g_title_user: the user whose saves the title
+     * works on (its user service answers, its save lists and mounts); 0: the
+     * user running SWRR.  The game selector sets it before the title loads.
+     * ghostldr's own containers and the title's <prefix>SAVE stay the SWRR
+     * user's. */
+    u32 *title_user;
+    /* The save tool's scan, before the title loads, while the game selector
+     * owns the screen; the core forwards it to the extension (struct
+     * ext_early.save_prescan; < 0 when it has none, or before title_pick).
+     * For user: DirNameSearch over every candidate title not fresh in its
+     * cache, progress(arg, done, total) once the candidates are known (done
+     * 0, may be left out) and after each title searched (nonzero: stop,
+     * keeping what was found), the cache written; returns the number of
+     * titles with saves, < 0 on errors. */
+    int (*save_prescan)(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg);
+    /* The game selector's choice before it returns, so that save_prescan
+     * sees the title's files: the core mounts it as boot.c does after the
+     * selector (ghostfs's gfs_pick, a library's approot_pick; nothing when
+     * the core had the title already).  title and index as sel_main returns
+     * them.  Once: later calls return the first one's result.  0, or < 0
+     * (the boot then stops). */
+    int (*title_pick)(const char *title, int index);
 };
 
 /* A game found under an app root that is a folder of games (a USB drive, or
@@ -217,6 +241,11 @@ struct ext_early {
      * (index < 0 or title NULL: none chosen) */
     int (*approot_pick)(const char *title, int index, const char **root);
     int (*library)(const struct lib_title **list);
+    /* A save tool's scan (ghost_api.save_prescan, same contract), once the
+     * title's root is mounted and before ext_init: only what ghost_api and
+     * the host's libraries give.  The core places the code for it when no
+     * app root did (ext.c).  NULL: none. */
+    int (*save_prescan)(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg);
 };
 typedef const struct ext_early *(*ext_early_fn)(const struct ghost_api *api);
 
@@ -240,6 +269,11 @@ struct ext_hle_ent {
  * that returns stub_ret.  stub_ret is also what the library's unresolved
  * stubs return instead of 0. */
 #define EXT_LIB_NO_HOST 1u
+/* The extension is the whole module: sceKernelLoadStartModule of the
+ * library's .sprx gets a handle of the module family's (hle_module.c) and
+ * sceKernelDlsym on it finds the extension's functions, with no host module
+ * loaded (a library a PS4 app has on one console and not on another: Piglet) */
+#define EXT_LIB_VIRTUAL 2u
 struct ext_lib {
     const char *name;    /* import library */
     const char *aliases; /* other import library names, space separated, or NULL */
@@ -279,6 +313,18 @@ struct ext_exports {
      * boot thread until a client tells it to quit (ext/src/elfldr.c).  The
      * core checks size before calling it. */
     int (*elfldr_main)(void);
+    /* A module's text, about to be written to executable memory (loader.c):
+     * the extension may patch it in place (raw system call sites, hle_rawsys.c).
+     * The core checks size before calling it. */
+    void (*patch_text)(struct module *m, u8 *text, u64 size);
+    /* The title registered display buffers (sceVideoOutRegisterBuffers,
+     * hle_sys.c; attr is its SceVideoOutBufferAttribute), and a pad state it
+     * read (scePadReadState, scePadRead) before it sees it: the extension
+     * draws dialogs over the first and takes the controller from the second
+     * while one is open (dlg_overlay.c).  The core checks size before calling
+     * them; NULL in an extension without drawn dialogs. */
+    void (*video_buffers)(s32 handle, s32 start, const u64 *addrs, s32 num, const void *attr);
+    void (*pad_state)(s32 handle, u8 *data);
 };
 
 typedef const struct ext_exports *(*ext_init_fn)(const struct ghost_api *api);

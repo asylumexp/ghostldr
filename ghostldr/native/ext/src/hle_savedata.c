@@ -360,6 +360,8 @@ static u32 sdk(void)
         u32 v = 0xFFFFFFFFu;
         if (pp && *(const u64 *)pp >= 0x18 && *(const u32 *)(pp + 8) == 0x4942524F) /* "ORBI" */
             v = *(const u32 *)(pp + 0x10);
+        if (!g_main_mod) /* not loaded yet (a save tool's scan): ask again later */
+            return v;
         g_sdk = v;
     }
     return g_sdk;
@@ -666,12 +668,21 @@ static bool real_name_ok(const char *name)
 
 static u32 g_destruct = MODE_DESTRUCT_OFF; /* dropped if the service refuses it */
 
+/* The title's own containers stay with the user running SWRR when the
+ * title runs for another user (picked in the game selector): a save tool
+ * opened for that user keeps its own settings where ghostldr's are. */
+static s32 container_user(s32 user)
+{
+    return title_user_picked() && user == title_user() ? initial_user() : user;
+}
+
 static s32 real_mount(s32 user, const char *name, u32 mode, u64 blocks, char mp[16], u64 *required)
 {
     if (!real_name_ok(name)) {
         logf("savedata: refusing to mount %s for real: not a name of ours", name);
         return E_INTERNAL;
     }
+    user = container_user(user);
     u32 m = (mode & MODE_RDWR) ? mode | g_destruct : mode;
     s32 rc = gfs_mount_user(user, name, (int)m, blocks, mp, required);
     if (rc == E_PARAMETER && m != mode) {
@@ -695,6 +706,7 @@ static s32 real_delete(s32 user, const char *name)
         del = g_real_delete = host_real_in("libSceSaveData", "sceSaveDataDelete");
     if (!del)
         return E_INTERNAL;
+    user = container_user(user);
     char dir[32];
     struct sd_delete d;
     memset(dir, 0, sizeof(dir));
@@ -1008,6 +1020,7 @@ struct vmount {
     bool ro;
     bool slot; /* holds a real mount slot */
     bool param_set;
+    bool foreign; /* another title's save, mounted through the real service */
     u32 id;
     u64 blocks;
     char dir[32];
@@ -1167,6 +1180,229 @@ static s32 sd_terminate(void)
     unlock();
     logf("savedata: terminated");
     return 0;
+}
+
+static bool vm_ready(void);
+
+/* ---- other titles' saves: the real save service, as any PS4 game has it ----
+ * Measured on a 13.60 PS5 and read in 12.50's SceShellCore (research/apollo:
+ * savedata-reach, static-re): a game may list any title's saves
+ * (DirNameSearch with that title ID), delete them, and mount one read-only if
+ * it passes the title's fingerprint (lower-case hex of its keystone's bytes
+ * 0x20-0x3f) and the save is the user's own.  Everything else (another
+ * account's save, a write, a create that the game would accept) stops in the
+ * system.  So calls naming another title go to the real service as they are,
+ * and the title gets its answers; never for the host's own title (SWRR's
+ * saves: ghostldr's containers and the exploit), which stays invisible as
+ * before.  Of the titles whose saves hold an exploit ghostldr runs from (SWRR
+ * US and EU, Jak X), only the one SWRR runs as is kept out of reach; the
+ * others are listed, mounted and deleted like any title (a save tool asks
+ * first), and a deleted exploit save is named on screen. */
+static bool host_kind(const char *tid)
+{
+    static const char *const k_hosts[] = {"CUSA03474", "CUSA03492", "CUSA07992"};
+    for (u32 i = 0; i < ARRAY_SIZE(k_hosts); i++)
+        if (strncmp(tid, k_hosts[i], 9) == 0)
+            return true;
+    return false;
+}
+
+/* the host's own title ID, from the real sceKernelGetAppInfo (cusa_name at
+ * +0x10).  /app0/sce_sys/param.sfo would say too, but it is EACCES from the
+ * host's sandbox.  If even this fails, every exploit title counts as the
+ * host: hidden is the safe side. */
+static char g_host_tid[16];
+static bool g_host_tid_done;
+
+static const char *host_title(void)
+{
+    if (!g_host_tid_done) {
+        g_host_tid_done = true;
+        s32 (*info_fn)(s32, u8 *) = host_real("sceKernelGetAppInfo");
+        u8 info[0x80];
+        memset(info, 0, sizeof(info));
+        if (info_fn && info_fn(K.getpid(), info) == 0 && info[0x10])
+            strlcpy(g_host_tid, (const char *)info + 0x10, 10);
+        logf("savedata: the host is %s: its saves stay out of the title's sight",
+             g_host_tid[0] ? g_host_tid : "unknown (every exploit title stays hidden)");
+    }
+    return g_host_tid;
+}
+
+/* tid names another title than the title and its host */
+static bool foreign_title(const char *tid)
+{
+    if (title_is_self(tid))
+        return false;
+    const char *h = host_title();
+    return h[0] ? strncmp(tid, h, 9) != 0 : !host_kind(tid);
+}
+
+static void *g_real_sd[8];
+enum { RS_MOUNT, RS_UMOUNT, RS_SEARCH, RS_DELETE, RS_INFO, RS_GETPARAM, RS_LOADICON };
+static const char *const k_real_sd[] = {"sceSaveDataMount",      "sceSaveDataUmount",   "sceSaveDataDirNameSearch",
+                                        "sceSaveDataDelete",     "sceSaveDataGetMountInfo", "sceSaveDataGetParam",
+                                        "sceSaveDataLoadIcon"};
+static void *real_sd(u32 k)
+{
+    if (!g_real_sd[k])
+        g_real_sd[k] = host_real_in("libSceSaveData", k_real_sd[k]);
+    return g_real_sd[k];
+}
+
+/* a foreign title's save mounted for real into a free virtual mount point (lock held) */
+static s32 foreign_mount_locked(const struct sd_mount1 *m, struct sd_mount_result *r)
+{
+    s32 (*mount)(const struct sd_mount1 *, struct sd_mount_result *) = real_sd(RS_MOUNT);
+    s32 (*info)(const char *, struct sd_mount_info *) = real_sd(RS_INFO);
+    if (!mount || !vm_ready())
+        return E_INTERNAL;
+    u32 v = 0;
+    while (v < VMAX && g_vm[v].live)
+        v++;
+    if (v == VMAX)
+        return E_MOUNT_FULL;
+    if (gfs_slot_reserve() != 0)
+        return E_MOUNT_FULL;
+    struct sd_mount_result rr;
+    memset(&rr, 0, sizeof(rr));
+    s32 rc = mount(m, &rr);
+    if (rc != 0) {
+        gfs_slot_release();
+        return rc; /* the system's answer: 0x809F0006 wrong fingerprint, 0x809F000F another account, ... */
+    }
+    struct vmount *vm = &g_vm[v];
+    if (vm->icon)
+        page_free(vm->icon, vm->icon_size);
+    memset(vm, 0, sizeof(*vm));
+    vm->user = m->user, vm->ro = !(m->mode & (MODE_RDWR | MODE_CREATE | MODE_CREATE2)), vm->slot = true;
+    vm->foreign = true;
+    memcpy(vm->real, rr.mount_point, 16);
+    vm->real[15] = 0;
+    strlcpy(vm->base, vm->real, sizeof(vm->base));
+    strlcpy(vm->dir, m->dir, sizeof(vm->dir));
+    struct sd_mount_info mi;
+    memset(&mi, 0, sizeof(mi));
+    if (info && info(vm->real, &mi) == 0)
+        vm->blocks = mi.blocks;
+    vm_publish(vm, true);
+    memset(r, 0, sizeof(*r));
+    fmt(r->mount_point, sizeof(r->mount_point), "/savedata%u", v);
+    r->mount_status = rr.mount_status;
+    return 0;
+}
+
+bool savedata_is_foreign(const char *tid) { return tid && foreign_title(tid); }
+
+/* SceSaveDataFingerprint: 64 hex characters, NUL, padding */
+struct sd_fp {
+    char data[65];
+    char pad[15];
+};
+
+s32 savedata_foreign_mount(s32 user, const char *tid, const char *dir, const char *fp, char mp[16])
+{
+    if (!tid || !foreign_title(tid) || !dir || !fp)
+        return E_PARAMETER;
+    char t[16], d[32];
+    struct sd_fp f;
+    memset(t, 0, sizeof(t)), memset(d, 0, sizeof(d)), memset(&f, 0, sizeof(f));
+    strlcpy(t, tid, 10);
+    strlcpy(d, dir, sizeof(d));
+    strlcpy(f.data, fp, sizeof(f.data));
+    struct sd_mount1 m;
+    memset(&m, 0, sizeof(m));
+    m.user = user, m.title_id = t, m.dir = d, m.fingerprint = &f, m.mode = MODE_RDONLY;
+    struct sd_mount_result r;
+    lock();
+    s32 rc = kf_ready() ? foreign_mount_locked(&m, &r) : E_INTERNAL;
+    unlock();
+    if (rc == 0)
+        memcpy(mp, r.mount_point, 16);
+    logf("savedata: %s:%s of another title, read-only with its fingerprint -> %x%s%.16s", t, d, (u32)rc,
+         rc ? "" : " at ", rc ? "" : r.mount_point);
+    return rc;
+}
+
+s32 savedata_foreign_search(s32 user, const char *tid, char (*dirs)[32], struct sd_param *params, u64 *blocks,
+                            u32 max, u32 *hits)
+{
+    s32 (*search)(const struct sd_search_cond *, struct sd_search_result *) = real_sd(RS_SEARCH);
+    if (!tid || !foreign_title(tid) || !search)
+        return E_PARAMETER;
+    char t[16];
+    memset(t, 0, sizeof(t));
+    strlcpy(t, tid, 10);
+    struct sd_mount_info *infos = blocks ? page_alloc(sizeof(*infos) * (max ? max : 1)) : NULL;
+    struct sd_search_cond c;
+    struct sd_search_result r;
+    memset(&c, 0, sizeof(c)), memset(&r, 0, sizeof(r));
+    c.user = user, c.title_id = t;
+    r.dirs = (char *)dirs, r.dirs_num = max, r.params = params, r.infos = infos;
+    /* one question at a time, whoever asks (a save tool's list, the
+     * background refresh, the sealed-key files): the service answers them
+     * in turn anyway, and eight at once froze SWRR on a 13.60 PS5 */
+    static volatile int one;
+    while (__atomic_exchange_n(&one, 1, __ATOMIC_ACQUIRE))
+        K.usleep(2000);
+    s32 rc = search(&c, &r);
+    __atomic_store_n(&one, 0, __ATOMIC_RELEASE);
+    u32 n = rc == 0 ? MIN(MIN(r.set_num, r.hit_num), max) : 0, kept = 0;
+    for (u32 i = 0; i < n; i++) {
+        /* an exploit title's saves: only the PS2 game's own (named after its product code, SLUS-20268 and the
+         * like); ghostldr's containers (G...) are not saves to manage */
+        if (host_kind(t) && dirs[i][0] == 'G')
+            continue;
+        if (kept != i) {
+            memcpy(dirs[kept], dirs[i], 32);
+            if (params)
+                memcpy(&params[kept], &params[i], sizeof(*params));
+        }
+        if (blocks && infos)
+            blocks[kept] = infos[i].blocks;
+        kept++;
+    }
+    if (rc == 0 && hits)
+        *hits = kept;
+    if (infos)
+        page_free(infos, sizeof(*infos) * (max ? max : 1));
+    return rc;
+}
+
+/* keystone files where save tools keep them (title paths: /data is the title's own) */
+bool savedata_keystone(s32 user, const char *tid, u8 out[0x60])
+{
+    char rel[128], buf[320];
+    u8 ks[0x61];
+    for (u32 i = 0; i < 3; i++) {
+        if (i == 1)
+            fmt(rel, sizeof(rel), "/data/apollo/%08x/%.9s/keystone", (u32)user, tid);
+        else
+            fmt(rel, sizeof(rel), i == 0 ? "/data/ghostldr/keystones/%.9s.keystone" : "/data/apollo/data/%.9s.keystone",
+                tid);
+        int fd = vfs_open(remap_path(rel, buf, sizeof(buf)), O_RDONLY, 0);
+        if (fd < 0)
+            continue;
+        s64 n = vfs_read(fd, ks, sizeof(ks));
+        vfs_close(fd);
+        if (n != 0x60 || memcmp(ks, "keystone", 8) != 0)
+            continue;
+        memcpy(out, ks, 0x60);
+        return true;
+    }
+    return false;
+}
+
+bool savedata_fingerprint(s32 user, const char *tid, char out[65])
+{
+    u8 ks[0x60];
+    if (!savedata_keystone(user, tid, ks))
+        return false;
+    static const char hex[] = "0123456789abcdef";
+    for (u32 k = 0; k < 32; k++)
+        out[2 * k] = hex[ks[0x20 + k] >> 4], out[2 * k + 1] = hex[ks[0x20 + k] & 15];
+    out[64] = 0;
+    return true;
 }
 
 /* ---- Mount ---- */
@@ -1408,6 +1644,16 @@ static s32 sd_mount1(const struct sd_mount1 *m, struct sd_mount_result *r)
         return E_NOT_INITIALIZED;
     if (!m)
         return E_PARAMETER;
+    if (m->title_id && foreign_title(m->title_id)) { /* the system decides, with the title's own fingerprint */
+        if (!r)
+            return E_PARAMETER;
+        lock();
+        s32 rc = kf_ready() ? foreign_mount_locked(m, r) : E_INTERNAL;
+        unlock();
+        logf("savedata: mount %.10s:%.32s of another title (mode %x, fingerprint %s) -> %x", m->title_id,
+             m->dir ? m->dir : "", m->mode, m->fingerprint ? "given" : "none", (u32)rc);
+        return rc;
+    }
     return do_mount(m->user, m->title_id, m->dir, m->blocks, m->mode, r);
 }
 
@@ -1415,8 +1661,6 @@ static s32 sd_mount1(const struct sd_mount1 *m, struct sd_mount_result *r)
 
 static s32 do_umount(const char *mp, bool backup)
 {
-    if (!g_init)
-        return E_NOT_INITIALIZED;
     if (!mp)
         return E_PARAMETER;
     lock();
@@ -1469,8 +1713,61 @@ static s32 do_umount(const char *mp, bool backup)
     return 0;
 }
 
-static s32 sd_umount(const char *mp) { return do_umount(mp, false); }
-static s32 sd_umount_backup(const char *mp) { return do_umount(mp, true); }
+static s32 sd_umount(const char *mp) { return g_init ? do_umount(mp, false) : E_NOT_INITIALIZED; }
+static s32 sd_umount_backup(const char *mp) { return g_init ? do_umount(mp, true) : E_NOT_INITIALIZED; }
+
+/* savedata_hooks.h: a mount made by savedata_foreign_mount */
+s32 savedata_umount(const char *mp) { return do_umount(mp, false); }
+
+/* ---- the title's /data, kept: <prefix>D000SAVE ----
+ * A stock console's SWRR has no /data, and its /temp0 is wiped when SWRR
+ * closes (seen on a 13.60 PS5: a save tool's keystones, extracted files and
+ * caches gone while its settings save stayed).  So a title's /data is a save
+ * container of the user running SWRR, created at the first use (DATA_BLOCKS)
+ * and mounted read-write for the rest of the session: what is written there
+ * is committed when SWRR closes or the title's container is unmounted.  D000
+ * is no save directory's (those are D001..) and no prefix can end like it,
+ * so the name is unambiguous; tools list it as the title's save dir 000. */
+#define DATA_BLOCKS 4096 /* 128 MiB */
+static char g_data_mp[16];
+static volatile int g_data_state; /* 0 untried, 1 mounted, 2 failed */
+
+const char *savedata_data_root(void)
+{
+    s32 st = __atomic_load_n(&g_data_state, __ATOMIC_ACQUIRE);
+    if (st)
+        return st == 1 ? g_data_mp : NULL;
+    if (!cont_backend() || !prefix()[0]) { /* no containers (a dev install), or not yet: asked again later */
+        static u32 said;
+        if (!said++)
+            logf("savedata: the title's /data is not kept: no save containers %s", cont_backend() ? "yet" : "here");
+        return NULL;
+    }
+    lock();
+    if (!g_data_state) {
+        char name[32], mp[16];
+        s32 rc = E_INTERNAL;
+        bool made = false;
+        if (gfs_slot_reserve() == 0) {
+            cont_name(name, 'D', 0);
+            s32 user = initial_user();
+            rc = real_mount(user, name, MODE_RDWR, 0, mp, NULL);
+            if (rc == E_NOT_FOUND)
+                rc = real_mount(user, name, MODE_CREATE | MODE_RDWR, DATA_BLOCKS, mp, NULL), made = rc == 0;
+            if (rc != 0)
+                gfs_slot_release();
+        }
+        if (rc == 0) {
+            memcpy(g_data_mp, mp, 16);
+            g_data_mp[15] = 0;
+        }
+        logf("savedata: the title's /data is %s%s%s (%x)", rc == 0 ? name : "not kept: no save container",
+             rc == 0 ? (made ? ", made now, at " : " at ") : "", rc == 0 ? g_data_mp : "", (u32)rc);
+        __atomic_store_n(&g_data_state, rc == 0 ? 1 : 2, __ATOMIC_RELEASE);
+    }
+    unlock();
+    return g_data_state == 1 ? g_data_mp : NULL;
+}
 
 /* ---- GetMountInfo, params, icons ---- */
 
@@ -1485,6 +1782,13 @@ static s32 sd_get_mount_info(const char *mp, struct sd_mount_info *info)
     if (v < 0) {
         unlock();
         return E_NOT_MOUNTED;
+    }
+    if (g_vm[v].foreign) { /* the real service's answer for another title's save */
+        char real[16];
+        memcpy(real, g_vm[v].real, 16);
+        unlock();
+        s32 (*info_fn)(const char *, struct sd_mount_info *) = real_sd(RS_INFO);
+        return info_fn ? info_fn(real, info) : E_INTERNAL;
     }
     u64 used = used_blocks(g_vm[v].base, g_vm[v].real[0] != 0), blocks = g_vm[v].blocks;
     unlock();
@@ -1514,6 +1818,13 @@ static s32 sd_param_get(const char *mp, u32 type, void *buf, u64 size, u64 *got)
     if (v < 0) {
         unlock();
         return E_NOT_MOUNTED;
+    }
+    if (g_vm[v].foreign) {
+        char real[16];
+        memcpy(real, g_vm[v].real, 16);
+        unlock();
+        s32 (*get)(const char *, u32, void *, u64, u64 *) = real_sd(RS_GETPARAM);
+        return get ? get(real, type, buf, size, got) : E_INTERNAL;
     }
     struct sd_param p = g_vm[v].param;
     unlock();
@@ -1661,6 +1972,13 @@ static s32 sd_load_icon(const char *mp, struct sd_icon *icon)
         return E_PARAMETER;
     lock();
     s32 v = vm_index(mp), rc;
+    if (v >= 0 && g_vm[v].foreign) {
+        char real[16];
+        memcpy(real, g_vm[v].real, 16);
+        unlock();
+        s32 (*load)(const char *, struct sd_icon *) = real_sd(RS_LOADICON);
+        return load ? load(real, icon) : E_INTERNAL;
+    }
     if (v < 0) {
         rc = E_NOT_MOUNTED;
     } else if (g_vm[v].icon) {
@@ -1733,6 +2051,13 @@ static s32 sd_dir_name_search(const struct sd_search_cond *c, struct sd_search_r
         memcpy(pat, c->dir, 32);
         pat[32] = 0;
     }
+    if (c->title_id && foreign_title(c->title_id)) { /* another title's saves: the real list */
+        s32 (*search)(const struct sd_search_cond *, struct sd_search_result *) = real_sd(RS_SEARCH);
+        s32 rc = search ? search(c, r) : E_INTERNAL;
+        logf("savedata: search %.10s '%s' (another title) -> %x, %u hits", c->title_id, pat[0] ? pat : "*",
+             (u32)rc, rc == 0 ? r->hit_num : 0);
+        return rc;
+    }
     u16 hit[CAT_MAX];
     u32 n = 0;
     if (title_is_self(c->title_id)) {
@@ -1796,6 +2121,18 @@ static s32 sd_delete(const struct sd_delete *d)
         return E_PARAMETER;
     if (d->user < 0)
         return E_INVALID_LOGIN_USER;
+    if (d->title_id && foreign_title(d->title_id)) { /* never the title SWRR runs as (foreign_title) */
+        s32 (*del)(const struct sd_delete *) = real_sd(RS_DELETE);
+        s32 rc = del ? del(d) : E_INTERNAL;
+        logf("savedata: delete %.10s:%s (another title) -> %x", d->title_id, dir, (u32)rc);
+        if (rc == 0 && host_kind(d->title_id)) { /* an exploit's save, e.g. Jak X's UltraC0re */
+            char line[160];
+            fmt(line, sizeof(line), "Deleted %.9s %s, a save an exploit loader runs from.\n"
+                "Put a save back (import over a save the game made) to use it again.", d->title_id, dir);
+            ov_banner(line, 20);
+        }
+        return rc;
+    }
     if (!title_is_self(d->title_id))
         return E_NOT_FOUND;
     lock();

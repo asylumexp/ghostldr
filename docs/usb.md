@@ -139,7 +139,7 @@ A boot that can't find the drive or the game stops before it touches SWRR's stat
 
 ## Progress
 
-A game from a USB drive keeps its progress in SWRR's save containers, in `<prefix>SAVE`, as an installed title does ([ghostfs-catalogue.md](ghostfs-catalogue.md#names)). The prefix is the game's `prefix` file, else its profile's (`GHOST` for Ghost of Tsushima, so a copy made by hand still uses `GHOSTSAVE`), else `G` and its ID's digits (`G12345SAVE`). The same game installed and on a drive, with the same prefix, shares its progress. Nothing is written to the drive.
+A game from a USB drive keeps its progress in SWRR's save containers, in `<prefix>SAVE`, as an installed title does ([ghostfs-catalogue.md](ghostfs-catalogue.md#names)). The prefix is the game's `prefix` file, else its profile's (`GHOST` for Ghost of Tsushima, so a copy made by hand still uses `GHOSTSAVE`), else `G` and its title ID's letters and digits (`GCUSA12345SAVE`); a game played before 2026-10-28, when the default was `G` and only the digits, keeps `G12345SAVE` when its progress is there and none is under the new name. The same game installed and on a drive, with the same prefix, shares its progress. Nothing is written to the drive.
 
 ## How the console reaches the drive
 

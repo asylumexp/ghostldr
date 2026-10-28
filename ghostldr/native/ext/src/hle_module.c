@@ -59,6 +59,43 @@ bool title_vpath(const char *path, char *out, size_t size)
     return false;
 }
 
+/* ---- virtual modules: libraries the extension is all of (EXT_LIB_VIRTUAL) ----
+ * Handles 0x7F00 + i: above the title's own (loader.c counts up from 0x7000),
+ * far below the kernel's. */
+#define VMOD_BASE 0x7F00
+#define VMOD_MAX 16
+static char g_vmod[VMOD_MAX][48];
+static volatile int g_vmod_lock;
+
+void fsvsh_loaded(void) HIDDEN __attribute__((weak)); /* hle_fsvsh.c; not in the ELF loader's extension */
+
+/* the handle of path's module when the extension is the whole library, else 0 */
+static s32 vmod_handle(const char *path)
+{
+    char lib[48];
+    strlcpy(lib, base_name(path), sizeof(lib));
+    char *dot = (char *)strrchr_c(lib, '.');
+    if (dot && (strcmp(dot, ".sprx") == 0 || strcmp(dot, ".prx") == 0))
+        *dot = 0;
+    const struct ext_lib *pol = ext_find_policy(lib);
+    if (!pol || !(pol->flags & EXT_LIB_VIRTUAL))
+        return 0;
+    s32 h = 0;
+    spin_lock(&g_vmod_lock);
+    for (u32 i = 0; i < VMOD_MAX && !h; i++)
+        if (strcmp(g_vmod[i], lib) == 0)
+            h = VMOD_BASE + (s32)i;
+    for (u32 i = 0; i < VMOD_MAX && !h; i++)
+        if (!g_vmod[i][0]) {
+            strlcpy(g_vmod[i], lib, sizeof(g_vmod[i]));
+            h = VMOD_BASE + (s32)i;
+        }
+    spin_unlock(&g_vmod_lock);
+    return h;
+}
+
+static bool vmod_is(s32 handle) { return handle >= VMOD_BASE && handle < VMOD_BASE + VMOD_MAX && g_vmod[handle - VMOD_BASE][0]; }
+
 /* s32 sceKernelLoadStartModule(path, argc, argp, flags, opt, s32 *res):
  * the title's own prx load through ghostldr's loader (SWRR's kernel cannot
  * read ghostfs files or load a fake-signed /app0 prx) and start on the
@@ -85,6 +122,15 @@ static s32 hle_load_start_module(const char *path, u64 argc, const void *argp, u
         logf("LoadStartModule(%s) -> ours %x (start %x)", path, m->fake_handle, rc);
         return (s32)m->fake_handle;
     }
+    s32 vh = vmod_handle(path);
+    if (vh) {
+        if (res)
+            *res = 0;
+        logf("LoadStartModule(%s) -> extension's virtual module %x", path, vh);
+        if (fsvsh_loaded && strstr(path, "libSceFsInternalForVsh"))
+            fsvsh_loaded(); /* a save tool: hle_fsvsh.c starts looking for saves */
+        return vh;
+    }
     char buf[512];
     const char *p = remap_path(path, buf, sizeof(buf));
     s32 h = (s32)call_gadget6((u64)K.load_start_module, (u64)p, argc, (u64)argp, flags, (u64)opt, (u64)res);
@@ -98,6 +144,11 @@ static s32 hle_stop_unload_module(s32 handle, u64 argc, const void *argp, u32 fl
     struct module *m = mod_by_handle(handle);
     if (m) {
         logf("StopUnloadModule(%s) kept loaded", m->name);
+        if (res)
+            *res = 0;
+        return 0;
+    }
+    if (vmod_is(handle)) {
         if (res)
             *res = 0;
         return 0;
@@ -136,6 +187,13 @@ static s32 hle_dlsym(s32 handle, const char *name, void **out)
     /* the extension's functions first; a no-host-fallback library's module
      * is refused rather than handed SWRR's */
     u64 fn = ext_find(NULL, nid);
+    if (vmod_is(handle)) {
+        *out = (void *)fn;
+        static u32 said;
+        if (!fn || said++ < 16)
+            logf("dlsym(%s, %s) -> extension %p", g_vmod[handle - VMOD_BASE], name, *out);
+        return fn ? 0 : E_SRCH;
+    }
     if (fn) {
         *out = (void *)fn;
         logf("dlsym(host %x, %s) -> extension %p", handle, name, *out);

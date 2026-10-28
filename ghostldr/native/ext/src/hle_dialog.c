@@ -87,7 +87,7 @@ u64 dlg_now(void)
 
 const char *dlg_answer_name(u32 a)
 {
-    static const char *const k[] = {"CLOSE", "BUTTON1", "BUTTON2", "CANCEL", "HOLD"};
+    static const char *const k[] = {"CLOSE", "BUTTON1", "BUTTON2", "CANCEL", "HOLD", "USER"};
     return a < ARRAY_SIZE(k) ? k[a] : "?";
 }
 
@@ -206,7 +206,7 @@ u32 dlg_start(struct dlg *d, u32 dflt, u64 ra, const char *what, const char *tex
     d->answer = a;
     d->polls = 1; /* RUNNING for one poll, then the answer */
     d->t_open = now;
-    d->t_fail = 0, d->stalled = 0, d->timed_out = 0;
+    d->t_fail = 0, d->stalled = 0, d->timed_out = 0, d->drawn = 0;
     d->result = 0, d->button = 0;
     spin_unlock(&d->lock);
     dlg_text(t, sizeof(t), text);
@@ -222,8 +222,11 @@ u32 dlg_update(struct dlg *d)
     bool timeout = false, stall = false;
     spin_lock(&d->lock);
     u32 st = d->status;
+    bool drawn = st == DLG_RUNNING && d->drawn;
     if (st == DLG_RUNNING) {
-        if (d->answer != ANS_HOLD) {
+        if (d->answer == ANS_USER || (d->answer == ANS_HOLD && d->drawn)) {
+            /* on screen: the user answers (dlg_user_answer), or the title closes it */
+        } else if (d->answer != ANS_HOLD) {
             if (d->polls)
                 d->polls--;
             else
@@ -243,11 +246,27 @@ u32 dlg_update(struct dlg *d)
         st = DLG_FINISHED;
     }
     spin_unlock(&d->lock);
+    if (drawn) {
+        ov_tick();
+        st = __atomic_load_n(&d->status, __ATOMIC_ACQUIRE);
+    }
     if (timeout)
         logf("dialog: %s hold timeout (10 s without Close) -> CLOSE", d->name);
     if (stall)
         logf("dialog: %s stall guard: Open failed but the title polls for 10 s -> FINISHED (CANCEL)", d->name);
     return st;
+}
+
+void dlg_user_answer(struct dlg *d, u32 answer)
+{
+    spin_lock(&d->lock);
+    bool running = d->status == DLG_RUNNING;
+    if (running)
+        finish(d, answer);
+    spin_unlock(&d->lock);
+    if (running)
+        logf("dialog: %s answered on screen: %s", d->name, dlg_answer_name(answer));
+    ov_end(d);
 }
 
 s32 dlg_check_result(struct dlg *d, const void *r)
@@ -273,6 +292,7 @@ s32 dlg_close(struct dlg *d)
     if (running)
         finish(d, ANS_CLOSE);
     spin_unlock(&d->lock);
+    ov_end(d);
     if (!running)
         return DLG_ERR(d, not_running);
     if (hold)
@@ -291,6 +311,7 @@ s32 dlg_terminate(struct dlg *d)
         __atomic_compare_exchange_n(&g_slot, &me, 0, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     }
     spin_unlock(&d->lock);
+    ov_end(d);
     return st == DLG_NONE ? DLG_ERR(d, not_init) : 0;
 }
 
@@ -337,6 +358,27 @@ static const char *const k_msg_buttons[] = {
 static const u8 k_msg_answer[] = {ANS_BTN1, ANS_BTN1, ANS_HOLD, ANS_BTN1, 0,         ANS_HOLD,
                                   ANS_HOLD, ANS_BTN2, ANS_CANCEL, ANS_BTN1};
 
+/* drawn (dlg_overlay.c): the buttons of each USER_MSG type, left to right */
+#define NOB 0xFF
+static void msg_buttons(struct ov_msg *m, u32 kind, const u8 *btn)
+{
+    static const char *const yes = "Yes", *const no = "No", *const ok = "OK", *const cancel = "Cancel";
+    m->cancel = ANS_CANCEL;
+    if (kind == 0)
+        m->label[0] = ok, m->answer[0] = ANS_BTN1;
+    else if (kind == 1 || kind == 7)
+        m->label[0] = yes, m->label[1] = no, m->answer[0] = ANS_BTN1, m->answer[1] = ANS_BTN2, m->focus = kind == 7;
+    else if (kind == 3 || kind == 8)
+        m->label[0] = ok, m->label[1] = cancel, m->answer[0] = ANS_BTN1, m->answer[1] = ANS_CANCEL, m->focus = kind == 8;
+    else if (kind == 6)
+        m->label[0] = cancel, m->answer[0] = ANS_CANCEL, m->wait = 1;
+    else if (kind == 9) {
+        m->label[0] = btn ? (const char *)RDPTR(btn, 0) : "1", m->label[1] = btn ? (const char *)RDPTR(btn, 8) : "2";
+        m->answer[0] = ANS_BTN1, m->answer[1] = ANS_BTN2;
+    } else /* NONE, WAIT: no buttons, Circle does nothing */
+        m->cancel = NOB, m->wait = kind == 5;
+}
+
 /* MsgParam (0x88): BaseParam, u64 size @30, u32 mode @38, UserMsgParam* @40,
  * ProgressBarParam* @48, SystemMsgParam* @50, s32 userId @58 */
 static s32 hle_sceMsgDialogOpen(const void *p)
@@ -352,12 +394,15 @@ static s32 hle_sceMsgDialogOpen(const void *p)
     char what[160], l1[40], l2[40];
     const char *text;
     u32 a, kind = RD32(sub, 0);
+    struct ov_msg om;
+    memset(&om, 0, sizeof(om));
     if (mode == 1) { /* UserMsgParam: u32 buttonType, const char *msg @8, ButtonsParam* @10 */
         if (kind >= ARRAY_SIZE(k_msg_buttons) || !k_msg_buttons[kind])
             return dlg_fail(&g_msg, DLG_E_PARAM);
         text = (const char *)RDPTR(sub, 8);
         a = k_msg_answer[kind];
         const u8 *btn = RDPTR(sub, 0x10); /* ButtonsParam: msg1, msg2 */
+        msg_buttons(&om, kind, btn);
         if (kind == 9 && btn) {
             dlg_text(l1, sizeof(l1), (const char *)RDPTR(btn, 0));
             dlg_text(l2, sizeof(l2), (const char *)RDPTR(btn, 8));
@@ -370,13 +415,26 @@ static s32 hle_sceMsgDialogOpen(const void *p)
         text = (const char *)RDPTR(sub, 8);
         a = ANS_HOLD;
         fmt(what, sizeof(what), "PROGRESS_BAR %u", kind);
+        om.progress = 1, om.cancel = NOB;
+        if (kind == 1)
+            om.label[0] = "Cancel", om.answer[0] = ANS_CANCEL, om.cancel = ANS_CANCEL;
     } else { /* SystemMsgParam: u32 sysMsgType (0 empty store, 1-2 PSN restrictions, 4 camera ...) */
         text = NULL;
         a = ANS_BTN1;
         fmt(what, sizeof(what), "SYSTEM_MSG %u", kind);
     }
     g_msg.mode = mode, g_msg.value = 0;
-    dlg_start(&g_msg, a, ra, what, text);
+    u32 got = dlg_start(&g_msg, a, ra, what, text);
+    om.text = text;
+    if (mode != 3 && got == a && ov_msg_open(&g_msg, &om)) { /* on screen: the user answers */
+        spin_lock(&g_msg.lock);
+        if (g_msg.status == DLG_RUNNING) {
+            g_msg.drawn = 1;
+            if (om.label[0])
+                g_msg.answer = ANS_USER;
+        }
+        spin_unlock(&g_msg.lock);
+    }
     return 0;
 }
 
@@ -400,6 +458,7 @@ static s32 hle_sceMsgDialogProgressBarInc(u32 target, u32 delta)
         g_msg.value += delta;
         if (old < 100 && g_msg.value >= 100)
             logf("dialog: Msg progress 100%%");
+        ov_msg_progress(&g_msg, (s32)g_msg.value, NULL);
     }
     return rc;
 }
@@ -407,8 +466,10 @@ static s32 hle_sceMsgDialogProgressBarInc(u32 target, u32 delta)
 static s32 hle_sceMsgDialogProgressBarSetValue(u32 target, u32 rate)
 {
     s32 rc = dlg_progress(&g_msg, 2, target);
-    if (rc == 0)
+    if (rc == 0) {
         g_msg.value = rate;
+        ov_msg_progress(&g_msg, (s32)rate, NULL);
+    }
     return rc;
 }
 
@@ -419,6 +480,7 @@ static s32 hle_sceMsgDialogProgressBarSetMsg(u32 target, const char *msg)
         char t[124];
         dlg_text(t, sizeof(t), msg);
         logf("dialog: Msg progress \"%s\"", t);
+        ov_msg_progress(&g_msg, -1, msg);
     }
     return rc;
 }

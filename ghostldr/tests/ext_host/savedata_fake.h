@@ -41,6 +41,8 @@ u32 fake_max_real_mounts(void); /* the most at once */
 u32 fake_data_mounts(void);     /* ghostfs data containers mounted */
 u32 fake_reserved(void);        /* gfs_slot_reserve holds */
 u32 fake_open_fds(void);
+u32 fake_real_calls(void);
+void fake_pick_user(s32 user); /* the game selector picked user for the title (title_user) */   /* searches and mounts sent to the real service (other titles) */
 const char *fake_mounted_names(void); /* every name the service was asked for, space separated */
 
 /* log lines since fake_log_clear */

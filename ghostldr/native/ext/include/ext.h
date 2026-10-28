@@ -153,3 +153,24 @@ const struct ext_lib *ext_find_policy(const char *lib) HIDDEN;
 /* A family that replaces sceSysmoduleLoadModule reports failed loads here
  * (the core's own version does: hle.c); every family's hook hears of them. */
 void ext_sysmodule_failed(u32 id, s32 rc) HIDDEN;
+
+/* The user the title runs for: the one picked in the game selector
+ * (ghost_api.title_user), else the user running SWRR (its initial user);
+ * -1 if unknown (hle_system.c).  title_user_picked: one other than the user
+ * running SWRR was picked, so the title's own save containers (which stay
+ * with the user running SWRR) and its user differ. */
+s32 title_user(void) HIDDEN;
+bool title_user_picked(void) HIDDEN;
+
+/* drawn dialogs (dlg_overlay.c): text in a box at the bottom of the
+ * title's frames for seconds (0: until SWRR closes; a timed one shows over
+ * it), up to three lines split at '\n': what the user must know that the
+ * title does not say.  ov_notice: the same once per session for *once. */
+void ov_banner(const char *text, u32 seconds) HIDDEN;
+void ov_notice(volatile int *once, const char *text) HIDDEN;
+
+/* path as the title sees it, for the extension's own files: the title's
+ * /data (its kept container, hle_appcontent.c) resolved directly, so it
+ * works before ext_init registered the remaps (a save tool's scan runs
+ * then); anything else through remap_path */
+const char *title_path(const char *path, char *buf, size_t size) HIDDEN;

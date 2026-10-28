@@ -424,8 +424,14 @@ static void test_search(void)
     memset(&r, 0, sizeof(r));
     c.user = FAKE_USER0, c.title_id = other;
     r.dirs = (char *)names, r.dirs_num = 8;
+    u32 calls = fake_real_calls();
     EXPECT_RC(sd_dir_name_search(&c, &r), 0, "search another title");
     expect(r.hit_num == 0 && r.set_num == 0, "another title's saves: none");
+    expect(fake_real_calls() == calls + 1, "another title's search goes to the real service");
+    char host[16] = "CUSA03474";
+    c.title_id = host;
+    EXPECT_RC(sd_dir_name_search(&c, &r), 0, "search the host's own title");
+    expect(r.hit_num == 0 && fake_real_calls() == calls + 1, "the host's saves stay out of sight");
 
     /* titles built before SDK 1.70 / 2.50 pass smaller result structs */
     fake_set_sdk(0x01600000);
@@ -465,6 +471,13 @@ static void test_delete_and_vanished(void)
     char other[16] = "CUSA00001";
     d.dir = dn("SAVE0"), d.title_id = other;
     EXPECT_RC(sd_delete(&d), W_NOT_FOUND, "Delete of another title's save: NOT_FOUND");
+    char jakx[16] = "CUSA07992", host[16] = "CUSA03474";
+    d.title_id = jakx;
+    EXPECT_RC(sd_delete(&d), W_NOT_FOUND, "Delete of another exploit title's save reaches the service");
+    expect(fake_log_has("delete CUSA07992:SAVE0 (another title)"), "(Jak X: not the title SWRR runs as)");
+    d.title_id = host;
+    EXPECT_RC(sd_delete(&d), W_NOT_FOUND, "Delete of a save of the title SWRR runs as: NOT_FOUND");
+    expect(!fake_log_has("delete CUSA03474"), "without reaching the service");
 
     /* the user deletes a container in the PS5's settings while SWRR is off */
     fake_cont_delete(FAKE_USER0, "GTESTD003SAVE"); /* save2 */
@@ -826,6 +839,41 @@ static void test_gate_and_table(void)
     expect(table, "every entry is a libSceSaveData function");
 }
 
+/* the title's /data, kept in <prefix>D000SAVE for the session */
+static void test_data_root(void)
+{
+    const char *mp = savedata_data_root();
+    expect(mp && strncmp(mp, "/savedata", 9) == 0, "the title's /data: a container mounted for the session");
+    expect(fake_cont_exists(FAKE_USER0, "GTESTD000SAVE") && fake_cont_mounted(FAKE_USER0, "GTESTD000SAVE"),
+           "GTESTD000SAVE made and mounted for the user running SWRR");
+    expect(savedata_data_root() == mp && fake_reserved() == 1, "mounted once, one mount slot held");
+    char names[8][32];
+    s32 rc;
+    u32 n = search(FAKE_USER0, NULL, 0, 0, names, 8, NULL, NULL, NULL, &rc);
+    bool listed = false;
+    for (u32 i = 0; i < n && i < 8; i++)
+        listed |= strstr(names[i], "000") != NULL;
+    expect(rc == 0 && !listed, "no save directory of the title's");
+}
+
+/* a title run for another user (game selector): its own saves stay with the user running SWRR */
+static void test_picked_user(void)
+{
+    char mp[16];
+    fake_pick_user(FAKE_USER1);
+    mount_ok(FAKE_USER1, "PICKED", 96, MODE_CREATE2 | MODE_RDWR, mp, 1, "the title's own save, for the picked user");
+    u32 mine = 0, theirs = 0;
+    for (u32 n = 1; n < 100; n++) {
+        char c[32];
+        fmt(c, sizeof(c), "GTESTD%03uSAVE", n);
+        mine += fake_cont_mounted(FAKE_USER0, c);
+        theirs += fake_cont_mounted(FAKE_USER1, c);
+    }
+    expect(mine == 1 && theirs == 0, "its container is mounted for the user running SWRR, not the picked one");
+    EXPECT_RC(umount(mp), 0, "unmount");
+    fake_pick_user(-1);
+}
+
 static void run_cont(void)
 {
     fake_init(g_tmp, true, "GTEST", 0x08008011);
@@ -844,6 +892,8 @@ static void run_cont(void)
     test_memory();
     test_title_store();
     test_hooks();
+    test_picked_user();
+    test_data_root();
     expect(fake_violations() == 0, "no real call ever named SWRR's save, GFSINDEX or a data container");
     expect(fake_swrr_touched() == 0, "no path ever reached SWRR's /savedata0");
     expect(fake_bad_paths() == 0, "no path outside the test");

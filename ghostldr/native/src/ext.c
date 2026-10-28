@@ -339,6 +339,30 @@ void ext_title_starting(void)
         g_exp->title_starting();
 }
 
+/* A module's text before it is written to executable memory (loader.c):
+ * the extension patches raw system call sites in it (hle_rawsys.c). */
+void ext_patch_text(struct module *m, u8 *text, u64 size)
+{
+    if (g_exp && g_exp->size >= __builtin_offsetof(struct ext_exports, patch_text) + sizeof(void *) &&
+        g_exp->patch_text)
+        g_exp->patch_text(m, text, size);
+}
+
+/* display buffers and pad states for the extension's drawn dialogs (hle_sys.c) */
+void ext_video_buffers(s32 handle, s32 start, const u64 *addrs, s32 num, const void *attr)
+{
+    if (g_exp && g_exp->size >= __builtin_offsetof(struct ext_exports, video_buffers) + sizeof(void *) &&
+        g_exp->video_buffers)
+        g_exp->video_buffers(handle, start, addrs, num, attr);
+}
+
+void ext_pad_state(s32 handle, u8 *data)
+{
+    if (g_exp && g_exp->size >= __builtin_offsetof(struct ext_exports, pad_state) + sizeof(void *) &&
+        g_exp->pad_state)
+        g_exp->pad_state(handle, data);
+}
+
 static int ext_selftest(void)
 {
     char nid[12];
@@ -418,21 +442,39 @@ static int ext_place(void)
  * ext_start. */
 static const struct ext_early *g_early;
 
-int ext_approot_init(const char **root)
+/* the early entry, once (what for: the log) */
+static const struct ext_early *early(const char *what)
 {
     const struct ext_blob *h = g_hdr;
+    if (g_early)
+        return g_early;
     if (!h || !(h->flags & EXT_BLOB_EARLY) || h->early_entry >= h->text_size) {
-        logf("ext: the extension has no early entry: app root %s needs one", *root);
-        return -1;
+        logf("ext: the extension has no early entry: %s needs one", what);
+        return NULL;
     }
     if (ext_place() != 0)
-        return -1;
-    g_early = ((ext_early_fn)(g_base + h->early_entry))(&g_ghost_api);
-    if (!g_early || g_early->magic != EXT_EARLY_MAGIC || g_early->size < sizeof(*g_early)) {
-        logf("ext: ext_early failed (%p)", g_early);
-        return -1;
+        return NULL;
+    const struct ext_early *e = ((ext_early_fn)(g_base + h->early_entry))(&g_ghost_api);
+    if (!e || e->magic != EXT_EARLY_MAGIC || e->size < sizeof(*e)) {
+        logf("ext: ext_early failed (%p)", e);
+        return NULL;
     }
-    return g_early->approot_init(root);
+    return g_early = e;
+}
+
+int ext_approot_init(const char **root)
+{
+    const struct ext_early *e = early(*root);
+    return e ? e->approot_init(root) : -1;
+}
+
+/* A save tool's scan before the title loads (ghost_api.save_prescan): the
+ * code is placed now when no app root placed it, in a new JIT block where
+ * ext_start would have put it */
+int ext_save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg)
+{
+    const struct ext_early *e = early("the save scan");
+    return e && e->save_prescan ? e->save_prescan(user, progress, arg) : -1;
 }
 
 int ext_approot_pick(const char *title, int index, const char **root)

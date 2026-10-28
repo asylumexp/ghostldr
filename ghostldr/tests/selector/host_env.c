@@ -21,6 +21,14 @@
  *           badcrc  sel.c refuses a module with the wrong CRC
  *           ps4     a PS4 (CTX_FLAG_PS4), three titles: Right, Cross, Cross (No),
  *                   Cross, Circle, Cross, Left (Yes), Cross -> 1 (CUSA00001)
+ *           apollo  a save tool (APOL00004, its profile's "save_tool") and a game:
+ *                   Cross asks whose saves (two users, the second not signed
+ *                   in: Down, Cross refused), Up, Cross: the title is mounted
+ *                   (title_pick) and scanned (save_prescan, 40 fake titles of
+ *                   300 ms: its bar shows); Circle held cancels it, Cross scans
+ *                   the rest -> 0 (APOL00004) for user 10000001 (title_user)
+ *           apollo-one the save tool alone, not requested (as boot.c shows it
+ *                   for a save tool): asked at once, a short scan, no bar -> 0
  *
  * Environment: SEL_SHOTS="ms:name,..." saves what is on the screen at each
  * time as OUT_DIR/MODE-name.png.  SEL_BUNDLE=1: the module comes in memory,
@@ -100,6 +108,11 @@ int arena_init(void)
     if (!g_region) {
         g_region = sys_map(REGION_SIZE);
         sys_protect(g_region, REGION_SIZE, 0);
+        /* a PS4's ps4_verify probes each JIT buffer through the compiler,
+         * which copies through the staging buffer's first bytes: over the
+         * selector's header (ud2 filler, as read from a JIT buffer) */
+        if (g_ctx->flags & CTX_FLAG_PS4)
+            memset((void *)g_ctx->staging, 0x0b, 16);
     }
     return 0;
 }
@@ -408,14 +421,22 @@ static const struct step MULTI[] = {{2500, 0x20}, {2600, 0}, {3000, 0x20}, {3100
 static const struct step PS4[] = {{2500, 0x20},   {2600, 0}, {3200, 0x4000}, {3300, 0}, {3800, 0x4000}, {3900, 0},
                                   {4400, 0x4000}, {4500, 0}, {5000, 0x2000}, {5100, 0}, {5600, 0x4000}, {5700, 0},
                                   {6200, 0x80},   {6300, 0}, {6800, 0x4000}, {6900, 0}};
+/* Right, Left, Cross (whose saves), Down, Cross (not signed in), Up, Cross (the
+ * scan), Circle held (cancel), Cross (the rest) */
+static const struct step APOLLO[] = {{2500, 0x20},   {2600, 0}, {3000, 0x80},   {3100, 0}, {3500, 0x4000}, {3600, 0},
+                                     {4200, 0x40},   {4300, 0}, {4800, 0x4000}, {4900, 0}, {5500, 0x10},   {5600, 0},
+                                     {6200, 0x4000}, {6300, 0}, {8000, 0x2000}, {9000, 0}, {10000, 0x4000}, {10100, 0}};
+static const struct step APOLLO_ONE[] = {{1500, 0x4000}, {1600, 0}};
+#define N(a) (int)(sizeof(a) / sizeof((a)[0]))
 
 static int pad_open(s32 user, s32 type, s32 index, const void *param) { return user == 0x10000001 ? 5 : -1; }
 static void shots(void);
 static int pad_read(s32 handle, u8 *data)
 {
     shots();
-    const struct step *s = str_eq(g_mode, "multi") ? MULTI : str_eq(g_mode, "ps4") ? PS4 : SINGLE;
-    int n = str_eq(g_mode, "ps4") ? (int)(sizeof(PS4) / sizeof(PS4[0])) : 6;
+    const struct step *s = str_eq(g_mode, "multi") ? MULTI : str_eq(g_mode, "ps4") ? PS4 : str_eq(g_mode, "apollo") ? APOLLO
+                         : str_eq(g_mode, "apollo-one") ? APOLLO_ONE : SINGLE;
+    int n = str_eq(g_mode, "ps4") ? N(PS4) : str_eq(g_mode, "apollo") ? N(APOLLO) : str_eq(g_mode, "apollo-one") ? N(APOLLO_ONE) : 6;
     u32 ms = (u32)((g_now - 1000000) / 1000), b = 0;
     for (int i = 0; i < n; i++)
         if (ms >= s[i].ms)
@@ -433,12 +454,62 @@ static int user_initial(s32 *u)
 }
 static int user_name(s32 u, char *name, u64 size)
 {
-    const char *n = "Tester";
+    const char *n = u == 0x10000002 ? "Second" : "Tester";
     for (u64 i = 0; i < size; i++)
         if (!(name[i] = i < 6 ? n[i] : 0))
             break;
-    return u == 0x10000001 ? 0 : (int)0x80960009;
+    return u == 0x10000001 || u == 0x10000002 ? 0 : (int)0x80960009;
 }
+/* two users on the console; only the first signed in */
+static int g_user_lists;
+static int user_registered(s32 *list)
+{
+    for (int i = 0; i < 16; i++)
+        list[i] = i < 2 ? 0x10000001 + i : -1;
+    g_user_lists++;
+    return 0;
+}
+static int user_login(s32 *list)
+{
+    for (int i = 0; i < 4; i++)
+        list[i] = i ? -1 : 0x10000001;
+    return 0;
+}
+
+/* ---- a save tool: the core's title_pick, save_prescan and title_user ---- */
+static u32 g_user_chosen;
+static int g_picks, g_scans, g_scan_cancels;
+static char g_picked[16];
+static int g_picked_index = -1;
+static u32 g_scanned;
+static int title_pick(const char *title, int index)
+{
+    g_picks++;
+    for (int i = 0; i < 16; i++)
+        g_picked[i] = title[i];
+    g_picked_index = index;
+    say("selector_host: title_pick(%.16s, %d)", title, index);
+    return 0;
+}
+/* 40 titles of 300 ms (apollo; 3 of 100 ms alone); titles searched before a cancel are not searched again */
+static int save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg)
+{
+    int one = str_eq(g_mode, "apollo-one");
+    u32 all = one ? 3 : 40, total = all - g_scanned, done = 0;
+    g_scans++;
+    check(g_picks == 1, "the title was mounted before its scan");
+    say("selector_host: save_prescan(user %x): %u titles", user, total);
+    int stop = progress(arg, 0, total);
+    while (!stop && done < total) {
+        k_usleep(one ? 100000 : 300000);
+        stop = progress(arg, ++done, total);
+    }
+    g_scanned += done;
+    g_scan_cancels += stop != 0;
+    return (int)(done / 4);
+}
+static u32 f_profile_has(u32 mask) { return str_eq(g_mode, "apollo-one") ? mask & PF_SAVE_TOOL : 0; }
+static const char *f_title_id(void) { return str_eq(g_mode, "apollo-one") ? "APOL00004" : ""; }
 static int param_int(s32 id, s32 *v)
 {
     *v = id == 1 ? 1 : id == 3 ? 1 : 0;
@@ -587,6 +658,8 @@ void *host_dlsym(u32 handle, const char *name)
         {H_PAD, "scePadReadState", pad_read},
         {H_USER, "sceUserServiceGetInitialUser", user_initial},
         {H_USER, "sceUserServiceGetUserName", user_name},
+        {H_USER, "sceUserServiceGetRegisteredUserIdList", user_registered},
+        {H_USER, "sceUserServiceGetLoginUserIdList", user_login},
         {H_SYSSVC, "sceSystemServiceParamGetInt", param_int},
         {H_PNG, "scePngDecParseHeader", png_parse},
         {H_PNG, "scePngDecQueryMemorySize", png_query},
@@ -686,15 +759,19 @@ int main(int argc, char **argv)
     cx->magic = BOOT_MAGIC, cx->size = sizeof(*cx), cx->libkernel_handle = H_KERNEL, cx->jit_memcpy = JIT_MEMCPY;
     cx->staging_size = 4u << 20, cx->staging = (u64)sys_calloc(cx->staging_size);
     cx->app_root = (u64)(str_eq(g_mode, "approot") ? "/data/test/app0" : "ghostfs");
-    cx->flags = (str_eq(g_mode, "skip") ? 0 : CTX_FLAG_SELECT) | 2 |
-                (str_eq(g_mode, "single") || str_eq(g_mode, "multi") || str_eq(g_mode, "ps4") ? CTX_FLAG_SEL_FONT_BUILTIN
-                                                                                               : 0) |
+    int apollo = str_eq(g_mode, "apollo") || str_eq(g_mode, "apollo-one");
+    cx->flags = (str_eq(g_mode, "skip") || apollo ? 0 : CTX_FLAG_SELECT) | 2 |
+                (str_eq(g_mode, "single") || str_eq(g_mode, "multi") || str_eq(g_mode, "ps4") || apollo
+                     ? CTX_FLAG_SEL_FONT_BUILTIN
+                     : 0) |
                 (str_eq(g_mode, "ps4") ? CTX_FLAG_PS4 : 0);
     struct ghost_api *a = &g_ghost_api;
     a->version = GHOST_API_VERSION, a->size = sizeof(*a), a->ctx = &g_ctx, a->k = &K, a->logf = logf;
     a->call_gadget6 = call_gadget6, a->host_dlsym = host_dlsym, a->hle_lookup = hle_lookup;
     a->vfs_open = vfs_open, a->vfs_read = vfs_read, a->vfs_close = vfs_close, a->vfs_stat = vfs_stat;
     a->gfs_active = gfs_active, a->gfs_mount = gfs_mount, a->gfs_umount = gfs_umount;
+    a->profile_has = f_profile_has, a->title_id = f_title_id;
+    a->title_user = &g_user_chosen, a->title_pick = title_pick, a->save_prescan = save_prescan;
 
     u64 size = (u64)sys_file_size(argv[2]);
     const char *in_mem = sys_getenv("SEL_BUNDLE");
@@ -713,8 +790,9 @@ int main(int argc, char **argv)
     cx->sel_size = size;
     cx->sel_crc = sys_strtoul(argv[3]) ^ (str_eq(g_mode, "badcrc") ? 1 : 0);
     char title[16];
-    /* boot.c: show when ghostfs left the choice to it, or with run.py --select */
-    int pick = sel_run((cx->flags & CTX_FLAG_SELECT) != 0, title);
+    /* boot.c: show when ghostfs left the choice to it (several titles: apollo),
+     * with run.py --select, or for a save tool the core has (apollo-one) */
+    int pick = sel_run((cx->flags & CTX_FLAG_SELECT) || str_eq(g_mode, "apollo") || f_profile_has(PF_SAVE_TOOL), title);
 
     int want = str_eq(g_mode, "multi") ? 2 : str_eq(g_mode, "ps4") ? 1 : str_eq(g_mode, "skip") || str_eq(g_mode, "badcrc") ? -1 : 0;
     say("selector_host: %s chose %d (%.16s)", g_mode, pick, pick >= 0 ? title : "-");
@@ -723,6 +801,17 @@ int main(int argc, char **argv)
         check(str_eq(title, "CUSA00003"), "its ID is returned");
     if (str_eq(g_mode, "ps4"))
         check(str_eq(title, "CUSA00001"), "its ID is returned");
+    if (apollo) {
+        check(str_eq(title, "APOL00004"), "its ID is returned");
+        check(g_picks == 1 && str_eq(g_picked, "APOL00004") && g_picked_index == 0, "the save tool mounted once, by its place");
+        check(g_scans == (str_eq(g_mode, "apollo") ? 2 : 1) && g_scan_cancels == (str_eq(g_mode, "apollo") ? 1 : 0),
+              str_eq(g_mode, "apollo") ? "scanned, cancelled with Circle, scanned again" : "scanned once");
+        check(g_scanned == (str_eq(g_mode, "apollo") ? 40 : 3), "every title scanned in the end");
+        check(g_user_chosen == 0x10000001, "title_user is the chosen user");
+        check(g_user_lists >= 1, "the registered users were listed");
+    } else {
+        check(g_user_chosen == 0 && g_picks == 0 && g_scans == 0, "no user, mount or scan for other titles");
+    }
     int shown = want >= 0;
     if (shown) {
         check(g_vo_open == 1 && g_vo_closed == 1, "VideoOut opened once and closed");

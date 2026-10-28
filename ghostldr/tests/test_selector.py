@@ -4,7 +4,9 @@
     against a fake catalogue renders its scenes to PNG; every partial redraw
     is checked against a whole one; a meta.bin from host/gfs_meta.py is read
     and its QOI pictures decoded by the module's own code; as on a PS4, game
-    dumps are marked and ask before they boot, homebrew isn't.
+    dumps are marked and ask before they boot, homebrew isn't; a save tool
+    (Apollo) asks whose saves to open, greys users who aren't signed in, and
+    shows a long save scan's progress, which Circle held cancels.
   - selector_host: the core's real src/sel.c and the real selector.bin run as
     x86-64 (Rosetta on Apple silicon) against a fake console whose save data
     is a directory tree built here in ghostfs's formats: a v0.1 install
@@ -13,7 +15,10 @@
     and a broken libSceFont, a bad CRC.  Each run must give back every block
     of direct memory, close VideoOut and every file, unload the modules it
     loaded, unmount every container and leave the module image cleared.
-    On a fake PS4 (CTX_FLAG_PS4) a game's dump boots only after a Yes.
+    On a fake PS4 (CTX_FLAG_PS4) a game's dump boots only after a Yes.  A
+    save tool (its profile's "save_tool") asks whose saves to open, has the
+    core mount it (title_pick) and scan it (save_prescan) before it returns,
+    and leaves the user in title_user; alone, it is asked at once.
 
     python3 -m unittest discover -s ghostldr/tests
 
@@ -185,6 +190,17 @@ class Selector(unittest.TestCase):
             cat.append({"id": tid, "prefix": prefix, "index": prefix + "INDEX", "name": "", "version": "01.00",
                         "total": total, "containers": count, "flags": 0})
         catalogue(cls.ps4saves, cat)
+        # a save tool (Apollo Save Tool, whose profile has "save_tool") beside a game, and alone
+        cls.apollo, cls.apollo_one = t / "saves-apollo", t / "saves-apollo-one"
+        for saves, ids in ((cls.apollo, ("APOL00004", "CUSA00001")), (cls.apollo_one, ("APOL00004",))):
+            cat = []
+            for tid in ids:
+                prefix = "G" + tid
+                files = {"eboot.bin": b"\1" * 5000, "sce_sys/icon0.png": art(2 if tid[0] == "A" else 1, "icon0.png")}
+                total, count = pack_title(saves, prefix, tid, files, 200 << 10, prefix + "INDEX")
+                cat.append({"id": tid, "prefix": prefix, "index": prefix + "INDEX", "name": "", "version": "02.40",
+                            "total": total, "containers": count, "flags": 0})
+            catalogue(saves, cat)
         # an app root (dev setups: no ghostfs)
         cls.approot = t / "approot"
         (cls.approot / "sce_sys").mkdir(parents=True)
@@ -197,6 +213,7 @@ class Selector(unittest.TestCase):
         named["name"] = "Neon Drift (from its profile)"
         cls.bundle = t / "profiles.bin"
         cls.bundle.write_bytes(profiles.compile_blob(profiles.load("CUSA11456")) + profiles.compile_blob(named)
+                               + profiles.compile_blob(profiles.load("APOL00004"))
                                + profiles.compile_blob(profiles.load(None)) + b"\0" * 8)
         cls.host = None
         xcc = None if os.environ.get("SELECTOR_NO_X86") else x86_64_cc()
@@ -331,7 +348,8 @@ class Selector(unittest.TestCase):
     def run_host(self, mode: str, shots: str = "", in_memory: bool = False) -> str:
         if not self.host:
             self.skipTest("no way to build and run x86-64 code here")
-        saves = self.multi if mode == "multi" else self.approot if mode == "approot" else self.legacy
+        saves = {"multi": self.multi, "approot": self.approot, "apollo": self.apollo,
+                 "apollo-one": self.apollo_one}.get(mode, self.legacy)
         env = dict(os.environ, SEL_SHOTS=shots, SEL_PROFILES=str(self.bundle), SEL_BUNDLE="1" if in_memory else "")
         crc = hex(zlib.crc32(SEL_BIN.read_bytes()))
         p = subprocess.run([str(self.host), mode, str(SEL_BIN), crc, str(saves), str(self.shots)],
@@ -366,6 +384,60 @@ class Selector(unittest.TestCase):
         self.assertEqual(out.count("PS4: No for title 1 (CUSA00001)"), 2)
         self.assertIn("PS4: Yes for title 1 (CUSA00001): booting it", out)
         self.assertIn("Cross on title 1 (CUSA00001)", out)
+
+    def test_preview_save_tool(self) -> None:
+        """A save tool asks whose saves to open: every user listed, those not signed in greyed and
+        refused; then the scan, whose progress shows when it is long, and the user goes to the title."""
+        out = self.preview_run("--scene", "apollo")
+        self.assertIn("save tool: asking whose saves to open for title 11 (APOL00004): 4 user(s)", out)
+        self.assertIn("save tool: user 10000001 chosen for title 11 (APOL00004)", out)
+        self.assertEqual(out.count("chosen for title"), 1)                 # Cross on a user not signed in: refused
+        self.assertIn("save tool: a long scan (1 of 349 after ", out)
+        self.assertRegex(out, r"save tool: scan done after 349 of 349 titles, \d+ ms")
+        self.assertIn("boot title 11 (APOL00004)", out)
+        self.assertIn("title_user 10000001", out)
+        for name in ("apollo-home", "apollo-users", "apollo-users-greyed", "apollo-not-signed-in", "apollo-scan-start",
+                     "apollo-scan", "apollo-scan-late"):
+            self.assertGreater((self.shots / f"preview-{name}.png").stat().st_size, 10000, name)
+
+    def test_preview_save_tool_alone(self) -> None:
+        """The save tool alone: asked at once, no going back to a list; a short scan shows no bar."""
+        out = self.preview_run("--scene", "apollo-only")
+        self.assertIn("save tool: asking whose saves to open for title 0 (APOL00004)", out)
+        self.assertNotIn("a long scan", out)
+        self.assertIn("boot title 0 (APOL00004)", out)
+        self.assertGreater((self.shots / "preview-apollo-only.png").stat().st_size, 10000)
+
+    def test_preview_save_tool_cancel(self) -> None:
+        """Circle held during the scan cancels it (a tap between two titles is missed): the question again,
+        with no list to go back to; Cross scans what is left."""
+        out = self.preview_run("--scene", "apollo-cancel")
+        self.assertEqual(out.count("Circle: cancelling the scan"), 1)
+        self.assertRegex(out, r"scan cancelled after (\d+) of 349 titles")
+        n = int(__import__("re").search(r"scan cancelled after (\d+) of 349", out).group(1))
+        self.assertIn(f"scan: user 10000001, {349 - n} titles to search", out)
+        self.assertIn("boot title 11 (APOL00004)", out)
+        for name in ("apollo-scan-hint", "apollo-cancelled", "apollo-resumed"):
+            self.assertGreater((self.shots / f"preview-{name}.png").stat().st_size, 10000, name)
+
+    def test_save_tool_on_the_console_side(self) -> None:
+        """The real module: Apollo beside a game; the core mounts it once and scans for the chosen user."""
+        if not self.host:
+            self.skipTest("no way to build and run x86-64 code here")
+        out = self.run_host("apollo", "4000:users,5200:greyed,7500:scan,9600:again,15000:resumed")
+        self.assertIn("save tool: asking whose saves to open for title 0 (APOL00004): 2 user(s)", out)
+        self.assertIn("user 10000002 'Second', not signed in", out)
+        self.assertIn("selector_host: title_pick(APOL00004, 0)", out)
+        self.assertIn("title 0 (APOL00004) mounted for its save scan: 0", out)
+        self.assertIn("selector_host: save_prescan(user 10000001): 40 titles", out)
+        self.assertIn("save tool: a long scan", out)
+        self.assertRegex(out, r"save tool: scan cancelled after \d+ of 40 titles")
+        self.assertIn("title 0 (APOL00004) opens the saves of user 10000001", out)
+        out = self.run_host("apollo-one", "1000:alone")
+        self.assertIn("1 title(s) installed (GFSCATALOG), a save tool: whose saves to open", out)
+        self.assertIn("selector_host: save_prescan(user 10000001): 3 titles", out)
+        self.assertNotIn("a long scan", out)
+        self.assertIn("title 0 (APOL00004) opens the saves of user 10000001", out)
 
     def test_one_title_is_not_shown(self) -> None:
         out = self.run_host("skip")
