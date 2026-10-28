@@ -1,6 +1,7 @@
 /*
  * Large executables: the code map of a module's executable segment and the
- * whole emulator JIT objects that cover it (bxplan.c; no console calls).
+ * JIT objects that cover it: whole emulator buffers, or fresh objects sized
+ * to the code once the buffers are reclaimed (bxplan.c; no console calls).
  * bigexec.c uses it on the console; tools/exec_fit.py is its twin for the
  * fit check before an install, and tests/test_bigexec.py runs both on the
  * same inputs.  docs/compatibility.md, "Large executables".
@@ -12,7 +13,8 @@
 #define BX_JOIN 0x100000UL           /* code closer than this is one run */
 #define BX_PAD 0x40000UL             /* margin on both sides of a run */
 #define BX_MAX_RUNS 6
-#define BX_MAX_OBJS 5
+#define BX_MAX_OBJS 5                /* emulator buffers bx_cover tries */
+#define BX_MAX_VIEWS 6               /* views of one module: a buffer cover's, or a fresh object per run */
 #define BX_MAX_FORBID 8
 #define BX_TEXT_MAX (512UL << 20)    /* larger executable segments are not mapped */
 
@@ -45,7 +47,7 @@ struct bx_view {
 
 struct bx_layout {
     u32 nviews;
-    struct bx_view view[BX_MAX_OBJS]; /* by offset; neighbours touch where code continues */
+    struct bx_view view[BX_MAX_VIEWS]; /* by offset; neighbours touch where code continues */
     u64 used;                         /* bytes of objects used */
 };
 
@@ -54,6 +56,28 @@ struct bx_layout {
  * largest object left holding at least `keep` bytes.  0, or -1: no layout. */
 int bx_cover(const struct bx_range *runs, u32 nruns, const struct bx_range *forbid, u32 nforbid, const u64 *obj,
              u32 nobj, u64 keep, struct bx_layout *out);
+
+/* Fresh objects instead (after a reclaim; ext/src/reclaim.c): one per run,
+ * of the run's own size, at its offset, none over a data segment.  size[i]
+ * is view i's object's size.  0, or -1: a run overlaps a data segment.
+ * Inline: the core itself never uses it (its image must stay small). */
+static inline int bx_fresh(const struct bx_range *runs, u32 nruns, const struct bx_range *forbid, u32 nforbid, u64 *size,
+                           struct bx_layout *out)
+{
+    out->nviews = 0, out->used = 0;
+    if (!nruns || nruns > BX_MAX_VIEWS || nforbid > BX_MAX_FORBID)
+        return -1;
+    for (u32 i = 0; i < nruns; i++) {
+        s64 lo = (s64)ALIGN_DOWN((u64)runs[i].lo, 0x4000), hi = (s64)ALIGN_UP((u64)runs[i].hi, 0x4000);
+        for (u32 f = 0; f < nforbid; f++)
+            if (forbid[f].lo < hi && forbid[f].hi > lo)
+                return -1;
+        size[i] = (u64)(hi - lo);
+        out->view[out->nviews++] = (struct bx_view){i, lo};
+        out->used += size[i];
+    }
+    return 0;
+}
 
 /* modules as elf.c parsed them (their files still loaded) */
 bool bx_arena_holds(const struct module *mods, u64 lo, u64 hi); /* boot.c's arena placement works */

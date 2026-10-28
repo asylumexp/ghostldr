@@ -188,6 +188,15 @@ static s32 hle_dlsym(s32 handle, const char *name, void **out)
      * is refused rather than handed SWRR's */
     u64 fn = ext_find(NULL, nid);
     if (vmod_is(handle)) {
+        /* libkernel_sys is libkernel on a PS4 (loading it gives libkernel's
+         * handle): what the extension lacks is libkernel's own, e.g.
+         * sceKernelGetFsSandboxRandomWord (PS4-Xplorer called the NULL it
+         * got and SWRR ended) */
+        if (!fn && strncmp(g_vmod[handle - VMOD_BASE], "libkernel", 9) == 0) {
+            void *real = NULL;
+            if (call_gadget6(g_ctx->dlsym, (u32)g_ctx->libkernel_handle, (u64)name, (u64)&real, 0, 0, 0) == 0)
+                fn = (u64)real;
+        }
         *out = (void *)fn;
         static u32 said;
         if (!fn || said++ < 16)

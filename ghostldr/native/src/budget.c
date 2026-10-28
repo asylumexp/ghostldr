@@ -324,11 +324,28 @@ int budget_alloc_gate(u64 len)
     return (int)E_AGAIN;
 }
 
+/* the most the title has held, logged each time it grows by a step: what a
+ * memory plan needs to know (title_fixed_mib, flex_mib) from one boot */
+static u64 g_peak[2];
+
+COLD NOINLINE static void peak_log(u32 which, u64 now)
+{
+    static const char *const what[2] = {"direct", "flexible"};
+    static const u64 step[2] = {256 * MiB, 32 * MiB};
+    u64 old = __atomic_load_n(&g_peak[which], __ATOMIC_RELAXED);
+    if (now < old + step[which] ||
+        !__atomic_compare_exchange_n(&g_peak[which], &old, now, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        return;
+    logf("budget: the title holds %lu MiB of %s memory (its most so far)", now / MiB, what[which]);
+}
+
 void budget_alloc_note(s64 len)
 {
     u64 old = __atomic_fetch_add(&g_title_dmem, (u64)len, __ATOMIC_RELAXED);
     if (len < 0 && old < (u64)-len)
         __atomic_store_n(&g_title_dmem, 0, __ATOMIC_RELAXED);
+    else if (len > 0)
+        peak_log(0, old + (u64)len);
 }
 
 int budget_flex_gate(u64 len)
@@ -341,7 +358,12 @@ int budget_flex_gate(u64 len)
     return (int)E_NOMEM;
 }
 
-void budget_flex_note(s64 len) { __atomic_fetch_add(&g_flex_used, (u64)len, __ATOMIC_RELAXED); }
+void budget_flex_note(s64 len)
+{
+    u64 old = __atomic_fetch_add(&g_flex_used, (u64)len, __ATOMIC_RELAXED);
+    if (len > 0)
+        peak_log(1, old + (u64)len);
+}
 
 /* ---- plan-free answers to the memory queries (resolved by NID: the core's
  * name table only knows the imports of the title it was built against) ---- */

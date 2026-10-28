@@ -1,14 +1,14 @@
 /*
  * libSceNpGameIntent: the parts that must not reach SWRR's process as they
  * are.  SWRR (SDK 2.50) never preloads or initializes the library; the core
- * load-starts it on demand.  ReceiveIntent, GetPropertyValueString and
- * Terminate PASS (the 0x10000017 system event that would lead the title to
- * ReceiveIntent is dropped in hle_system.c).
+ * load-starts it on demand.  The 0x10000017 system event that would lead the
+ * title to ReceiveIntent is dropped in hle_system.c.
  *
- * np-online.md (section 3.12) covers this library too, with VIRT answers for
- * ReceiveIntent and GetPropertyValueString: keep one of the two families'
- * entries when both are merged.  This file is the system-appcontent spec's
- * section 10.
+ * The np-online family (hle_np_online.c, np-online.md section 3.12) answers
+ * ReceiveIntent (INTENT_NOT_FOUND), GetPropertyValueString (VALUE_NOT_FOUND)
+ * and Terminate (0) itself, and denies the rest of the library to the host;
+ * this file keeps the calls that need SWRR's instance or must refuse.  It is
+ * the system-appcontent spec's section 10.
  */
 #include "ext.h"
 

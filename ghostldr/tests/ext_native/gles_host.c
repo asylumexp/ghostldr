@@ -785,6 +785,19 @@ static void scenario_draw(void)
     expect(miss == 0, "textures: each texel where it belongs at 1:1 and doubled, and ARGB swizzled");
     check_px(14, 10, bgra(0, 0, 0, 255), "texture: nothing right of it");
 
+    /* scaled by 1.5 from x 29.5: pixel 29's centre is on the quad's left
+     * edge (drawn), 35's on its right edge (not), and 32's exactly where
+     * texel 1 ends: GL's rule takes texel 2 there, as the GPU does (measured
+     * on a PS4), not the texel a float rounding error falls into */
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(abgr);
+    quad(29.5f, 20, 35.5f, 23, white, 0, 0, 1, 1, true);
+    swap();
+    const u8 *tx0 = &texels[0], *tx2 = &texels[8];
+    check_px(29, 20, bgra(tx0[0], tx0[1], tx0[2], 255), "texel edges: the pixel on the quad's left edge is drawn");
+    check_px(32, 20, bgra(tx2[0], tx2[1], tx2[2], 255), "texel edges: a centre on texel 1's end takes texel 2");
+    check_px(35, 20, bgra(0, 0, 0, 255), "texel edges: the pixel on the right edge is not");
+
     /* colour modulation: SDL_SetTextureColorMod(128, 255, 0) */
     glUseProgram(abgr);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -942,7 +955,7 @@ static void scenario_draw(void)
     ok = 1;
     glGetShaderiv(bin_bad, GL_COMPILE_STATUS, &ok);
     expect(!ok && glGetError() == GL_INVALID_ENUM, "any other binary: GL_INVALID_ENUM, not compiled");
-    expect(g_shown_frames == 9, "nine frames shown");
+    expect(g_shown_frames == 10, "ten frames shown");
 }
 
 /* a full-screen 1920x1080 frame like Apollo's: an opaque background, then a

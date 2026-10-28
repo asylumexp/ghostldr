@@ -597,6 +597,8 @@ int arena_write(u64 dst, const void *src, u64 size);
 int arena_punch_rw(u64 addr, u64 size);
 u32 arena_buffers(u64 *start, u64 *end, u32 max); /* whole JIT buffers, not the core's; by address */
 void arena_drop(u64 start);                       /* a buffer bigexec.c maps elsewhere: place nothing in it */
+int arena_adopt(u64 start, u64 end, s64 delta);    /* a fresh JIT object as the code region (bigexec.c's reclaim) */
+u64 arena_buffer_top(u64 size);                   /* the extension's code without a new JIT block (PS5); 0: none */
 
 /* ---- large executables (bigexec.c, bxplan.c) ---- */
 int bx_prepare(void);          /* after arena_init: views for a module the arena cannot hold; -1: no room */
@@ -607,6 +609,7 @@ struct bx_range {
 };
 u32 bx_code(const struct module *m, const struct bx_range **runs); /* its code runs (TLS patching) */
 bool bx_in_view(const struct module *m, u64 addr);                 /* executable: in one of its views */
+const char *bx_why(void); /* after bx_prepare failed: why the code has no executable memory, for the user; or NULL */
 /* One of the emulator's JIT objects (home, size): the compiler's base
  * descriptor of it (fd), an RX alias of it here (rx; mapped whole with
  * sceKernelMmap MAP_FIXED, it shows the object anywhere) and where the
@@ -621,6 +624,8 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 
 /* ---- runtime extension (ext.c; interface in ghost_api.h) ---- */
 #define CTX_FLAG_EXT_JIT 64 /* place the extension in a new JIT block (run.py --ext-jit) */
+#define CTX_FLAG_RECLAIM 67108864 /* the title's code in fresh JIT objects even when the buffers hold it (run.py --reclaim; bigexec.c) */
+#define CTX_FLAG_EXT_BUFFER 33554432 /* the extension's code in an emulator buffer, not a new JIT block (run.py --ext-buffer; arena.c) */
 /* ctx flag bits: 1 probe, 2 release host memory, 4 snap, 8 count imports, 16 profile,
  * 32 force title ready, 64 ext in a JIT block, 128 dialog cancel, 256 IME fixed name,
  * 512 keep Remote Play, 1024 start game modules at boot, 2048 show the game selector,
@@ -630,9 +635,10 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
  * the automatic plan even over a manual one, 524288 forget the learned
  * memory plan (automem.c), 1048576 the ELF loader, 2097152 the extension
  * came in a bundle, 4194304 dialogs are never drawn (hle_dialog.h, run.py
- * --dialog-auto), 8388608 the USB storage session is open (approot.c);
- * bits 32-47 hold the ELF loader's port, bits 48-63 the FTP server's
- * (CTX_FTP_PORT) */
+ * --dialog-auto), 8388608 the USB storage session is open (approot.c),
+ * 16777216 no log on a USB drive (Settings), 33554432 the extension in an
+ * emulator buffer, 67108864 the reclaim forced (bigexec.c); bits 32-47
+ * hold the ELF loader's port, bits 48-63 the FTP server's (CTX_FTP_PORT) */
 #define CTX_FLAG_NO_AUTO_MEM 65536      /* plan-free titles keep the plain budget (run.py --no-auto-memory) */
 #define CTX_FLAG_AUTO_MEM 131072        /* the automatic plan instead of a profile's manual one (run.py --auto-memory) */
 #define CTX_FLAG_AUTO_MEM_FORGET 524288 /* start the learned memory plan over (run.py --forget-memory) */
@@ -645,6 +651,7 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 #define CTX_FLAG_JAKX 32768            /* UltraC0re in Jak X, not Luac0re in SWRR (ghostldr.lua) */
 #define CTX_FLAG_LIBRARY 262144        /* set by the core: app_root is a folder of title folders (the selector reads it) */
 #define CTX_FLAG_USB_SESSION 8388608   /* set by the extension: it opened libSceUsbStorage's session (approot.c), kept when its code is placed again */
+#define CTX_FLAG_NO_USB_LOG 16777216   /* Settings: the log is not written to a USB drive (docs/logs.md; the selector may set it live) */
 #define CTX_FTP_PORT(flags) ((u32)((flags) >> 48)) /* the FTP server's TCP port (run.py --ftp-port; 0: none) */
 #define CTX_FLAG_ELFLDR 1048576 /* no title: serve the ELF loader (run.py elfldr, docs/elfldr.md) */
 #define CTX_ELFLDR_PORT(flags) ((u32)((flags) >> 32) & 0xFFFF) /* its TCP port (run.py elfldr --port) */
@@ -724,6 +731,9 @@ int ext_start(void);     /* place, relocate and initialize its code */
  * "auto" and no drive has a game (then the installed titles: ghostfs), < 0
  * on errors */
 int ext_approot_init(const char **root);
+struct bx_reclaim;
+int ext_reclaim(struct bx_reclaim *r); /* bigexec.c's reclaim, done by the extension (ghost_api.h) */
+extern int (*g_reclaim)(struct bx_reclaim *r); /* the extension's, set by its ext_early (ext.c) */
 int ext_approot_pick(const char *title, int index, const char **root);
 struct lib_title;
 int ext_library(const struct lib_title **list); /* the games approot_init found (ghost_api.library) */
@@ -735,11 +745,22 @@ const struct ext_lib *ext_lib_policy(const char *lib);
 void ext_note_sysmodule(u32 id, s32 rc); /* a failed sysmodule load, for the extension's families */
 void ext_title_starting(void); /* the title's main thread is next: the extension's last boot step (its FTP server) */
 void ext_patch_text(struct module *m, u8 *text, u64 size); /* a module's text before it is written */
+void ext_title_watch(u64 eboot, u32 phase, u64 core_lo, u64 core_hi); /* the watchdog's PF_DIAG reads (ghost_watch.c) */
 void ext_video_buffers(s32 handle, s32 start, const u64 *addrs, s32 num, const void *attr); /* drawn dialogs */
 void ext_pad_state(s32 handle, u8 *data); /* a pad state the title read: drawn dialogs take the controller */
 
 /* ---- game selector (sel.c; module interface in sel_api.h) ---- */
-int sel_run(bool show, char title[16]); /* the chosen title's catalogue index and ID, or -1 */
+int sel_run(bool show, char title[16]); /* the chosen title's catalogue index and ID, -1, or SEL_EXIT_* */
+/* The selector's Settings ended the boot (docs/selector.md "Settings"):
+ * "Close ghostldr", back to Luac0re's loader.  ghost_boot returns it as is. */
+#define SEL_EXIT_LOADER (-20)
+/* a selector came with the boot (sel.c reads it): with one title or none
+ * installed and no --title, it shows them, with its Settings */
+static inline bool sel_present(void)
+{
+    return g_ctx->size >= __builtin_offsetof(struct boot_ctx, sel_crc) + 8 && (s64)g_ctx->sel_fd >= 0 &&
+           g_ctx->sel_size;
+}
 /* boot.c: a save tool's user (ghost_api.title_user; 0: SWRR's), the
  * selector's choice mounted (ghost_api.title_pick) and the save scan
  * (ghost_api.save_prescan, the extension's: ext.c) */

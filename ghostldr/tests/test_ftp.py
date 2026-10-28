@@ -128,6 +128,21 @@ class FtpTest(unittest.TestCase):
         c.retrbinary(f"RETR {name}", out.write, rest=rest)
         return out.getvalue()
 
+    def test_listening_again_after_rest_mode(self) -> None:
+        """ftp_relisten (after rest mode): new listening sockets on the same port, new passive ports."""
+        c = self.client()
+        self.put(c, "a.bin", b"A" * 1000)
+        c.quit()
+        self.clients.remove(c)
+        self.server.proc.stdin.write("r")
+        self.server.proc.stdin.flush()
+        self.assertEqual(self.server.proc.stdout.readline().strip(), "relisten 0")
+        c = self.client()                                    # the same port answers
+        self.assertEqual(self.get(c, "a.bin"), b"A" * 1000)  # through a passive port made again
+        self.put(c, "b.bin", b"B" * 10)
+        self.assertEqual((self.root / "b.bin").read_bytes(), b"B" * 10)
+        self.assertIn("listening on TCP", self.server.text())
+
     # ---- sessions and paths ----
 
     def test_login_and_directories(self) -> None:

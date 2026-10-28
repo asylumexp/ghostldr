@@ -138,6 +138,13 @@ class SystemFamiliesOnHost(unittest.TestCase):
                  "temp0/ghostldr/CUSA99999/t.bin": b"t"}
         self.run_mode("download", files=files)
 
+    def test_a_store_game_has_no_data_directory(self) -> None:
+        """Bloodborne opens /data/cache.bin, a development kits' cache: on a
+        retail console its sandbox has no /data, and neither does it here."""
+        sfo = {"TITLE_ID": "CUSA00900", "CONTENT_ID": "UP9000-CUSA00900_00-BLOODBORNE000000", "TITLE": "Bloodborne"}
+        out = self.run_mode("data", title="CUSA00900", files={"app0/sce_sys/param.sfo": param_sfo(sfo)})
+        self.assertIn("CUSA00900 is a store game (UP9000-CUSA00900_00-BLOODBORNE000000)", out)
+
     def test_system_events_addressed_to_the_app_are_dropped(self) -> None:
         out = self.run_mode("events")
         self.assertIn("sceSystemServiceReceiveEvent: dropped 10000017 (addressed to SWRR)", out)

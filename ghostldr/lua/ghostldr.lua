@@ -494,6 +494,53 @@ local function cache_delete()
     return s32(sd.delete(p))
 end
 
+-- Settings > Advanced (the game selector's Settings, selector/src/conf.c): GLDRCONF/settings.txt's flags_on
+-- and flags_off go into the flags this boots with.  Safe mode: pending=1 is written before they are used and
+-- the selector clears it; finding it means the last boot with them never reached the selector, so this one
+-- goes without them, once (pending=safe), and says so.  mark: the first read of a boot (writes the marker).
+local function conf_flags(flags, mark)
+    if not save_calls() then return flags end
+    for i = 0, 31 do write8(sd.dir + i, 0) end
+    write_string(sd.dir, "GLDRCONF")
+    local text, rc, mp = "", cache_mount(1, 0)
+    if rc == 0 then
+        write_string(sd.path, mp .. "/settings.txt")
+        local fd = s32(kfn("sceKernelOpen")(sd.path, 0, 0))
+        if fd >= 0 then
+            local n = s32(kfn("sceKernelPread")(fd, scratch, 2048, 0))
+            if n > 0 then text = read_buffer(scratch, n) end
+            kfn("sceKernelClose")(fd)
+        end
+        cache_umount(mp)
+    end
+    local on = tonumber(text:match("flags_on=0x(%x+)") or "0", 16)
+    local off = tonumber(text:match("flags_off=0x(%x+)") or "0", 16)
+    if mark and on | off ~= 0 then
+        local safe = text:match("pending=(%w+)") == "1"
+        text = text:gsub("pending=%w*\n?", "") .. (safe and "pending=safe\n" or "pending=1\n")
+        rc, mp = cache_mount(2, 0)
+        if rc == 0 then
+            write_string(sd.path, mp .. "/settings.txt")
+            local fd = s32(kfn("sceKernelOpen")(sd.path, 0x601, 0x1b6))
+            if fd >= 0 then
+                write_buffer(scratch, text)
+                kfn("sceKernelWrite")(fd, scratch, #text)
+                kfn("sceKernelClose")(fd)
+            end
+            cache_umount(mp)
+        end
+        if safe then
+            event("the last boot with Settings > Advanced never reached the game selector: this one goes without it",
+                "Settings > Advanced is left out of this boot:\nthe last boot with it stopped early.")
+            on, off = 0, 0
+        end
+    end
+    for i = 0, 31 do write8(sd.dir + i, 0) end
+    write_string(sd.dir, CACHE_DIR)
+    if on | off ~= 0 then say(string.format("settings: flags %x -> %x", flags, (flags | on) & ~off)) end
+    return (flags | on) & ~off
+end
+
 -- The cached bundle, with its extension (parts 1), and its selector (parts
 -- 2) mapped as a received one's: the bundle, or nil (none here), or nil and
 -- "mismatch" with its header (another release's), or nil and "damaged" with
@@ -848,7 +895,9 @@ local function boot_ctx(o)
     if LISTEN then
         if not ip_mem then
             ip_mem, header_mem, select_mem = malloc(64), malloc(BUNDLE_HEADER), malloc(64)
-            write_string(ip_mem, (ip or "this PS5"):sub(1, 60))
+            write_string(ip_mem, (ip or "this PS5"):sub(1, 47))
+            -- the host game's title ID (Luac0re's TITLE_ID) at +48, for Settings > About
+            write_string(ip_mem + 48, tostring(TITLE_ID or ""):sub(1, 15))
         end
         write64(ctx + CTX_IP, ip_mem)
         write64(ctx + CTX_HEADER, header_mem)
@@ -987,6 +1036,8 @@ local function listen_main()
     end
     local note
     local b, problem, detail = cache_read(2)
+    local flags0 = base_flags
+    base_flags = conf_flags(flags0, true)      -- Settings > Advanced, for both calls
     if b and b.kind == 2 and not HAS_ELFLDR then   -- a PS5's: no ELF loader here
         unmap(b.ext, b.ext_size)
         b = nil
@@ -1063,6 +1114,7 @@ local function listen_main()
                 ob.from = b.from    -- sent this session, as before the cache: a failure then goes back
                 b = ob
                 hold(b)
+                base_flags = conf_flags(flags0, false)   -- as the selector left Settings > Advanced
                 mode = "boot"
                 event(picked and string.format("%s picked: the ELF loader has stopped; booting it", title)
                     or "nothing picked in the game selector: booting as without it",
@@ -1074,7 +1126,7 @@ local function listen_main()
                 note, mode = "The cached bundle is damaged: deleted.\nSend the bundle again.", "prompt"
             else
                 if code == -7 and was_cached then cache_delete() end
-                return back("the game selector stopped", code, ctx)
+                return back(code == -20 and "closed in Settings" or "the game selector stopped", code, ctx)
             end
         elseif mode == "elfldr" then
             -- as run.py elfldr: no title, the ELF loader on the bundle port; with this build's
@@ -1138,7 +1190,7 @@ local function listen_main()
                 drop(ctx)
                 note, mode, picked = "The cached bundle is damaged: deleted.\nSend the bundle again.", "prompt", nil
             else
-                return back("the boot stopped", code, ctx)
+                return back(code == -20 and "closed in Settings" or "the boot stopped", code, ctx)
             end
         end
     end

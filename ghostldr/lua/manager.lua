@@ -748,7 +748,7 @@ dialog::backdrop{background:#0008}.files{max-height:240px;overflow:auto;font:12p
 <header><h1>ghostldr manager</h1><span id="where" class="mute small"></span><span class="sp"></span>
 <span id="lock" class="small"></span><input id="tok" type="text" placeholder="token" size="10" autocomplete="off" spellcheck="false">
 <button id="unlock">Unlock</button><button id="shownote" title="Show the token on the PS5 again">Show token on PS5</button>
-<button id="refresh">Refresh</button><button id="exit" class="danger">Exit</button></header>
+<a class="btn" href="/install">Install a game</a><button id="refresh">Refresh</button><button id="exit" class="danger">Exit</button></header>
 <main><div id="main"><div class="card mute">Loading...</div></div>
 <div class="card"><h2>Activity</h2><div id="log" class="mute"></div></div></main>
 <dialog id="dlg"><form method="dialog" id="dlgform"><h2 id="dlgtitle"></h2><div id="dlgbody"></div>
@@ -878,6 +878,1095 @@ $("#exit").onclick=async()=>{if(!await dialog("Stop the manager",'<p>Stop the we
  try{await api("POST","/api/exit")}catch(e){}document.body.innerHTML='<main><div class="card"><h2>Manager stopped</h2><p>Luac0re\'s loader on port 9026 is free again.</p></div></main>'};
 lockState();(async()=>{if(token){try{await api("POST","/api/auth")}catch(e){token="";sessionStorage.removeItem("gldr-token");log("the saved token is not valid for this session: enter the new one","warn")}lockState()}await load()})();
 </script></body></html>]==]
+
+-- ---------------------------------------------------------------- network install
+-- The page (/install) packs a game in the browser and stores it through
+-- /api/install/* (docs/manager.md "Install a game").  Which containers each
+-- request may touch: never the host's own save or a title's progress
+-- (*SAVE), never ghostldr's other containers (GLDRCACHE, GLDRCONF...).
+--   data:   <prefix>000..: a title's data containers
+--   index:  <prefix>INDEX, GFSINDEX, GHOSTIDX
+--   meta:   <prefix>META
+--   catalog GFSCATALOG
+--   free:   GFSFREE00..99 (the free-space probes)
+function M.install_kind(name)
+    if not M.valid_container(name) or M.PROTECTED[name] or name:sub(-4) == "SAVE" then return nil end
+    if name == "GFSCATALOG" then return "catalog" end
+    if name == "GFSINDEX" or name == "GHOSTIDX" then return "index" end
+    if M.probe_name(name) then return "free" end
+    local p = name:match("^([A-Z0-9]+)INDEX$")
+    if p and #p <= 12 then return "index" end
+    p = name:match("^([A-Z0-9]+)META$")
+    if p and #p <= 12 then return "meta" end
+    p = name:match("^([A-Z0-9]+)%d%d%d$")
+    if p and #p <= 12 then return "data" end
+    return nil
+end
+M.INSTALL_OPS = {           -- the kinds each request may write
+    put = {index = true, meta = true, catalog = true},
+    write = {index = true, meta = true, catalog = true, data = true},
+    delete = {index = true, meta = true, data = true, free = true},
+    data = {data = true},
+}
+function M.install_file_ok(f) return type(f) == "string" and #f <= 31 and f:match("^[A-Za-z0-9][A-Za-z0-9._-]*$") ~= nil end
+
+-- ghostldr/data/netinstall.html, copied in by ghostldr/tools/netinstall_page.py (the tests check it is current)
+M.INSTALL_PAGE = [====[
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ghostldr: install a game</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--fg:#1b1d22;--mute:#666b76;--line:#dfe2e8;--acc:#2f6fe4;--ok:#16834a;--warn:#a86400;--bad:#c3302b;--bar:#e7eaf0}
+@media (prefers-color-scheme:dark){:root{--bg:#121417;--card:#1b1e23;--fg:#e8eaee;--mute:#9aa1ad;--line:#2c3038;--acc:#6b9cff;--ok:#4cc583;--warn:#e8a33a;--bad:#f0645e;--bar:#2a2e36}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);background:var(--card)}
+header h1{font-size:17px;margin:0}
+header .who{color:var(--mute);font-size:13px;text-align:right}
+main{max-width:760px;margin:0 auto;padding:16px}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 14px}
+h2{font-size:15px;margin:0 0 10px}
+p{margin:6px 0}
+.mute{color:var(--mute)}.small{font-size:13px}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+button,.btn{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:8px;padding:8px 14px;cursor:pointer}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+button:disabled{opacity:.45;cursor:default}
+input[type=text]{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);min-width:0}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.drop{border:2px dashed var(--line);border-radius:10px;padding:16px;text-align:center;color:var(--mute);margin-top:10px}
+.drop.on{border-color:var(--acc);color:var(--acc)}
+table{border-collapse:collapse;width:100%;font-size:14px}
+td,th{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{color:var(--mute);font-weight:500}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 12px;margin:8px 0}
+dt{color:var(--mute)}dd{margin:0;word-break:break-word}
+.bar{height:12px;background:var(--bar);border-radius:6px;overflow:hidden;margin:8px 0}
+.bar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .3s}
+#log{font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;max-height:220px;overflow:auto;white-space:pre-wrap;color:var(--mute);margin-top:8px}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<header><h1>ghostldr · Install a game</h1><div class="who" id="who">connecting…</div></header>
+<main>
+<section id="s-installed">
+  <h2>Installed on the console</h2>
+  <div id="installed" class="small mute">Reading…</div>
+</section>
+
+<section id="s-pick">
+  <h2>1. Choose the game</h2>
+  <p class="small mute">Choose the game's <b>app0</b> folder (the one with <code>eboot.bin</code> and <code>sce_sys</code>), or a
+  <b>.zip</b> of it. On a phone, use a .zip.</p>
+  <div class="row">
+    <label class="btn" id="pick-dir-l">Choose folder…<input id="pick-dir" type="file" webkitdirectory multiple class="hide"></label>
+    <label class="btn">Choose .zip…<input id="pick-zip" type="file" accept=".zip,application/zip" class="hide"></label>
+  </div>
+  <div class="drop" id="drop">or drop the folder or the .zip here</div>
+  <div id="pick-msg" class="small"></div>
+</section>
+
+<section id="s-what" class="hide">
+  <h2>2. Check</h2>
+  <dl id="what"></dl>
+  <div class="row" id="title-row" style="margin:6px 0"><label for="title-in">Title ID</label>
+    <input id="title-in" type="text" maxlength="15" style="width:12em" autocomplete="off" spellcheck="false"></div>
+  <div id="what-msg" class="small"></div>
+</section>
+
+<section id="s-go" class="hide">
+  <h2>3. Install</h2>
+  <div class="row" id="tok-row"><label for="tok">Token shown on the TV</label>
+    <input id="tok" type="text" style="width:10em" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX"></div>
+  <div class="row" style="margin-top:10px"><button class="primary" id="go">Install</button><button id="stop" disabled>Pause</button>
+    <label class="small"><input type="checkbox" id="force"> resend everything</label></div>
+  <div class="bar"><i id="bar"></i></div>
+  <div id="status" class="small"></div>
+  <div id="log"></div>
+  <p class="small mute">Keep this page open, and the phone or computer awake, until it says the game is installed. If the
+  connection drops it carries on where it stopped; a closed page can be resumed later by choosing the same game again.</p>
+</section>
+</main>
+<script>
+"use strict";
+/*GFS-BEGIN: packing and installing, no browser APIs (tests run this part in node) */
+function makeGFS(opts) {
+opts = opts || {};
+const CAP = opts.cap || 992 * 1024 * 1024;   // bytes of data per container (gfs_pack.py CAP; the tests make it tiny)
+const DATA_BLOCKS = 32768, MIN_BLOCKS = 512, HEADER_SIZE = 128, FLAG_DIR = 1, FLAG_INCOMPLETE = 1;
+const SMALL = 64 << 10, SMALL_BUDGET = 256 << 20;
+const MAX_CONTAINERS = 96, MAX_TITLES = 64, CATALOG = "GFSCATALOG", CATALOG_FILE = "catalog.bin";
+const CATALOG_BLOCKS = 512, INDEX_FILE = "index.bin", TAG = "gfs.tag";
+const LEGACY_INDEXES = ["GFSINDEX", "GHOSTIDX"];
+const INCOMPLETE = 1, LEGACY_INDEX = 2, SYNTHESIZED = 1;
+const NOT_FOUND = 0x809F0008, GIB = 1 << 30;
+const SAVE_ERRORS = {0x809F0003: "busy", 0x809F0008: "not found", 0x809F000A: "no space left on the console's storage",
+                     0x809F000C: "too many mounted", 0x809F000F: "broken"};
+const TITLE_RE = /^[A-Z0-9_-]{1,15}$/;
+const enc = new TextEncoder(), dec = new TextDecoder();
+
+// ---- SHA-256 (no crypto.subtle: a plain http:// page is not a secure context)
+const K256 = new Uint32Array([
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,
+  0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,
+  0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,
+  0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,
+  0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,
+  0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+function sha256(data) {
+  const n = data.length, total = ((n + 9 + 63) >> 6) << 6;
+  const m = new Uint8Array(total);
+  m.set(data); m[n] = 0x80;
+  const dv = new DataView(m.buffer);
+  dv.setUint32(total - 8, Math.floor(n / 0x20000000)); dv.setUint32(total - 4, (n << 3) >>> 0);
+  const h = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const w = new Uint32Array(64);
+  const rotr = (x, k) => (x >>> k) | (x << (32 - k));
+  for (let o = 0; o < total; o += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(o + i * 4);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i-15], 7) ^ rotr(w[i-15], 18) ^ (w[i-15] >>> 3);
+      const s1 = rotr(w[i-2], 17) ^ rotr(w[i-2], 19) ^ (w[i-2] >>> 10);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, hh] = h;
+    for (let i = 0; i < 64; i++) {
+      const t1 = (hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + K256[i] + w[i]) >>> 0;
+      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+      hh = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+  }
+  const out = new Uint8Array(32), ov = new DataView(out.buffer);
+  for (let i = 0; i < 8; i++) ov.setUint32(i * 4, h[i]);
+  return out;
+}
+
+// ---- Python's json.dumps (default separators, ensure_ascii): the layout id hashes it
+function pyJson(v) {
+  if (typeof v === "number" || typeof v === "bigint") return String(v);
+  if (typeof v === "string") {
+    let s = '"';
+    for (let i = 0; i < v.length; i++) {
+      const c = v.charCodeAt(i);
+      if (c === 0x22) s += '\\"'; else if (c === 0x5c) s += "\\\\";
+      else if (c === 0x0a) s += "\\n"; else if (c === 0x0d) s += "\\r"; else if (c === 0x09) s += "\\t";
+      else if (c === 0x08) s += "\\b"; else if (c === 0x0c) s += "\\f";
+      else if (c < 0x20 || c > 0x7e) s += "\\u" + c.toString(16).padStart(4, "0");
+      else s += v[i];
+    }
+    return s + '"';
+  }
+  if (Array.isArray(v)) return "[" + v.map(pyJson).join(", ") + "]";
+  throw new Error("pyJson: " + typeof v);
+}
+
+// ---- comparisons as Python makes them (strings by code point; tuples item by item)
+function cmpStr(a, b) {
+  if (a === b) return 0;
+  const x = Array.from(a), y = Array.from(b);
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    const p = x[i].codePointAt(0), q = y[i].codePointAt(0);
+    if (p !== q) return p < q ? -1 : 1;
+  }
+  return x.length - y.length < 0 ? -1 : x.length === y.length ? 0 : 1;
+}
+function cmpKey(a, b) {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const p = a[i], q = b[i];
+    const c = typeof p === "string" ? cmpStr(p, q) : p < q ? -1 : p > q ? 1 : 0;
+    if (c) return c;
+  }
+  return a.length - b.length;
+}
+function cmpBytes(a, b) {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return a.length - b.length;
+}
+const sortedBy = (items, key) => items.map(x => [key(x), x]).sort((p, q) => cmpKey(p[0], q[0])).map(p => p[1]);
+function rpartition(s, sep) { const i = s.lastIndexOf(sep); return i < 0 ? ["", s] : [s.slice(0, i), s.slice(i + 1)]; }
+function partition(s, sep) { const i = s.indexOf(sep); return i < 0 ? [s, ""] : [s.slice(0, i), s.slice(i + 1)]; }
+
+// ---- titles and prefixes (profiles.py, gfs_catalog.py)
+function normalizeTitle(t) { t = String(t || "").trim().toUpperCase(); return TITLE_RE.test(t) ? t : null; }
+function defaultPrefix(title) {
+  let p = ("G" + title.toUpperCase().replace(/[^A-Z0-9]/g, "")).slice(0, 12);
+  if (p.startsWith("GFS")) p = "T" + p.slice(1);
+  if (/D\d{3}$|M\d{2}$/.test(p)) p = p.slice(0, -1) + "X";
+  return p;
+}
+function legacyPrefix(title) {
+  if (/^[A-Z]{4}\d{5}$/.test(title)) return "G" + title.slice(4);
+  return ("G" + title.replace(/[^A-Z0-9]/g, "")).slice(0, 12);
+}
+function prefixProblem(p) {
+  if (!/^[A-Z0-9]{1,12}$/.test(p || "")) return "a prefix is 1-12 of A-Z 0-9";
+  if (p.startsWith("GFS")) return "prefixes starting with GFS are ghostldr's own";
+  if (/D\d{3}$|M\d{2}$/.test(p)) return "a prefix must not end in D + 3 digits or M + 2 digits";
+  return null;
+}
+const dataName = (p, k) => p + String(k).padStart(3, "0");
+const indexName = p => p + "INDEX", saveName = p => p + "SAVE", metaName = p => p + "META";
+
+// ---- param.sfo
+function parseSfo(d) {
+  const out = {};
+  try {
+    if (!d || d.length < 20 || d[0] !== 0 || d[1] !== 0x50 || d[2] !== 0x53 || d[3] !== 0x46) return out;
+    const v = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    const kt = v.getUint32(8, true), dt = v.getUint32(12, true), n = v.getUint32(16, true);
+    for (let i = 0; i < Math.min(n, 256); i++) {
+      const e = 20 + 16 * i, ko = v.getUint16(e, true), fmt = v.getUint16(e + 2, true), ln = v.getUint32(e + 4, true);
+      const doff = v.getUint32(e + 12, true);
+      let end = kt + ko; while (end < d.length && d[end]) end++;
+      const key = dec.decode(d.subarray(kt + ko, end));
+      const raw = d.subarray(dt + doff, dt + doff + ln);
+      if (fmt === 0x0404 && ln >= 4) out[key] = new DataView(raw.buffer, raw.byteOffset, 4).getInt32(0, true);
+      else { const z = raw.indexOf(0); out[key] = dec.decode(z < 0 ? raw : raw.subarray(0, z)); }
+    }
+  } catch (e) { /* an odd param.sfo: what was read so far */ }
+  return out;
+}
+
+// ---- the layout (gfs_pack.py)
+function dataBlocks(size) {
+  const needed = Math.floor((size + 32767) / 32768);
+  return Math.min(DATA_BLOCKS, Math.max(MIN_BLOCKS, needed + 48 + Math.max(64, Math.floor(needed / 16))));
+}
+function smallLimit(files) {
+  let limit = SMALL;
+  const sum = l => { let s = 0; for (const n of files.values()) if (n <= l) s += n; return s; };
+  while (limit > 4096 && sum(limit) > SMALL_BUDGET) limit = Math.floor(limit / 2);
+  return limit;
+}
+function heuristicKey(files) {
+  const limit = smallLimit(files);
+  return rel => {
+    const [top, rest] = partition(rel, "/");
+    const [d, name] = rpartition(rel, "/");
+    if (rel === "eboot.bin") return [0, 0, "", rel];
+    if (top === "sce_module" && rest) return [0, 1, d, name];
+    if (top === "sce_sys" && rest) return [0, 2, d, name];
+    if (files.get(rel) <= limit) return [0, 3, d, name];
+    return [1, 0, d, name];
+  };
+}
+function rulesKey(groups) {
+  const rules = groups.map(([rx, rank]) => [new RegExp(rx), rank | 0]);
+  const last = Math.max(0, ...rules.map(r => r[1])) + 1;
+  return rel => { const r = rules.find(([rx]) => rx.test(rel)); return [r ? r[1] : last, rel]; };
+}
+function fileOrder(files, pk) {
+  const key = pk.groups ? rulesKey(pk.groups) : heuristicKey(files);
+  const seen = new Set(), traced = [];
+  for (const rel of pk.order || []) if (files.has(rel) && !seen.has(rel)) { seen.add(rel); traced.push(rel); }
+  const late = pk.late || [], isLate = rel => late.some(p => rel.startsWith(p));
+  const all = [...files.keys()];
+  const boot = sortedBy(all.filter(p => key(p)[0] === 0 && !seen.has(p)), key);
+  const placed = new Set([...boot, ...traced]);
+  const rest = sortedBy(all.filter(p => !placed.has(p)), key);
+  return {order: [...boot, ...traced.filter(p => !isLate(p)), ...traced.filter(isLate), ...rest], traced: traced.length};
+}
+function indexHeader(count, entries, total, namesOff, namesSize, prefix, title, layoutId, flags) {
+  const h = new Uint8Array(HEADER_SIZE), v = new DataView(h.buffer);
+  h.set(enc.encode("GFS1"));
+  v.setUint32(4, 2, true); v.setUint32(8, count, true); v.setUint32(12, entries, true);
+  v.setBigUint64(16, BigInt(CAP), true); v.setBigUint64(24, BigInt(total), true);
+  v.setUint32(32, namesOff, true); v.setUint32(36, namesSize, true);
+  h.set(enc.encode(prefix).subarray(0, 16), 40);
+  v.setUint32(56, HEADER_SIZE, true); v.setUint32(60, flags, true);
+  h.set(enc.encode(title).subarray(0, 16), 64);
+  v.setBigUint64(80, BigInt.asUintN(64, BigInt(layoutId)), true);
+  return h;
+}
+// files: Map rel -> size; dirs: Set of rel dirs ("" is added); pk: the profile's "pack"
+function pack(files, dirs, title, prefix, pk) {
+  pk = pk || {};
+  if (pk.exclude) {
+    const ex = new RegExp("^(?:" + pk.exclude + ")");
+    files = new Map([...files].filter(([rel]) => !ex.test(rel)));
+  }
+  if (!files.has("eboot.bin")) throw new Error("no eboot.bin: choose the game's app0 folder");
+  const allDirs = new Set([""]);
+  for (const d of dirs || []) allDirs.add(d);
+  for (const rel of files.keys()) { let d = rel; while (d.includes("/")) { d = rpartition(d, "/")[0]; allDirs.add(d); } }
+  const {order, traced} = fileOrder(files, pk);
+  let offset = 0;
+  const layout = order.map(rel => { const e = [rel, offset, files.get(rel)]; offset += files.get(rel); return e; });
+  const total = offset, count = Math.ceil(total / CAP);
+  if (count > MAX_CONTAINERS) throw new Error(`too big: ${(total / GIB).toFixed(1)} GiB needs ${count} containers (at most ${MAX_CONTAINERS})`);
+  const containers = [];
+  for (let i = 0; i < count; i++) {
+    const size = Math.min(CAP, total - i * CAP);
+    containers.push({dir: dataName(prefix, i), blocks: dataBlocks(size), size, pieces: []});
+  }
+  for (const [rel, off, size] of layout) {
+    let pos = off;
+    const end = off + size;
+    while (pos < end) {
+      const k = Math.floor(pos / CAP), take = Math.min(end, (k + 1) * CAP) - pos;
+      containers[k].pieces.push([rel, pos - off, take]);
+      pos += take;
+    }
+  }
+  const digest = sha256(enc.encode(pyJson([title, prefix, CAP, containers.map(c => c.pieces)])));
+  const layoutId = new DataView(digest.buffer).getBigUint64(0, true);
+  const entries = layout.map(([rel, off, size]) => [enc.encode(rel), off, size, 0]);
+  for (const d of allDirs) entries.push([enc.encode(d), 0, 0, FLAG_DIR]);
+  entries.sort((a, b) => cmpBytes(a[0], b[0]));
+  let namesSize = 0;
+  for (const e of entries) namesSize += e[0].length + 1;
+  const namesOff = HEADER_SIZE + 24 * entries.length;
+  const index = new Uint8Array(namesOff + namesSize), iv = new DataView(index.buffer);
+  index.set(indexHeader(count, entries.length, total, namesOff, namesSize, prefix, title, layoutId, 0));
+  let np = 0;
+  entries.forEach(([name, off, size, flags], i) => {
+    const o = HEADER_SIZE + 24 * i;
+    iv.setBigUint64(o, BigInt(off), true); iv.setBigUint64(o + 8, BigInt(size), true);
+    iv.setUint32(o + 16, np, true); iv.setUint32(o + 20, flags, true);
+    index.set(name, namesOff + np); np += name.length + 1;
+  });
+  const indexBlocks = Math.max(512, Math.floor((4 * index.length + 32767) / 32768));
+  return {title, prefix, layoutId, total, entries: entries.length, indexBlocks, containers, index, traced,
+          files: files.size, dirs: allDirs.size};
+}
+
+// ---- index headers and the catalogue (gfs_install.py parse_header, gfs_catalog.py)
+const str0 = b => { const z = b.indexOf(0); return dec.decode(z < 0 ? b : b.subarray(0, z)); };
+function parseHeader(name, d) {
+  if (!d || d.length < 64 || str0(d.subarray(0, 4)) !== "GFS1") return null;
+  const v = new DataView(d.buffer, d.byteOffset, d.byteLength);
+  const version = v.getUint32(4, true), containers = v.getUint32(8, true), entries = v.getUint32(12, true);
+  const total = Number(v.getBigUint64(24, true)), prefix = str0(d.subarray(40, 56));
+  if (version >= 2 && d.length >= 88)
+    return {name, version, title: str0(d.subarray(64, 80)), layoutId: v.getBigUint64(80, true), prefix, containers,
+            entries, total, incomplete: !!(v.getUint32(60, true) & FLAG_INCOMPLETE)};
+  return {name, version, title: "", layoutId: 0n, prefix, containers, entries, total, incomplete: false};
+}
+function sameData(have, nw) {
+  if (have.version >= 2) return have.layoutId === nw.layoutId;
+  return have.prefix === nw.prefix && have.containers === nw.containers && have.entries === nw.entries && have.total === nw.total;
+}
+function parseCatalogue(d) {
+  if (!d || d.length < 64 || str0(d.subarray(0, 4)) !== "GFSC") return null;
+  const v = new DataView(d.buffer, d.byteOffset, d.byteLength);
+  const hsize = v.getUint32(8, true), esize = v.getUint32(12, true), count = v.getUint32(16, true);
+  const flags = v.getUint32(20, true), generation = v.getBigUint64(24, true);
+  if (hsize < 64 || esize < 192 || count > 4096 || d.length < hsize + count * esize) return null;
+  const entries = [];
+  for (let i = 0; i < count; i++) {
+    const o = hsize + i * esize, s = (a, n) => str0(d.subarray(o + a, o + a + n));
+    entries.push({title: s(0, 16), prefix: s(16, 16), index: s(32, 32), name: s(64, 64), version: s(128, 16),
+                  layoutId: v.getBigUint64(o + 0x90, true), total: Number(v.getBigUint64(o + 0x98, true)),
+                  containers: v.getUint32(o + 0xA0, true), flags: v.getUint32(o + 0xA4, true),
+                  updated: Number(v.getBigUint64(o + 0xA8, true)), extra: d.slice(o + 192, o + esize)});
+  }
+  return {entries, generation, exists: !(flags & SYNTHESIZED)};
+}
+function cutUtf8(text, size) {
+  let raw = enc.encode(text || "").subarray(0, size - 1);
+  while (raw.length && (raw[raw.length - 1] & 0xC0) === 0x80) raw = raw.subarray(0, raw.length - 1);
+  if (raw.length && raw[raw.length - 1] >= 0xC0) raw = raw.subarray(0, raw.length - 1);
+  // keep a whole last sequence: drop a lead byte whose sequence was cut
+  return raw;
+}
+function buildCatalogue(cat) {
+  if (cat.entries.length > MAX_TITLES) throw new Error(`at most ${MAX_TITLES} titles`);
+  const entries = [...cat.entries].sort((a, b) => cmpStr(a.title, b.title));
+  const esize = 192 + Math.max(0, ...entries.map(e => (e.extra || []).length));
+  const out = new Uint8Array(64 + esize * entries.length), v = new DataView(out.buffer);
+  out.set(enc.encode("GFSC"));
+  v.setUint32(4, 1, true); v.setUint32(8, 64, true); v.setUint32(12, esize, true);
+  v.setUint32(16, entries.length, true); v.setUint32(20, 0, true); v.setBigUint64(24, BigInt(cat.generation), true);
+  entries.forEach((e, i) => {
+    const o = 64 + i * esize;
+    out.set(cutUtf8(e.title, 16), o); out.set(cutUtf8(e.prefix, 16), o + 16); out.set(cutUtf8(e.index, 32), o + 32);
+    out.set(cutUtf8(e.name, 64), o + 64); out.set(cutUtf8(e.version, 16), o + 128);
+    v.setBigUint64(o + 0x90, BigInt.asUintN(64, BigInt(e.layoutId || 0)), true);
+    v.setBigUint64(o + 0x98, BigInt(e.total || 0), true);
+    v.setUint32(o + 0xA0, e.containers || 0, true); v.setUint32(o + 0xA4, e.flags || 0, true);
+    v.setBigUint64(o + 0xA8, BigInt(e.updated || 0), true);
+    if (e.extra && e.extra.length) out.set(e.extra, o + 192);
+  });
+  return out;
+}
+const catFind = (cat, t) => cat.entries.find(e => e.title === t) || null;
+const catByPrefix = (cat, p) => cat.entries.find(e => e.prefix === p) || null;
+function catPut(cat, e) { cat.entries = cat.entries.filter(x => x.title !== e.title).concat([e]); }
+function catDrop(cat, t) { cat.entries = cat.entries.filter(x => x.title !== t); }
+function describeEntry(e) {
+  return `${e.title || "(untitled)"}${e.name ? " " + e.name : ""}${e.version ? " " + e.version : ""}: ${e.containers} containers ` +
+         `${e.prefix}000.. (${(e.total / GIB).toFixed(1)} GiB), index ${e.index}${e.flags & INCOMPLETE ? ", INCOMPLETE" : ""}`;
+}
+const now = () => Math.floor(Date.now() / 1000);
+function tagBytes(layoutId, k, size) {
+  const t = new Uint8Array(16), v = new DataView(t.buffer);
+  v.setBigUint64(0, BigInt.asUintN(64, BigInt(layoutId)), true); v.setUint32(8, k, true); v.setUint32(12, size, true);
+  return t.subarray(0, 16);
+}
+const bytesEq = (a, b) => !!a && !!b && a.length === b.length && a.every((x, i) => x === b[i]);
+
+// ---- the install (gfs_install.py): survey, plan, execute, over rx (the console's API)
+class InstallError extends Error {}
+
+async function readCatalogue(rx, knownPrefixes, log) {
+  const cat = parseCatalogue(await rx.readFile(CATALOG, CATALOG_FILE, 1 << 20)) || {entries: [], generation: 0n, exists: false};
+  const legacy = [];
+  for (const n of LEGACY_INDEXES) { const h = parseHeader(n, await rx.readFile(n, INDEX_FILE, 128)); if (h) legacy.push(h); }
+  const adopted = [];
+  for (const h of legacy) {
+    if (cat.entries.some(e => e.index === h.name)) continue;
+    const title = h.title || (knownPrefixes || {})[h.prefix] || "";
+    if (!title || catFind(cat, title) || catByPrefix(cat, h.prefix)) {
+      log(`${h.name}: an install that is not in the catalogue and cannot be added (title unknown or taken)`);
+      continue;
+    }
+    catPut(cat, entryFromHeader(h.name, h, title));
+    adopted.push(title);
+  }
+  return {cat, legacy, adopted};
+}
+function entryFromHeader(index, h, title) {
+  return {title: title || h.title, prefix: h.prefix, index, name: "", version: "", layoutId: h.layoutId, total: h.total,
+          containers: h.containers, flags: LEGACY_INDEX | (h.incomplete ? INCOMPLETE : 0), updated: 0, extra: new Uint8Array(0)};
+}
+// A title installed with the old default prefix (G + digits) keeps it: its progress is there
+function relabel(p, prefix) {
+  p.prefix = prefix;
+  p.containers.forEach((c, k) => { c.dir = dataName(prefix, k); });
+  p.index = p.index.slice();
+  p.index.fill(0, 40, 56); p.index.set(enc.encode(prefix), 40);
+}
+function newInstall(p) {
+  return {name: indexName(p.prefix), version: 2, title: p.title, layoutId: p.layoutId, prefix: p.prefix,
+          containers: p.containers.length, entries: p.entries, total: p.total, incomplete: false};
+}
+async function survey(rx, p, info, force, knownPrefixes, log) {
+  const {cat, legacy, adopted} = await readCatalogue(rx, knownPrefixes, log);
+  const old = catFind(cat, p.title);
+  if (old && old.prefix !== p.prefix && p.prefix === defaultPrefix(p.title) && old.prefix === legacyPrefix(p.title)) {
+    log(`${p.title} is installed with the prefix ${old.prefix} (the default before 2026-10-28): it keeps it, and its progress ${saveName(old.prefix)}`);
+    relabel(p, old.prefix);
+  }
+  const nw = newInstall(p);
+  const st = {cat, legacy, adopted, entry: null, current: null, present: new Set(), tagged: new Set(), nw};
+  const other = catByPrefix(cat, p.prefix);
+  if (other && other.title !== p.title)
+    throw new InstallError(`the prefix ${p.prefix} belongs to ${other.title} ${other.name}: this game can't use it`);
+  st.entry = catFind(cat, p.title);
+  if (st.entry && st.entry.prefix !== p.prefix)
+    throw new InstallError(`${p.title} is installed with the prefix ${st.entry.prefix}, this install uses ${p.prefix}: remove it first`);
+  if (st.entry) st.current = parseHeader(st.entry.index, await rx.readFile(st.entry.index, INDEX_FILE, 128));
+  const cur = st.current;
+  if (cur && sameData(cur, nw) && !cur.incomplete && !force) return st;
+  const jobs = p.containers;
+  if (!jobs.length) return st;
+  const first = (await rx.probe([jobs[0].dir]))[0];
+  if (st.entry || first.exists) {
+    const rest = jobs.length > 1 ? await rx.probe(jobs.slice(1).map(j => j.dir)) : [];
+    [first, ...rest].forEach((r, k) => {
+      if (r.exists) st.present.add(k);
+      if (bytesEq(r.tag, tagBytes(nw.layoutId, k, jobs[k].size))) st.tagged.add(k);
+    });
+  }
+  return st;
+}
+function entryFor(p, info, incomplete) {
+  return {title: p.title, prefix: p.prefix, index: indexName(p.prefix), name: info.name || "", version: info.version || "",
+          layoutId: p.layoutId, total: p.total, containers: p.containers.length, flags: incomplete ? INCOMPLETE : 0,
+          updated: now(), extra: new Uint8Array(0)};
+}
+function sameEntry(a, b) {
+  if (!a) return false;
+  for (const k of ["title", "prefix", "index", "name", "version", "layoutId", "total", "containers", "flags"])
+    if (a[k] !== b[k]) return false;
+  return true;
+}
+function plan(st, p, info, force) {
+  const steps = [], cur = st.current, entry = st.entry, nw = st.nw;
+  if (cur && sameData(cur, nw) && !cur.incomplete && !force) {
+    if (entry.flags & LEGACY_INDEX && entry.index === LEGACY_INDEXES[1]) {
+      steps.push(["index"], ["catalog", entryFor(p, info, false)], ["delete", LEGACY_INDEXES[1]]);
+    } else {
+      const done = Object.assign(entryFor(p, info, false), {index: entry.index, flags: entry.flags & LEGACY_INDEX});
+      if (!sameEntry(entry, done) || st.adopted.length) steps.push(["catalog", done]);
+    }
+    return steps;
+  }
+  const resume = !!(cur && sameData(cur, nw) && cur.incomplete && !force);
+  steps.push(["catalog", entryFor(p, info, true)], ["stub"]);
+  for (const h of st.legacy) if (h.prefix === p.prefix && (h.title === p.title || h.title === "")) steps.push(["delete", h.name]);
+  for (let k = 0; k < p.containers.length; k++) if (force || !(resume && st.tagged.has(k))) steps.push(["put", k]);
+  steps.push(["sweep"], ["index"], ["catalog", entryFor(p, info, false)]);
+  return steps;
+}
+function spaceNeeded(st, steps, p) {
+  let need = 0;
+  for (const s of steps) if (s[0] === "put" && !st.present.has(s[1])) need += GIB;
+  const writesIndex = steps.some(s => s[0] === "stub" || s[0] === "index");
+  if (writesIndex && !(st.entry && st.entry.index === indexName(p.prefix))) need += CATALOG_BLOCKS * 32768;
+  if (steps.some(s => s[0] === "catalog") && !st.cat.exists) need += CATALOG_BLOCKS * 32768;
+  return need;
+}
+async function writeCatalogue(rx, cat) {
+  cat.generation = BigInt(cat.generation) + 1n;
+  const data = buildCatalogue(cat);
+  let rc = await rx.write(CATALOG, CATALOG_FILE, data);
+  if (rc === NOT_FOUND) rc = await rx.put(CATALOG, CATALOG_FILE, CATALOG_BLOCKS, data);
+  if (rc) throw new InstallError(`${CATALOG}: ${errText(rc)}`);
+  cat.exists = true;
+}
+async function deleteOwned(rx, prefix, ks, layoutIds, untaggedBelow) {
+  let gone = 0, missing = 0;
+  const left = [];
+  for (const k of ks) {
+    const name = dataName(prefix, k);
+    const r = (await rx.probe([name]))[0];
+    if (!r.exists) { if (++missing >= 4) break; continue; }
+    missing = 0;
+    let mine = false;
+    if (r.tag && r.tag.length >= 12) {
+      const v = new DataView(r.tag.buffer, r.tag.byteOffset, r.tag.byteLength);
+      mine = layoutIds.has(v.getBigUint64(0, true)) && v.getUint32(8, true) === k;
+    } else if (k < (untaggedBelow || 0)) mine = true;
+    if (mine) {
+      const rc = await rx.del(name);
+      if (rc && rc !== NOT_FOUND) throw new InstallError(`delete ${name}: ${errText(rc)}`);
+      if (!rc) gone++;
+    } else left.push(name);
+  }
+  return {gone, left};
+}
+function errText(rc) {
+  if (typeof rc === "string") return rc;
+  const u = rc >>> 0;
+  return "0x" + u.toString(16) + (SAVE_ERRORS[u] ? ` (${SAVE_ERRORS[u]})` : "");
+}
+// ui: {log(msg), step(text), progress(done, total), container(k, n, job)}; src: {chunks(job, from) -> async iterator}
+async function execute(rx, steps, st, p, src, ui, signal) {
+  const cat = st.cat, idx = indexName(p.prefix), puts = steps.filter(s => s[0] === "put").map(s => s[1]);
+  const total = puts.reduce((a, k) => a + p.containers[k].size, 0);
+  let sent = 0;
+  for (const s of steps) {
+    if (signal && signal.stopped) throw new InstallError("paused");
+    if (s[0] === "catalog") {
+      catPut(cat, s[1]); await writeCatalogue(rx, cat);
+      ui.log(`${CATALOG}: ${describeEntry(s[1])}`);
+    } else if (s[0] === "delete") {
+      ui.log(`deleted ${s[1]}: ${errText(await rx.del(s[1]))}`);
+    } else if (s[0] === "stub") {
+      const stub = indexHeader(p.containers.length, p.entries, p.total, 0, 0, p.prefix, p.title, p.layoutId, FLAG_INCOMPLETE);
+      const rc = await rx.put(idx, INDEX_FILE, p.indexBlocks, stub);
+      if (rc) throw new InstallError(`${idx} (marking the install incomplete): ${errText(rc)}`);
+    } else if (s[0] === "put") {
+      const k = s[1], job = p.containers[k];
+      ui.step(`Sending ${job.dir} (${puts.indexOf(k) + 1} of ${puts.length})`);
+      const base = sent;
+      const r = await rx.data(job, src, done => ui.progress(base + done, total), signal);
+      if (r.status) throw new InstallError(`${job.dir}: ${errText(r.status)}`);
+      const rc = await rx.write(job.dir, TAG, tagBytes(p.layoutId, k, job.size));
+      if (rc) throw new InstallError(`${job.dir}: writing its tag: ${errText(rc)}`);
+      sent += job.size;
+      ui.progress(sent, total);
+      ui.log(`${job.dir}: ${(job.size / 1048576).toFixed(0)} MiB stored`);
+    } else if (s[0] === "sweep") {
+      const ids = new Set([p.layoutId]);
+      if (st.current) ids.add(st.current.layoutId);
+      if (st.entry) ids.add(st.entry.layoutId);
+      const ks = []; for (let k = p.containers.length; k < MAX_CONTAINERS; k++) ks.push(k);
+      const {gone, left} = await deleteOwned(rx, p.prefix, ks, ids, 0);
+      if (gone) ui.log(`deleted ${gone} leftover ${p.prefix} containers`);
+      if (left.length) ui.log(`left ${left.join(", ")}: not this game's`);
+    } else if (s[0] === "index") {
+      const rc = await rx.put(idx, INDEX_FILE, p.indexBlocks, p.index);
+      if (rc) throw new InstallError(`${idx}: ${errText(rc)}`);
+      ui.log(`${idx} written`);
+    }
+  }
+}
+function planRemove(entry, legacy) {
+  const steps = [["catalog", Object.assign({}, entry, {flags: entry.flags | INCOMPLETE, updated: now()})], ["delete", entry.index]];
+  for (const h of legacy) if (h.prefix === entry.prefix && h.name !== entry.index) steps.push(["delete", h.name]);
+  steps.push(["delete_data", entry], ["drop", entry.title]);
+  return steps;
+}
+async function remove(rx, title, knownPrefixes, log) {
+  const {cat, legacy} = await readCatalogue(rx, knownPrefixes, log);
+  const e = catFind(cat, title);
+  if (!e) throw new InstallError(`${title} is not installed`);
+  for (const s of planRemove(e, legacy)) {
+    if (s[0] === "catalog") { catPut(cat, s[1]); await writeCatalogue(rx, cat); }
+    else if (s[0] === "delete") log(`deleted ${s[1]}: ${errText(await rx.del(s[1]))}`);
+    else if (s[0] === "delete_data") {
+      const ks = []; for (let k = 0; k < MAX_CONTAINERS; k++) ks.push(k);
+      const {gone, left} = await deleteOwned(rx, e.prefix, ks, new Set([e.layoutId]), e.containers);
+      log(`deleted ${gone} data containers ${e.prefix}000..` + (left.length ? `; left ${left.join(", ")} (not this game's)` : ""));
+    } else if (s[0] === "drop") { catDrop(cat, s[1]); await writeCatalogue(rx, cat); log(`${title} removed (its saves stay)`); }
+  }
+}
+
+// ---- reading a .zip (central directory, zip64; stored and deflated entries)
+async function zipEntries(file) {
+  const size = file.size, tail = Math.min(size, 65536 + 22);
+  const t = new Uint8Array(await file.slice(size - tail, size).arrayBuffer()), tv = new DataView(t.buffer);
+  let e = -1;
+  for (let i = t.length - 22; i >= 0; i--) if (tv.getUint32(i, true) === 0x06054b50) { e = i; break; }
+  if (e < 0) throw new Error("not a zip file (no end of central directory)");
+  let count = tv.getUint16(e + 10, true), cdSize = tv.getUint32(e + 12, true), cdOff = tv.getUint32(e + 16, true);
+  if ((count === 0xFFFF || cdOff === 0xFFFFFFFF || cdSize === 0xFFFFFFFF) && e >= 20 && tv.getUint32(e - 20, true) === 0x07064b50) {
+    const z64 = Number(tv.getBigUint64(e - 20 + 8, true));
+    const r = new DataView(await file.slice(z64, z64 + 56).arrayBuffer());
+    if (r.getUint32(0, true) !== 0x06064b50) throw new Error("damaged zip64 record");
+    count = Number(r.getBigUint64(32, true)); cdSize = Number(r.getBigUint64(40, true)); cdOff = Number(r.getBigUint64(48, true));
+  }
+  const cd = new Uint8Array(await file.slice(cdOff, cdOff + cdSize).arrayBuffer()), v = new DataView(cd.buffer);
+  const out = [];
+  let o = 0;
+  for (let i = 0; i < count && o + 46 <= cd.length; i++) {
+    if (v.getUint32(o, true) !== 0x02014b50) throw new Error("damaged zip central directory");
+    const flags = v.getUint16(o + 8, true), method = v.getUint16(o + 10, true);
+    let csize = v.getUint32(o + 20, true), usize = v.getUint32(o + 24, true), lho = v.getUint32(o + 42, true);
+    const nlen = v.getUint16(o + 28, true), xlen = v.getUint16(o + 30, true), clen = v.getUint16(o + 32, true);
+    const name = dec.decode(cd.subarray(o + 46, o + 46 + nlen)).replace(/\\/g, "/");
+    let x = o + 46 + nlen;
+    const xend = x + xlen;
+    while (x + 4 <= xend) {
+      const id = v.getUint16(x, true), len = v.getUint16(x + 2, true);
+      if (id === 1) {
+        let q = x + 4;
+        if (usize === 0xFFFFFFFF) { usize = Number(v.getBigUint64(q, true)); q += 8; }
+        if (csize === 0xFFFFFFFF) { csize = Number(v.getBigUint64(q, true)); q += 8; }
+        if (lho === 0xFFFFFFFF) { lho = Number(v.getBigUint64(q, true)); q += 8; }
+      }
+      x += 4 + len;
+    }
+    out.push({name, flags, method, csize, usize, lho, dir: name.endsWith("/")});
+    o = xend + clen;
+  }
+  return out;
+}
+
+const JUNK = /(^|\/)(__MACOSX|\.DS_Store|\._[^/]*|Thumbs\.db|desktop\.ini)(\/|$)/i;
+// ---- the game's files: a folder or a .zip
+class Inflater {
+  constructor(file, start, csize) { this.file = file; this.start = start; this.csize = csize; this.pos = 0; this.reader = null; this.pending = null; }
+  async read(a, b) {
+    if (!this.reader || a < this.pos) {
+      if (this.reader) this.reader.cancel().catch(() => {});
+      this.reader = this.file.slice(this.start, this.start + this.csize).stream().pipeThrough(new DecompressionStream("deflate-raw")).getReader();
+      this.pos = 0; this.pending = null;
+    }
+    const out = new Uint8Array(b - a);
+    while (this.pos < b) {
+      let chunk = this.pending;
+      this.pending = null;
+      if (!chunk) { const r = await this.reader.read(); if (r.done) throw new Error("a file in the zip ended early"); chunk = r.value; }
+      const cs = this.pos, ce = cs + chunk.length, s = Math.max(a, cs), e = Math.min(b, ce);
+      if (s < e) out.set(chunk.subarray(s - cs, e - cs), s - a);
+      if (ce > b) { this.pending = chunk.subarray(b - cs); this.pos = b; break; }
+      this.pos = ce;
+    }
+    return out;
+  }
+}
+function makeSource(kind, name, items, zipFile) {
+  // items: [{path, size, file?, zip?, dir?}]
+  const ebs = items.filter(x => !x.dir && /(^|\/)eboot\.bin$/.test(x.path) && !JUNK.test(x.path));
+  if (!ebs.length) throw new Error("no eboot.bin in it: choose the game's app0 folder (the one with eboot.bin and sce_sys), or a .zip of it");
+  ebs.sort((a, b) => a.path.split("/").length - b.path.split("/").length);
+  const root = ebs[0].path.slice(0, ebs[0].path.length - "eboot.bin".length);
+  const files = new Map(), dirs = new Set(), map = new Map();
+  let skipped = 0, junk = 0;
+  for (const x of items) {
+    if (JUNK.test(x.path)) { if (!x.dir) junk++; continue; }
+    if (!x.path.startsWith(root)) { if (!x.dir) skipped++; continue; }
+    let rel = x.path.slice(root.length);
+    if (x.dir) { rel = rel.replace(/\/+$/, ""); if (rel) dirs.add(rel); continue; }
+    if (!files.has(rel)) { files.set(rel, x.size); map.set(rel, x); }
+  }
+  const inflaters = new Map(), starts = new Map();
+  async function dataStart(z) {
+    if (starts.has(z)) return starts.get(z);
+    const h = new DataView(await zipFile.slice(z.lho, z.lho + 30).arrayBuffer());
+    if (h.getUint32(0, true) !== 0x04034b50) throw new Error("damaged zip: " + z.name);
+    const s = z.lho + 30 + h.getUint16(26, true) + h.getUint16(28, true);
+    starts.set(z, s);
+    return s;
+  }
+  async function fileRange(rel, a, b) {
+    const x = map.get(rel);
+    if (x.file) return x.file.slice(a, b);
+    const z = x.zip, s = await dataStart(z);
+    if (z.method === 0) return zipFile.slice(s + a, s + b);
+    if (!inflaters.has(rel)) inflaters.set(rel, new Inflater(zipFile, s, z.csize));
+    return new Blob([await inflaters.get(rel).read(a, b)]);
+  }
+  const pieceRanges = (job, off, len, fn) => {
+    let pos = 0;
+    for (const [rel, foff, take] of job.pieces) {
+      const ps = pos, pe = pos + take;
+      pos = pe;
+      if (pe <= off || ps >= off + len) continue;
+      fn(rel, Math.max(off, ps) - ps + foff, Math.min(off + len, pe) - ps + foff);
+    }
+  };
+  return {
+    kind, name, files, dirs, skipped, junk, root,
+    async bytes(rel) { return files.has(rel) ? new Uint8Array(await (await fileRange(rel, 0, files.get(rel))).arrayBuffer()) : null; },
+    async blob(rel) { return files.has(rel) ? fileRange(rel, 0, files.get(rel)) : null; },
+    streamed(job, off) { let s = false; pieceRanges(job, off, job.size - off, rel => { const x = map.get(rel); if (x.zip && x.zip.method !== 0) s = true; }); return s; },
+    async range(job, off, len) {
+      const parts = [], todo = [];
+      pieceRanges(job, off, len, (rel, a, b) => todo.push([rel, a, b]));
+      for (const [rel, a, b] of todo) parts.push(await fileRange(rel, a, b));
+      return new Blob(parts);
+    },
+  };
+}
+async function fromZip(file) {
+  const entries = await zipEntries(file);
+  for (const z of entries) {
+    if (z.dir) continue;
+    if (z.flags & 1) throw new Error(z.name + ": encrypted zips can't be read");
+    if (z.method !== 0 && z.method !== 8) throw new Error(z.name + `: compression method ${z.method} isn't supported: zip it with normal (deflate) or no compression`);
+    if (z.method === 8 && typeof DecompressionStream === "undefined") throw new Error("this browser can't unpack zips: use a zip made without compression (store), or another browser");
+  }
+  return makeSource("zip", file.name, entries.map(z => ({path: z.name, size: z.usize, zip: z, dir: z.dir})), file);
+}
+
+// ---- the console's API (docs/manager.md "Install a game"): env gives
+// fetch(url, opts), post(url, blob, progress(sent), signal) -> {status, json},
+// token(), sleep(ms), log(msg, cls), status(msg, cls), fmtSize(n)
+class HttpError extends Error { constructor(m, code) { super(m); this.code = code; } }
+const hexOf = b => Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
+const unhex = s => s ? new Uint8Array(s.match(/../g).map(x => parseInt(x, 16))) : null;
+const ZCHUNK = opts.zchunk || 32 * 1024 * 1024;     // bytes per request when the browser unpacks them
+function makeRx(env) {
+  async function api(method, path, params, body, raw) {
+    const q = params ? "?" + Object.entries(params).map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v)).join("&") : "";
+    for (let attempt = 0; ; attempt++) {
+      let r;
+      try {
+        const tok = env.token();
+        r = await env.fetch("/api/install/" + path + q, {method, body, headers: tok ? {"X-Ghostldr-Token": tok} : {}, cache: "no-store"});
+      } catch (e) {
+        if (attempt >= 6) throw new HttpError("the console does not answer (" + e.message + ")", 0);
+        await env.sleep(1000 * Math.min(8, 1 << attempt));
+        continue;
+      }
+      if (raw && r.ok) return {status: +(r.headers.get("X-Gfs-Status") || 0), bytes: new Uint8Array(await r.arrayBuffer())};
+      let j = {};
+      try { j = await r.json(); } catch (e) { /* not JSON */ }
+      if (r.status === 403 || r.status === 429) throw new HttpError(j.error || "the token is needed", r.status);
+      if (!r.ok && j.rc === undefined) throw new HttpError(j.error || ("HTTP " + r.status), r.status);
+      return j;
+    }
+  }
+  return {
+    api,
+    async readFile(c, f, len, off) {
+      const r = await api("GET", "read", {c, f, off: off || 0, len}, null, true);
+      return r.bytes && r.status === 0 ? r.bytes : null;
+    },
+    async probe(names) {
+      const out = [];
+      for (let i = 0; i < names.length; i += 16) {
+        const j = await api("POST", "probe", {c: names.slice(i, i + 16).join(",")});
+        if (!j.ok) throw new InstallError(j.error || "probe failed");
+        for (const x of j.containers) out.push({exists: !!x.exists, tag: unhex(x.tag)});
+      }
+      return out;
+    },
+    async write(c, f, bytes) { return (await api("POST", "write", {c, f}, bytes)).rc >>> 0; },
+    async put(c, f, blocks, bytes) { return (await api("POST", "put", {c, f, blocks}, bytes)).rc >>> 0; },
+    async del(c) { return (await api("POST", "delete", {c})).rc >>> 0; },
+    async free(n) { const j = await api("POST", "free", {bytes: n}); return {status: j.rc >>> 0, have: j.have || 0}; },
+    async data(job, src, progress, signal) {
+      const lid = hexOf(tagBytes(job.lid, 0, 0).subarray(0, 8));
+      let off = 0, stuck = 0;
+      const se = (await api("GET", "info")).session;
+      if (se && se.c === job.dir && se.size === job.size && se.lid === lid && se.written > 0 && se.written < job.size) {
+        off = se.written;
+        env.log(`${job.dir}: carrying on from ${env.fmtSize(off)}`);
+      }
+      while (true) {
+        if (signal.stopped) throw new InstallError("paused");
+        const len = src.streamed(job, off) ? Math.min(ZCHUNK, job.size - off) : job.size - off;
+        const blob = await src.range(job, off, len);
+        const r = await env.post(`/api/install/data?c=${job.dir}&blocks=${job.blocks}&size=${job.size}&off=${off}&lid=${lid}`,
+                                 blob, n => progress(off + n), signal);
+        if (r.json && r.json.ok && !r.json.rc) {
+          off = r.json.written; stuck = 0;
+          progress(off);
+          if (r.json.done) return {status: 0};
+          continue;
+        }
+        if (r.json && r.status === 409 && typeof r.json.written === "number") { off = r.json.written; continue; }
+        if (r.json && r.json.rc) return {status: r.json.rc};
+        if (r.status === 403) throw new InstallError((r.json && r.json.error) || "the token is needed");
+        if (r.status >= 400) throw new InstallError(`${job.dir}: ` + ((r.json && r.json.error) || "HTTP " + r.status));
+        if (signal.stopped) throw new InstallError("paused");
+        // the connection dropped: ask the console how far it got
+        if (++stuck > 12) throw new InstallError("the connection keeps dropping: check the network, then Install again to carry on");
+        env.status(`Connection lost: carrying on (try ${stuck})…`, "warn");
+        await env.sleep(Math.min(16000, 1000 << Math.min(stuck, 4)));
+        let s2 = null;
+        try { s2 = (await api("GET", "info")).session; } catch (e) { continue; }
+        off = s2 && s2.c === job.dir && s2.size === job.size && s2.lid === lid ? s2.written : 0;
+        env.log(`${job.dir}: connection lost, carrying on from ${env.fmtSize(off)}`, "warn");
+      }
+    },
+  };
+}
+
+return {CAP, GIB, NOT_FOUND, MAX_CONTAINERS, CATALOG, INDEX_FILE, TAG, INCOMPLETE, LEGACY_INDEX, InstallError,
+        sha256, pyJson, normalizeTitle, defaultPrefix, legacyPrefix, prefixProblem, dataName, indexName, saveName,
+        metaName, parseSfo, dataBlocks, fileOrder, pack, indexHeader, parseHeader, parseCatalogue, buildCatalogue,
+        describeEntry, tagBytes, survey, plan, spaceNeeded, execute, remove, errText, zipEntries, cmpStr,
+        makeSource, fromZip, makeRx, HttpError, readCatalogue};
+}
+const GFS = makeGFS();
+/*GFS-END*/
+/*PROFILES-BEGIN: generated from ghostldr/data/titles/*.json by ghostldr/tools/netinstall_page.py */
+const PROFILES = {"APOL00004":{"name":"Apollo Save Tool"},"CUSA00900":{"name":"Bloodborne","version":"01.09","pack":{"prefix":"G00900"}},"CUSA11456":{"name":"Ghost of Tsushima","version":"02.18","pack":{"prefix":"GHOST","exclude":"^(eboot\\.bin\\.xref|cache/psarc/lang_(french|latino|brazilian|japanese)_audio\\.psarc)$","groups":[["^(sce_sys|sce_module|ui)/|^[^/]+$",0],["^cache/(?:[iI][zZ][uU][^/]*|[^/]*[_.#&-][iI][zZ][uU](?:[_.#&-][^/]*)?)$",12],["^cache/(?:[tT][oO][yY][^/]*|[^/]*[_.#&-][tT][oO][yY](?:[_.#&-][^/]*)?)$",13],["^cache/(?:[kK][aA][mM][^/]*|[^/]*[_.#&-][kK][aA][mM](?:[_.#&-][^/]*)?)$",14],["^cache/(?:[iI][kK][iI][^/]*|[^/]*[_.#&-][iI][kK][iI](?:[_.#&-][^/]*)?)$",15],["^cache/[^/]+$",11],["^cache/psarc/",20],["^cache/meshes/",30],["^cache/bitmaps/",40],["^cache/",50],["^movies/",60],["",70]],"late":["cache/psarc/"],"order":["cache/t11456.dat","cache/playgo.pgm","ui/vshell/content_ps4/save_icon.png","cache/all_shaders.xpps","cache/all_shaders.texmeshman","cache/lang_english_text.xpps","cache/lang_english_audio.xpps","cache/pulse.sprig.xpps","cache/pulse.sprig.texmeshman","cache/bitmaps/fxt_or_023_snowflakes.psd.0.sps","cache/bitmaps/fxt_or_029_bloodstring.psd.0.sps","cache/psarc/music_a.psarc","cache/psarc/music_b.psarc","cache/psarc/music_c.psarc","cache/psarc/music_d.psarc","cache/psarc/music_e.psarc","cache/psarc/lang_english_audio.psarc","cache/init_sound.sprig.xpps","cache/common_sound.sprig.xpps","cache/single_player_sound.sprig.xpps","movies/cutscene/splash_america.bsf","cache/load_menu_catalog.log","cache/game.sprig.packman","cache/game.sprig.texmeshman","cache/game.sprig.xpps","cache/downloaded.sprig.xpps","cache/core_common.sprig.xpps","cache/bitmaps/mask_wipe_radial_01.msac.d.0.sps","cache/bitmaps/meter_radial_04_fill_white.msac.d.0.sps","cache/bitmaps/&paper_pj_shoji_001_msac_n&g&h.1c8ea51aaf5b12eb34bf3ff6138e46c9.sps","cache/bitmaps/compass_icon_follow.msac.d.0.sps","cache/bitmaps/custom_ap_loot_fire_sword_oils_001.msac.d.0.sps","cache/bitmaps/custom_cv_clothes_kimono_folded_a_001.msac.d.0.sps","cache/bitmaps/custom_firework_single_a_ap.msac.d.0.sps","cache/bitmaps/custom_geom_bandit_katana_rank2.msac.d.0.sps","cache/bitmaps/custom_geom_mongol_sabre_rank2.msac.d.0.sps","cache/bitmaps/custom_gm_fish_drying_001.msac.d.0.sps","cache/bitmaps/custom_ja_gift_furoshiki_001a.msac.d.0.sps","cache/bitmaps/custom_ja_loot_furoshiki_001a.msac.d.0.sps","cache/bitmaps/custom_ja_loot_furoshiki_001b.msac.d.0.sps","cache/bitmaps/custom_jjl_tealeaves_001.msac.d.0.sps","cache/bitmaps/custom_ll_windchimes_iron_002.msac.d.0.sps","cache/bitmaps/custom_loot_leather_medium_001.msac.d.0.sps","cache/bitmaps/custom_ma_mongol_meatrack_001.msac.d.0.sps","cache/bitmaps/custom_pj_scroll_gilded_001.msac.d.0.sps","cache/bitmaps/custom_zc_tea_001.msac.d.0.sps","cache/bitmaps/dt_decal_blood_wipe.msac.d.0.sps","cache/bitmaps/fabric_banner_remaster_horsearmor_01.msac.d.0.sps","cache/bitmaps/fabric_dh_rope_002b.msac.d.0.sps","cache/bitmaps/foliage_ap_bamboobark_001.msac.d.0.sps","cache/bitmaps/foliage_ll_ricebunch_001.msac.d.0.sps","cache/bitmaps/fxt_cl_001_cumulus.psd.0.sps","cache/bitmaps/fxt_cl_002_cumulus_fuzzy.psd.0.sps","cache/bitmaps/fxt_cl_004_wispy.psd.0.sps","cache/bitmaps/fxt_cl_005_small.psd.0.sps","cache/bitmaps/fxt_cl_006_small_fuzzy.psd.0.sps","cache/bitmaps/fxt_de_003_ashbits.dds.0.sps","cache/bitmaps/fxt_de_005_smallbits.dds.0.sps","cache/bitmaps/fxt_de_011_woodsplinters.psd.0.sps","cache/bitmaps/fxt_di_001_shockwave_n.psd.0.sps","cache/bitmaps/fxt_di_008_heatshimmer_n.psd.0.sps","cache/bitmaps/fxt_di_010_waterripple_n.psd.0.sps","cache/bitmaps/fxt_di_015_pinch_n.psd.0.sps","cache/bitmaps/fxt_di_016_waterripple_n.psd.0.sps","cache/bitmaps/fxt_di_017_shimmer_n.psd.0.sps","cache/bitmaps/fxt_di_018_charmove_n.psd.0.sps","cache/bitmaps/fxt_di_019_bulge_n.psd.0.sps","cache/bitmaps/fxt_di_021_grasswind_n.psd.0.sps","cache/bitmaps/fxt_di_022_wind_n.psd.0.sps","cache/bitmaps/fxt_di_023_wake_n.psd.0.sps","cache/bitmaps/fxt_di_024_wake_n.psd.0.sps","cache/bitmaps/fxt_di_025_shock_n.psd.0.sps","cache/bitmaps/fxt_en_003_shockwave.psd.0.sps","cache/bitmaps/fxt_en_009_glowflare.psd.0.sps","cache/bitmaps/fxt_en_015_wavetile.psd.0.sps","cache/bitmaps/fxt_fi_011_firetosmoke.psd.0.sps","cache/bitmaps/fxt_fi_011_firetosmoke_n.psd.0.sps","cache/bitmaps/fxt_fi_011_white_firetosmoke.psd.0.sps","cache/bitmaps/fxt_fi_013_licks.psd.0.sps","cache/bitmaps/fxt_fi_013_licks_n.psd.0.sps","cache/bitmaps/fxt_fi_016_firetosmoke.psd.0.sps","cache/bitmaps/fxt_fi_016_firetosmoke_n.psd.0.sps","cache/bitmaps/fxt_fi_019_small_loop_04.psd.0.sps","cache/bitmaps/fxt_fi_019_small_loop_04_n.psd.0.sps","cache/bitmaps/fxt_fi_019_white_small_loop_04.psd.0.sps","cache/bitmaps/fxt_fi_020_small_loop_n.psd.0.sps","cache/bitmaps/fxt_fi_020_white_small_loop.psd.0.sps","cache/bitmaps/fxt_fi_021_med_loop_n.psd.0.sps","cache/bitmaps/fxt_fi_022_lrg_loop_n.psd.0.sps","cache/bitmaps/fxt_fi_023_candle_lrg_loop.psd.0.sps","cache/bitmaps/fxt_fi_023_candle_lrg_loop_n.psd.0.sps","cache/bitmaps/fxt_fi_024_candle_loop.psd.0.sps","cache/bitmaps/fxt_fi_025_white_small_loop_lgd.psd.0.sps","cache/bitmaps/fxt_fi_lgd_white_flame_licks.psd.0.sps","cache/bitmaps/fxt_fm_001_swirl_n.psd.0.sps","cache/bitmaps/fxt_gn_001_swordswipe.psd.0.sps","cache/bitmaps/fxt_gn_002_ray.psd.0.sps","cache/bitmaps/fxt_gn_004_shock.psd.0.sps","cache/bitmaps/fxt_gn_006_elements.psd.0.sps","cache/bitmaps/fxt_gn_008_flare.psd.0.sps","cache/bitmaps/fxt_gn_009_arrow_splinter.msac.d.0.sps","cache/bitmaps/fxt_gn_009_arrow_splinter.msac.n.0.sps","cache/bitmaps/fxt_gn_010_bamboo.msac.d.0.sps","cache/bitmaps/fxt_fi_020_small_loop.psd.0.sps","cache/bitmaps/fxt_fi_021_med_loop.psd.0.sps","cache/bitmaps/fxt_gn_011_bamboo_leaves.msac.d.0.sps","cache/bitmaps/fxt_gn_012_rock.msac.d.0.sps","cache/bitmaps/fxt_gn_012_rock.msac.n.0.sps","cache/bitmaps/fxt_gn_015_wood.msac.d.0.sps","cache/bitmaps/fxt_gn_015_wood.msac.n.0.sps","cache/bitmaps/fxt_gn_017_flare.psd.0.sps","cache/bitmaps/fxt_gn_020_flare_red.psd.0.sps","cache/bitmaps/fxt_gn_021_flare_blue.psd.0.sps","cache/bitmaps/fxt_fi_021_white_med_loop.psd.0.sps","cache/bitmaps/fxt_gn_022_flare_round.psd.0.sps","cache/bitmaps/fxt_gn_024_paper.psd.0.sps","cache/bitmaps/fxt_gn_025_kanji.psd.0.sps","cache/bitmaps/fxt_gn_026_smokebomb.msac.d.0.sps","cache/bitmaps/fxt_gn_026_smokebomb.msac.n.0.sps","cache/bitmaps/fxt_gn_027_sailpieces.psd.0.sps","cache/bitmaps/fxt_gn_029_brush_anim.psd.0.sps","cache/bitmaps/fxt_gn_030_spirit_arrow.psd.0.sps","cache/bitmaps/fxt_gn_032_spike.psd.0.sps","cache/bitmaps/fxt_jn_black_flame_licks.psd.0.sps","cache/bitmaps/fxt_mv_lgd_ring.psd.0.sps","cache/bitmaps/fxt_gn_031_paper.psd.0.sps","cache/bitmaps/fxt_gn_033_ring.psd.0.sps","cache/bitmaps/fxt_jn_blue_flame_loop_01.psd.0.sps","cache/bitmaps/fxt_mv_lgd_swipe03.psd.0.sps","cache/bitmaps/fxt_mv_ui_cloudtest.psd.0.sps","cache/bitmaps/fxt_or_003_blackfly.psd.0.sps","cache/bitmaps/fxt_or_008_grasses.psd.0.sps","cache/bitmaps/fxt_or_014_maplebigleafleaves.psd.0.sps","cache/bitmaps/fxt_or_016_coniferneedles.psd.0.sps","cache/bitmaps/fxt_or_01_mud.psd.0.sps","cache/bitmaps/fxt_or_020_feathers.psd.0.sps","cache/bitmaps/fxt_or_033_liquid.psd.0.sps","cache/bitmaps/fxt_or_034_pampas_fluff.psd.0.sps","cache/bitmaps/fxt_or_035_straw.psd.0.sps","cache/bitmaps/fxt_or_037_blood.psd.0.sps","cache/bitmaps/fxt_fi_022_lrg_loop.psd.0.sps","cache/bitmaps/fxt_or_039_beech_leaves.msac.d.0.sps","cache/bitmaps/fxt_or_039_beech_leaves.msac.n.0.sps","cache/bitmaps/fxt_or_040_ginkgo_leaves.msac.d.0.sps","cache/bitmaps/fxt_or_040_ginkgo_leaves.msac.n.0.sps","cache/bitmaps/fxt_or_044_fireflies.psd.0.sps","cache/bitmaps/fxt_or_046_caddis.psd.0.sps","cache/bitmaps/fxt_or_047_bamboo_leaves_dead.msac.d.0.sps","cache/bitmaps/fxt_or_047_bamboo_leaves_dead.msac.n.0.sps","cache/bitmaps/fxt_or_048_starlings.psd.0.sps","cache/bitmaps/fxt_or_049_grass.psd.0.sps","cache/bitmaps/fxt_or_050_redmaple_leaves.msac.d.0.sps","cache/bitmaps/fxt_or_050_redmaple_leaves.msac.n.0.sps","cache/bitmaps/fxt_or_051_parasol_leaves.msac.d.0.sps","cache/bitmaps/fxt_or_051_parasol_leaves.msac.n.0.sps","cache/bitmaps/fxt_or_052_zelkova_leaves.msac.d.0.sps","cache/bitmaps/fxt_or_052_zelkova_leaves.msac.n.0.sps","cache/bitmaps/fxt_or_053_ginkgo_leaves_white.msac.d.0.sps","cache/bitmaps/fxt_or_053_ginkgo_leaves_white.msac.n.0.sps","cache/bitmaps/fxt_or_054_flower_petals.msac.d.0.sps","cache/bitmaps/fxt_or_054_flower_petals.msac.n.0.sps","cache/bitmaps/fxt_or_055_plum.msac.d.0.sps","cache/bitmaps/fxt_or_055_plum.msac.n.0.sps","cache/bitmaps/fxt_sm_002_tilingwispy.psd.0.sps","cache/bitmaps/fxt_sm_011_greywisps.dds.0.sps","cache/bitmaps/fxt_sm_020_generic.psd.0.sps","cache/bitmaps/fxt_sm_025_large_flat_loop.psd.0.sps","cache/bitmaps/fxt_sm_025_large_loop.psd.0.sps","cache/bitmaps/fxt_sm_025_large_loop_n.psd.0.sps","cache/bitmaps/fxt_sm_026_medium_loop.psd.0.sps","cache/bitmaps/fxt_sm_026_medium_loop_n.psd.0.sps","cache/bitmaps/fxt_sm_027_small_loop.psd.0.sps","cache/bitmaps/fxt_sm_028_dust_tendril.psd.0.sps","cache/bitmaps/fxt_sm_028_dust_tendril_n.psd.0.sps","cache/bitmaps/fxt_sm_029_dust_burst.psd.0.sps","cache/bitmaps/fxt_sm_029_dust_burst_n.psd.0.sps","cache/bitmaps/fxt_sm_030_small_loop.psd.0.sps","cache/bitmaps/fxt_sm_030_small_loop_n.psd.0.sps","cache/bitmaps/fxt_sm_031_loop.psd.0.sps","cache/bitmaps/fxt_sm_031_loop_n.psd.0.sps","cache/bitmaps/fxt_sm_032_medium_blur_loop.psd.0.sps","cache/bitmaps/fxt_sm_033_loop.psd.0.sps","cache/bitmaps/fxt_sm_034_rise.psd.0.sps","cache/bitmaps/fxt_sm_034_rise_n.psd.0.sps","cache/bitmaps/fxt_sm_035_fuzzy_loop.psd.0.sps","cache/bitmaps/fxt_sm_036_medium_loop_lgd.psd.0.sps","cache/bitmaps/fxt_sm_037_strip_lgd.psd.0.sps","cache/bitmaps/fxt_splash_small_flip.psd.0.sps","cache/bitmaps/fxt_splash_step.psd.0.sps","cache/bitmaps/fxt_st_007_fogbank.psd.0.sps","cache/bitmaps/fxt_st_007_fogbank_n.psd.0.sps","cache/bitmaps/fxt_st_010_fog_large.psd.0.sps","cache/bitmaps/fxt_st_010_fog_large_n.psd.0.sps","cache/bitmaps/fxt_st_011_fog_medium.psd.0.sps","cache/bitmaps/fxt_st_012_lowfog.psd.0.sps","cache/bitmaps/fxt_st_015_base_loop.psd.0.sps","cache/bitmaps/fxt_st_015_base_loop_n.psd.0.sps","cache/bitmaps/fxt_st_016_loop.psd.0.sps","cache/bitmaps/fxt_st_016_loop_n.psd.0.sps","cache/bitmaps/fxt_st_017_loop.psd.0.sps","cache/bitmaps/fxt_sy_009_videoblocks.psd.0.sps","cache/bitmaps/fxt_sy_010_videogrunge.psd.0.sps","cache/bitmaps/fxt_wa_004_splashsmall.psd.0.sps","cache/bitmaps/fxt_wa_012_splash.psd.0.sps","cache/bitmaps/fxt_wa_013_large_splash.psd.0.sps","cache/bitmaps/fxt_wa_015_rain.psd.0.sps","cache/bitmaps/fxt_wa_016_rainfall_far.psd.0.sps","cache/bitmaps/fxt_wa_018_stream.psd.0.sps","cache/bitmaps/fxt_wa_018_stream_n.psd.0.sps","cache/bitmaps/fxt_wa_021_flow_long.psd.0.sps","cache/bitmaps/fxt_wa_022_splash.psd.0.sps","cache/bitmaps/fxt_wa_022_wave_splash.psd.0.sps","cache/bitmaps/gore_pj_blood_orb_001.msac.e.0.sps","cache/bitmaps/hero_samurai_orange_rope.msac.d.0.sps","cache/bitmaps/hero_thighshield_chainmail.msac.d.0.sps","cache/bitmaps/horse_armor_brush_mtl.msac.d.0.sps","cache/bitmaps/horse_hero_saddle_tassles_mtl.msac.d.0.sps","cache/bitmaps/horse_teeth.msac.d.0.sps","cache/bitmaps/icon_camp_rumored_worldmap.msac.d.0.sps","cache/bitmaps/icon_camp_waypoint.msac.d.0.sps","cache/bitmaps/icon_camp_waypoint_complete.msac.d.0.sps","cache/bitmaps/icon_camp_worldmap.msac.d.0.sps","cache/bitmaps/icon_camp_worldmap_complete.msac.d.0.sps","cache/bitmaps/icon_crier_waypoint.msac.d.0.sps","cache/bitmaps/icon_farmstead_rumored_worldmap.msac.d.0.sps","cache/bitmaps/icon_farmstead_waypoint.msac.d.0.sps","cache/bitmaps/icon_farmstead_waypoint_complete.msac.d.0.sps","cache/bitmaps/icon_farmstead_worldmap.msac.d.0.sps","cache/bitmaps/icon_farmstead_worldmap_complete.msac.d.0.sps","cache/bitmaps/icon_inventory_currency_essence.msac.d.0.sps","cache/bitmaps/icon_inventory_resource_blessing.msac.d.0.sps","cache/bitmaps/icon_inventory_resource_crystals.msac.d.0.sps","cache/bitmaps/icon_inventory_tool_heal.msac.d.0.sps","cache/bitmaps/icon_mission_waypoint_yuna.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_goldpath.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_goldpath_ishikawa.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_goldpath_kenji.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_goldpath_masako.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_goldpath_norio.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_goldpath_resume.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_goldpath_yuna.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_goldpath_yuriko.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_legendary.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_legendary_resume.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_silverpath.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_silverpath_ishikawa.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_silverpath_kenji.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_silverpath_masako.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_silverpath_norio.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_silverpath_resume.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_silverpath_tenzo.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_silverpath_yuna.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_silverpath_yuriko.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_tenzo_resume.msac.d.0.sps","cache/bitmaps/icon_mission_worldmap_yuna.msac.d.0.sps","cache/bitmaps/icon_navigation_castle_worldmap.msac.d.0.sps","cache/bitmaps/icon_navigation_castle_worldmap_occupied.msac.d.0.sps","cache/bitmaps/icon_navigation_duel_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_hub_worldmap.msac.d.0.sps","cache/bitmaps/icon_navigation_hub_worldmap_occupied.msac.d.0.sps","cache/bitmaps/icon_navigation_landmark_worldmap.msac.d.0.sps","cache/bitmaps/icon_navigation_landmark_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_lighthouse_waypoint.msac.d.0.sps","cache/bitmaps/icon_navigation_lighthouse_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_lighthouse_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_memory_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_archery_waypoint.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_archery_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_archery_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_bamboo_waypoint.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_bamboo_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_bamboo_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_bokken_waypoint.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_bokken_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_bokken_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_charmcats_waypoint.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_charmcats_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_charmcats_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_charmdeer_waypoint.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_charmdeer_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_charmdeer_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_charmmonkeys_waypoint.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_charmmonkeys_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_charmmonkeys_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_foxshrine_waypoint.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_foxshrine_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_foxshrine_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_haiku_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_haiku_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_hutbuilder_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_hutbuilder_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_onsen_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_onsen_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_shrine_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_minigame_shrine_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_swordkitshrine_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_swordkitshrine_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_navigation_windshrine_worldmap_incomplete.msac.d.0.sps","cache/bitmaps/icon_navigation_windshrine_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_refugeecamp_worldmap.msac.d.0.sps","cache/bitmaps/icon_refugeecamp_worldmap_rumored.msac.d.0.sps","cache/bitmaps/icon_roadblock_rumored_worldmap.msac.d.0.sps","cache/bitmaps/icon_roadblock_waypoint.msac.d.0.sps","cache/bitmaps/icon_roadblock_waypoint_complete.msac.d.0.sps","cache/bitmaps/icon_roadblock_worldmap.msac.d.0.sps","cache/bitmaps/icon_roadblock_worldmap_complete.msac.d.0.sps","cache/bitmaps/icon_storyteller_waypoint.msac.d.0.sps","cache/bitmaps/icon_storyteller_worldmap.msac.d.0.sps","cache/bitmaps/icon_symbol_skill_point_01.msac.d.0.sps","cache/bitmaps/icon_town_occupied_worldmap.msac.d.0.sps","cache/bitmaps/icon_town_worldmap.msac.d.0.sps","cache/bitmaps/icon_unknown_worldmap.msac.d.0.sps","cache/bitmaps/iki_fog_of_war_texture.msac.d.0.sps","cache/bitmaps/iki_world_map_texture_exile.msac.d.0.sps","cache/bitmaps/iyo_phase_01_crown_mtl.msac.d.0.sps","cache/bitmaps/iyo_phase_01_rope_mtl.msac.d.0.sps","cache/bitmaps/iyo_phase_01_rope_tassle_mtl.msac.d.0.sps","cache/bitmaps/map_water_01.msac.d.0.sps","cache/bitmaps/metal_ap_steel_crystal_ore_001.msac.d.0.sps","cache/bitmaps/mongol_horse_saddle.msac.d.0.sps","cache/bitmaps/mongol_melee_tribe_05_costume_boot_mtl.msac.d.0.sps","cache/bitmaps/mongol_melee_tribe_05_costume_helmet_mtl.msac.d.0.sps","cache/bitmaps/mongol_melee_tribe_05_costume_tight_covers_mtl.msac.d.0.sps","cache/bitmaps/mongols_ranged_tribe_03_grenadier_helmet_mtl.msac.d.0.sps","cache/bitmaps/paper_pj_shoji_001.msac.t.0.sps","cache/bitmaps/particle_char_ayu_mtl.msac.d.0.sps","cache/bitmaps/particle_char_ayu_mtl.msac.n.0.sps","cache/bitmaps/particle_char_bluetail_mtl.msac.d.0.sps","cache/bitmaps/particle_char_crow_glow_mtl.msac.d.0.sps","cache/bitmaps/particle_char_crow_glow_mtl.msac.n.0.sps","cache/bitmaps/particle_char_crow_mtl.msac.d.0.sps","cache/bitmaps/particle_char_crow_mtl.msac.n.0.sps","cache/bitmaps/particle_char_eagle_mtl.msac.d.0.sps","cache/bitmaps/particle_char_eagle_mtl.msac.n.0.sps","cache/bitmaps/particle_char_firefly_mtl.msac.d.0.sps","cache/bitmaps/particle_char_hornet_mtl.msac.d.0.sps","cache/bitmaps/particle_char_hornet_mtl.msac.n.0.sps","cache/bitmaps/particle_char_koi_mtl.msac.d.0.sps","cache/bitmaps/particle_char_koi_mtl.msac.n.0.sps","cache/bitmaps/particle_char_mongol_skirmisher_low_mtl.msac.d.0.sps","cache/bitmaps/particle_char_mongol_skirmisher_low_mtl.msac.n.0.sps","cache/bitmaps/particle_char_robin_mtl.msac.d.0.sps","cache/bitmaps/particle_char_robin_mtl.msac.n.0.sps","cache/bitmaps/particle_char_seagull_mtl.msac.d.0.sps","cache/bitmaps/particle_char_seagull_mtl.msac.n.0.sps","cache/bitmaps/particle_char_swallow_mtl.msac.d.0.sps","cache/bitmaps/particle_char_swallow_mtl.msac.n.0.sps","cache/bitmaps/particle_char_wagtail_mtl.msac.d.0.sps","cache/bitmaps/particle_char_warbler_mtl.msac.d.0.sps","cache/bitmaps/particle_lgd_char_samurai_burned.msac.d.0.sps","cache/bitmaps/particle_lgd_char_samurai_burned.msac.n.0.sps","cache/bitmaps/sprobe_default.spbmp.0.sps","cache/bitmaps/straw_back_basket.msac.d.0.sps","cache/bitmaps/tsu_world_map_noise.msac.h.0.sps","cache/bitmaps/ui_fx_streak_02.msac.d.0.sps","cache/bitmaps/tsu_world_map_texture_exile.msac.d.0.sps","cache/bitmaps/strawhat_amigasa_001.msac.d.0.sps","cache/bitmaps/taka_head_decapitated_mtl.msac.d.0.sps","cache/bitmaps/tenzo_costume_acc_mtl.msac.d.0.sps","cache/bitmaps/tsu_world_map_texture_iki_intro.msac.d.0.sps","cache/bitmaps/wicker_ll_palm_001.msac.d.0.sps","cache/bitmaps/iki_world_map_texture.msac.d.0.sps","cache/bitmaps/tsu_fog_of_war_texture.msac.d.0.sps","cache/bitmaps/tsu_world_map_texture.msac.d.0.sps","cache/core_tsu.sprig.xpps","cache/bitmaps/fxt_or_045_alder_leaves.psd.0.sps","cache/bitmaps/particle_char_crane_mtl.msac.d.0.sps","cache/bitmaps/particle_char_crane_mtl.msac.n.0.sps","cache/bitmaps/particle_char_frog_mtl.msac.d.0.sps","cache/bitmaps/particle_char_frog_mtl.msac.n.0.sps","cache/bitmaps/particle_char_ghostcrab_mtl.msac.d.0.sps","cache/bitmaps/particle_char_ghostcrab_mtl.msac.n.0.sps","cache/bitmaps/particle_char_goose_mtl.msac.d.0.sps","cache/bitmaps/particle_char_goose_mtl.msac.n.0.sps","cache/bitmaps/particle_char_heron_mtl.msac.d.0.sps","cache/tsu.xpps","cache/bitmaps/custom_ll_lm_kanji_001.msac.d.0.sps","cache/bitmaps/fxt_gn_016_paperlantern.psd.0.sps","cache/bitmaps/fxt_or_043_lilypad.msac.d.0.sps","cache/bitmaps/fxt_or_043_lilypad.msac.n.0.sps","cache/hero.xpps","cache/bitmaps/background_texture_foil_01.msac.d.0.sps","cache/bitmaps/mask_wipe_noise_02.msac.d.0.sps","cache/bitmaps/mask_wipe_radial_06.msac.d.0.sps","cache/bitmaps/ui_fx_shine_02.msac.d.0.sps","cache/game_missions_tsu.sprig.xpps","cache/bitmaps/icon_symbol_wind_01.msac.d.0.sps","cache/bitmaps/ui_fx_streak_04.msac.d.0.sps","cache/bitmaps/background_diamond_8.msac.d.0.sps","cache/bitmaps/background_diamond_8_highlight.msac.d.0.sps","cache/game_missions_all.sprig.xpps","cache/bitmaps/select_bow_select.msac.d.0.sps","cache/bitmaps/mask_wipe_linear_01.msac.d.0.sps","cache/bitmaps/background_bar_textured_47.msac.d.0.sps","cache/bitmaps/ui_fx_streak_05.msac.d.0.sps","cache/bitmaps/background_full_screen_03.msac.d.0.sps","cache/bitmaps/background_gradient_vertical_04.msac.d.0.sps","cache/bitmaps/icon_arrow_02.msac.d.0.sps","cache/bitmaps/mask_wipe_linear_05.msac.d.0.sps","cache/ghost_title.xpps","cache/ghost_title_0_0_0.xpps","cache/bitmaps/divider_horizontal_line_textured_06.msac.d.0.sps","cache/bitmaps/mask_wipe_linear_mirror_01.msac.d.0.sps","cache/bitmaps/reticle_bow_spline.msac.d.0.sps","cache/bitmaps/mask_wipe_linear_02.msac.d.0.sps","cache/bitmaps/meter_hero_health_mask.msac.d.0.sps","cache/bitmaps/reticle_bow_spline_shadow.msac.d.0.sps"]}}};
+/*PROFILES-END*/
+/*UI-BEGIN*/
+const $ = s => document.querySelector(s);
+const MIB = 1048576;
+const fmtSize = n => n >= GFS.GIB ? (n / GFS.GIB).toFixed(2) + " GiB" : n >= MIB ? (n / MIB).toFixed(1) + " MiB" : n >= 1024 ? (n / 1024).toFixed(0) + " KiB" : n + " B";
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let INFO = null, SRC = null, TOKEN = "", RUNNING = null;
+
+function log(m, cls) {
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.textContent = new Date().toLocaleTimeString() + "  " + m;
+  $("#log").prepend(d);
+}
+function status(html, cls) { $("#status").className = "small " + (cls || ""); $("#status").innerHTML = html; }
+
+// ---- the console's API (makeRx in GFS)
+function xhrPost(url, blob, progress, signal) {
+  return new Promise(resolve => {
+    const x = new XMLHttpRequest();
+    signal.abort = () => x.abort();
+    x.open("POST", url);
+    if (TOKEN) x.setRequestHeader("X-Ghostldr-Token", TOKEN);
+    x.upload.onprogress = e => progress(e.loaded);
+    x.onload = () => { let j = null; try { j = JSON.parse(x.responseText); } catch (e) { /* none */ } resolve({status: x.status, json: j}); };
+    x.onerror = x.onabort = x.ontimeout = () => resolve({status: 0, json: null});
+    x.send(blob);
+  });
+}
+const rx = GFS.makeRx({fetch: (u, o) => fetch(u, o), post: xhrPost, token: () => TOKEN, sleep,
+                       log: (m, c) => log(m, c), status: (m, c) => status(esc(m), c), fmtSize});
+const api = rx.api;
+
+function fromFiles(list) {
+  const items = Array.from(list, f => ({path: f.webkitRelativePath || f.name, size: f.size, file: f}));
+  const top = items.length ? items[0].path.split("/")[0] : "";
+  return GFS.makeSource("folder", top, items);
+}
+async function fromDrop(dt) {
+  const items = [], dirs = [];
+  const entries = Array.from(dt.items || [], i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (entries.length === 1 && entries[0].isFile && /\.zip$/i.test(entries[0].name)) return GFS.fromZip(dt.files[0]);
+  async function walk(e) {
+    if (e.isFile) {
+      const f = await new Promise((res, rej) => e.file(res, rej));
+      items.push({path: e.fullPath.replace(/^\/+/, ""), size: f.size, file: f});
+    } else if (e.isDirectory) {
+      dirs.push({path: e.fullPath.replace(/^\/+/, "") + "/", dir: true, size: 0});
+      const rd = e.createReader();
+      while (true) {
+        const batch = await new Promise((res, rej) => rd.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const c of batch) await walk(c);
+      }
+    }
+  }
+  for (const e of entries) await walk(e);
+  return GFS.makeSource("folder", entries[0] ? entries[0].name : "", items.concat(dirs));
+}
+
+// ---- what the game is
+let WHAT = null;
+async function choose(getSrc) {
+  $("#pick-msg").className = "small"; $("#pick-msg").textContent = "Reading…";
+  try {
+    SRC = await getSrc();
+  } catch (e) {
+    SRC = null; $("#s-what").classList.add("hide"); $("#s-go").classList.add("hide");
+    $("#pick-msg").className = "small bad"; $("#pick-msg").textContent = e.message;
+    return;
+  }
+  const sfo = GFS.parseSfo(await SRC.bytes("sce_sys/param.sfo"));
+  let title = GFS.normalizeTitle(sfo.TITLE_ID) || "";
+  const from = title ? "param.sfo" : "";
+  if (!title) { const m = (SRC.name + " " + SRC.root).toUpperCase().match(/[A-Z]{4}\d{5}/); if (m) title = m[0]; }
+  WHAT = {sfo, from};
+  $("#title-in").value = title;
+  $("#pick-msg").textContent = "";
+  let total = 0; for (const n of SRC.files.values()) total += n;
+  WHAT.total = total;
+  describe();
+  $("#s-what").classList.remove("hide");
+  $("#s-go").classList.remove("hide");
+}
+function prof(title) { return PROFILES[title] || {}; }
+function describe() {
+  const title = GFS.normalizeTitle($("#title-in").value);
+  const sfo = WHAT.sfo, pr = title ? prof(title) : {};
+  const pk = pr.pack || {};
+  const name = pr.name || sfo.TITLE || "", version = pr.version || sfo.APP_VER || "";
+  const prefix = title ? (pk.prefix || GFS.defaultPrefix(title)) : "";
+  const msgs = [];
+  let ok = !!title;
+  if (!title) msgs.push(['bad', "Type the game's title ID (for example CUSA12345): it has no param.sfo that says it."]);
+  else if (!WHAT.from) msgs.push(['warn', "The title ID was not read from the game's param.sfo: check it."]);
+  const why = prefix && GFS.prefixProblem(prefix);
+  if (why) { ok = false; msgs.push(['bad', why]); }
+  const containers = Math.ceil(WHAT.total / GFS.CAP);
+  if (containers > GFS.MAX_CONTAINERS) { ok = false; msgs.push(['bad', "Too big for saved data (at most 93 GiB)."]); }
+  const dump = /^(CUSA|PLAS|PCAS|PCJS|PLJS|PLJM|PCKS|PLKS|PPSA)\d{5}$/i.test(title || "") && !/^IV\d{4}-/.test(sfo.CONTENT_ID || "");
+  if (INFO && INFO.platform === "ps4" && dump)
+    msgs.push(['warn', "A PS4 gives SWRR about 2.5 GiB of memory: game dumps largely won't run there. Homebrew and small titles do."]);
+  if (SRC.skipped) msgs.push(['mute', `${SRC.skipped} files outside the game's folder are left out.`]);
+  if (SRC.junk) msgs.push(['mute', `${SRC.junk} system files (.DS_Store, ._*, __MACOSX) are left out.`]);
+  if (SRC.kind === "zip" && [...SRC.files.keys()].length && SRC.streamed && WHAT.total > 4 * GFS.GIB)
+    msgs.push(['mute', "Large compressed zips are unpacked in this browser as they are sent: a stored (uncompressed) zip is lighter on a phone."]);
+  const dl = [["Game", esc(name || "(no name)")], ["Title ID", esc(title || "?") + (WHAT.from ? ' <span class="mute small">(param.sfo)</span>' : "")],
+              ["Version", esc(version || "-")], ["Size", `${fmtSize(WHAT.total)} in ${SRC.files.size} files`],
+              ["Stored as", prefix ? `${containers} save container${containers === 1 ? "" : "s"} ${esc(prefix)}000… + ${esc(prefix)}INDEX` : "-"],
+              ["From", esc(SRC.kind === "zip" ? SRC.name : (SRC.name || "folder")) +
+                (SRC.root && SRC.root.replace(/\/$/, "") !== SRC.name ? " / " + esc(SRC.root.replace(/\/$/, "")) : "")]];
+  $("#what").innerHTML = dl.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  $("#what-msg").innerHTML = msgs.map(([c, m]) => `<p class="${c}">${esc(m)}</p>`).join("");
+  Object.assign(WHAT, {title, name, version, prefix, pk, ok});
+  $("#go").disabled = !ok || !!RUNNING;
+}
+
+// ---- installed titles
+async function refresh() {
+  let cat = null;
+  try {
+    cat = (await GFS.readCatalogue(rx, knownPrefixes(), () => {})).cat;
+  } catch (e) { $("#installed").innerHTML = `<span class="bad">${esc(e.message)}</span>`; return; }
+  if (!cat || !cat.entries.length) { $("#installed").textContent = "No games installed in saved data yet."; return; }
+  $("#installed").innerHTML = "<table><tr><th>Game</th><th>Size</th><th>State</th><th></th></tr>" + cat.entries.map(e =>
+    `<tr><td>${esc(e.name || e.title)}<div class="mute small">${esc(e.title)} ${esc(e.version)}</div></td><td>${fmtSize(e.total)}</td>` +
+    `<td>${e.flags & GFS.INCOMPLETE ? '<span class="warn">incomplete</span>' : '<span class="ok">ready</span>'}</td>` +
+    `<td><button data-rm="${esc(e.title)}" class="small">Remove</button></td></tr>`).join("") + "</table>" +
+    '<p class="small mute">Remove deletes the game\'s data; its saves stay.</p>';
+  document.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => removeTitle(b.dataset.rm));
+}
+const knownPrefixes = () => Object.fromEntries(Object.entries(PROFILES).filter(([, p]) => p.pack && p.pack.prefix).map(([t, p]) => [p.pack.prefix, t]));
+async function unlock() {
+  TOKEN = ($("#tok").value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!INFO || !INFO.token) return true;
+  try { await api("POST", "auth"); try { sessionStorage.setItem("gldr-token", TOKEN); } catch (e) { /* storage off */ } return true; }
+  catch (e) { status(esc(e.message) + ": type the token the TV shows.", "bad"); $("#tok").focus(); return false; }
+}
+async function removeTitle(title) {
+  if (RUNNING) return;
+  if (!confirm(`Remove ${title}'s game data from the console? Its saves stay.`)) return;
+  if (!(await unlock())) return;
+  try { await GFS.remove(rx, title, knownPrefixes(), m => log(m)); status(`${esc(title)} removed.`, "ok"); }
+  catch (e) { status(esc(e.message), "bad"); }
+  refresh();
+}
+
+// ---- the install
+async function install() {
+  if (RUNNING || !WHAT || !WHAT.ok) return;
+  if (!(await unlock())) return;
+  const signal = {stopped: false, abort: null};
+  RUNNING = signal;
+  $("#go").disabled = true; $("#stop").disabled = false;
+  const t0 = Date.now();
+  let speedAt = Date.now(), speedDone = 0, rate = 0, lastTotal = 1;
+  const ui = {
+    log: m => log(m),
+    step: m => status(esc(m)),
+    progress(done, total) {
+      lastTotal = total || 1;
+      $("#bar").style.width = (100 * done / lastTotal).toFixed(1) + "%";
+      const t = Date.now();
+      if (t - speedAt > 2000) { rate = rate ? 0.7 * rate + 0.3 * (done - speedDone) / ((t - speedAt) / 1000) : (done - speedDone) / ((t - speedAt) / 1000); speedAt = t; speedDone = done; }
+      const eta = rate > 0 ? Math.round((total - done) / rate) : 0;
+      status(`${fmtSize(done)} of ${fmtSize(total)}` + (rate > 0 ? ` · ${(rate / 1e6).toFixed(1)} MB/s · about ${eta >= 120 ? Math.round(eta / 60) + " min" : eta + " s"} left` : ""));
+    },
+  };
+  try {
+    const p = GFS.pack(SRC.files, SRC.dirs, WHAT.title, WHAT.prefix, WHAT.pk);
+    for (const c of p.containers) c.lid = p.layoutId;
+    const info = {name: WHAT.name, version: WHAT.version};
+    await api("POST", "begin", {title: p.title, name: WHAT.name.slice(0, 63), total: p.total});
+    log(`${p.title}: ${p.files} files, ${fmtSize(p.total)} in ${p.containers.length} containers, layout ${p.layoutId.toString(16)}`);
+    status("Looking at what the console has…");
+    const st = await GFS.survey(rx, p, info, $("#force").checked, knownPrefixes(), m => log(m));
+    for (const c of p.containers) c.lid = p.layoutId;
+    const steps = GFS.plan(st, p, info, $("#force").checked);
+    const puts = steps.filter(s => s[0] === "put").length;
+    if (!steps.length) { status(`${esc(p.title)} is already installed: nothing to send.`, "ok"); await api("POST", "end", {title: p.title, ok: 1}); return; }
+    if (st.tagged.size && puts < p.containers.length) log(`carrying on: ${p.containers.length - puts} of ${p.containers.length} containers are already there`);
+    const need = GFS.spaceNeeded(st, steps, p);
+    if (need) {
+      status(`Checking the console has ${fmtSize(need)} free…`);
+      const f = await rx.free(need);
+      if (f.status) throw new GFS.InstallError("the free-space check failed: " + GFS.errText(f.status));
+      if (f.have < need) throw new GFS.InstallError(`not enough space on the console: this needs ${fmtSize(need)} more and ${fmtSize(f.have)} is free. Nothing was changed. Free some space (or remove a game above), then Install again.`);
+    }
+    await GFS.execute(rx, steps, st, p, SRC, ui, signal);
+    await api("POST", "end", {title: p.title, ok: 1});
+    $("#bar").style.width = "100%";
+    status(`<b>${esc(WHAT.name || p.title)} is installed</b> (${fmtSize(p.total)} in ${Math.round((Date.now() - t0) / 1000)} s). Pick it in ghostldr's game selector.`, "ok");
+    log("install complete", "ok");
+  } catch (e) {
+    const paused = e.message === "paused";
+    status(paused ? "Paused. Install again carries on where it stopped." : esc(e.message), paused ? "warn" : "bad");
+    log(paused ? "paused" : "stopped: " + e.message, paused ? "warn" : "bad");
+    try { await api("POST", "end", {title: WHAT.title, ok: 0}); } catch (e2) { /* the console is gone */ }
+  } finally {
+    RUNNING = null;
+    $("#stop").disabled = true; $("#go").disabled = !WHAT.ok;
+    refresh();
+  }
+}
+
+// ---- start
+$("#pick-dir").onchange = e => e.target.files.length && choose(() => fromFiles(e.target.files));
+$("#pick-zip").onchange = e => e.target.files.length && choose(() => GFS.fromZip(e.target.files[0]));
+$("#title-in").oninput = () => WHAT && describe();
+$("#go").onclick = install;
+$("#stop").onclick = () => { if (RUNNING) { RUNNING.stopped = true; if (RUNNING.abort) RUNNING.abort(); } };
+const drop = $("#drop");
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("on"); };
+drop.ondragleave = () => drop.classList.remove("on");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("on"); const dt = e.dataTransfer; choose(() => fromDrop(dt)); };
+window.addEventListener("beforeunload", e => { if (RUNNING) { e.preventDefault(); e.returnValue = ""; } });
+(async () => {
+  const m = location.hash.match(/token=([A-Za-z0-9-]+)/);
+  let saved = "";
+  try { saved = sessionStorage.getItem("gldr-token") || ""; } catch (e) { /* storage off */ }
+  $("#tok").value = m ? m[1] : saved;
+  try {
+    INFO = await api("GET", "info");
+    $("#who").textContent = `${INFO.server === "ghostldr" ? "ghostldr" : "manager"} · SWRR ${INFO.swrr || "?"} · ${(INFO.platform || "").toUpperCase()}`;
+    $("#tok-row").classList.toggle("hide", !INFO.token);
+  } catch (e) { $("#who").textContent = "the console does not answer"; }
+  refresh();
+})();
+/*UI-END*/
+</script>
+</body>
+</html>
+]====]
 
 if MANAGER_TEST then return M end
 
@@ -1719,6 +2808,327 @@ local function h_delete_title(fd, q)
                          error = #failed_list > 0 and ("could not delete " .. table.concat(failed_list, ", ")) or nil})
 end
 
+-- ---------------------------------------------------------------- network install
+-- What /install's page asks for (docs/manager.md "Install a game"): the
+-- browser lays the game out; these store bytes in containers.  A data
+-- container (<prefix>000..) arrives in one or more requests: the first
+-- (off=0) creates it and opens data.bin, which stays open and mounted between
+-- requests; the last commits and checks its size.  A dropped connection
+-- leaves it open, so the page carries on from where the console got to
+-- (/api/install/info's session).
+local PUMP_HEX = "554889e54157415641554154534883e4f04883ec204889fb488b47304c8b67384e8d3c2049ffcf0f57c00f11476048c7477000000000c787a8000000000000000f1147784c89f84c09e048c1e820740a4c89f831d249f7f4eb084489f831d241f7f448890424488dbbb0000000488d154c0100004c8d052f02000031f64889d9ff531085c07408489848894360eb154d39fc761f488bbbb000000031f6ff5318488b4360488d65d85b415c415d415e415f5dc34531f6662e0f1f8400000000008b83a800000085c075ca4589f74183e7034489f88b44837885c0741f0f1f40008b83a800000085c07511bfc8000000ff5320428b44bb7885c075e58b83a800000085c0758f4c897424104c8b7330488b43384c2b73684939c64c0f43f04c897c24084e8b64fb4031c90f1f80000000004989cd4d89f74929cf76258b7b284b8d342c4c89fab9400000004531c04531c9ff134885c07e094a8d0c284c39f876d04c016b684d39ee752c488b4424084c89b4c388000000c7448378010000004c8b74241049ffc64c3b34240f8230ffffffe9fffeffff8b83a800000085c0750848c74360ffffffffc783a800000001000000e9defeffffcccccccccccccccccccc554889e5415741564154534883e4f04889fb488b4730488b7738488d0c3048ffc94889c84809f048c1e82074154889c831d248f7f64989c64839ce7617e99900000089c831d2f7f64189c64839ce0f87870000004531ff4589fc4183e4034489e08b44837885c075220f1f80000000008b83a800000085c07561bfc8000000ff5320428b44a37885c074e58b7b2c4a8b74e3404a8b94e388000000ff53084a3b84e38800000075174801437042c744a3780000000049ffc74d39f7729aeb1c4885c048c7c1feffffff480f48c848894b60c783a80000000100000031c0488d65e05b415c415e415f5dc36766732d70756d7000"
+local inst = nil                 -- the data container being written
+local pump, pump_ctx
+local function pump_setup()
+    if pump ~= nil or PUMP_HEX == "" or MOUNT2 or not (IPU_PROG_BASE and SHELLCODE_SCRATCH and jit_memcpy and EBOOT_OFFSETS) then
+        pump = pump or false
+        return
+    end
+    pump = false
+    local blob = hex_to_binary(PUMP_HEX)
+    local code = IPU_PROG_BASE + 0x4000
+    write_buffer(SHELLCODE_SCRATCH, blob)
+    jit_memcpy(code, SHELLCODE_SCRATCH, #blob)
+    local bufs = {buf}
+    for i = 2, 4 do bufs[i] = malloc(CHUNK) end
+    local fns = {dlsym(LIBKERNEL_HANDLE, "recvfrom"), dlsym(LIBKERNEL_HANDLE, "sceKernelWrite"),
+                 read64(EBOOT_OFFSETS.scePthreadCreate), read64(EBOOT_OFFSETS.scePthreadJoin),
+                 dlsym(LIBKERNEL_HANDLE, "sceKernelUsleep")}
+    local ready = read64(code) == string.unpack("<I8", blob, 1)
+    for i = 1, 4 do ready = ready and bufs[i] ~= 0 end
+    for i = 1, #fns do ready = ready and fns[i] ~= 0 end
+    if ready then
+        pump_ctx = malloc(0xb8)
+        for i = 1, #fns do write64(pump_ctx + (i - 1) * 8, fns[i]) end
+        write64(pump_ctx + 0x38, CHUNK)
+        for i = 1, 4 do write64(pump_ctx + 0x40 + (i - 1) * 8, bufs[i]) end
+        pump = func_wrap(code)
+    end
+    say(string.format("install: pump %s", ready and "ready" or "unavailable (the Lua loop)"))
+end
+
+local function inst_umount(mp)
+    mounted[mp] = inst and inst.name or "?"
+    return umount(mp)
+end
+-- close and commit the open data container (what it holds stays, untagged)
+local function inst_close()
+    if not inst then return 0 end
+    local i = inst
+    inst = nil
+    if i.fd then kclose(i.fd) end
+    return inst_umount(i.mp)
+end
+
+local function qint(v)
+    local n = math.tointeger(tonumber(v or ""))
+    return n
+end
+local function reply_rc(fd, rc, extra)
+    local t = extra or {}
+    t.ok, t.rc = true, u32(rc or 0)
+    if t.rc ~= 0 then t.error = M.errtext(t.rc) end
+    reply_json(fd, M.obj(t))
+end
+local function inst_check(fd, op, name)
+    local kind = M.install_kind(name)
+    if not kind or (op and not M.INSTALL_OPS[op][kind]) then
+        reply_err(fd, 403, tostring(name) .. ": not a container the installer may " .. (op or "read"))
+        return nil
+    end
+    return kind
+end
+
+-- up to n bytes of f from off into buf: the save call's status (0, a mount
+-- error, or -1: no such file) and how many.  The bytes stay in buf: the Lua
+-- GC is off, so a string of each read would pile up (4 MiB reads of a data
+-- container ran SWRR out of memory on a PS4).
+local function inst_read(name, f, off, n)
+    local mp, rc = mount(name, 1, 0)
+    if not mp then return rc, 0 end
+    local h = open(mp .. "/" .. f, 0)
+    local got = -1
+    if h then
+        got = kpread(h, buf, math.min(n, CHUNK), off)
+        close(h)
+    end
+    umount(mp)
+    if got < 0 or got > CHUNK then return -1, 0 end
+    return 0, got
+end
+local function buf_string(n) return n > 0 and read_buffer(buf, math.max(n, 64)):sub(1, n) or "" end
+
+local function h_inst_info(fd)
+    local se = inst and M.obj{c = inst.name, size = inst.size, written = inst.written, lid = inst.lid} or nil
+    reply_json(fd, M.obj{ok = true, server = "manager", version = 1, swrr = TITLE_ID,
+                         platform = PLATFORM and tostring(PLATFORM):lower() or nil, token = true, session = se,
+                         pump = pump and true or false, max_write = CHUNK})
+end
+
+local function h_inst_read(fd, q)
+    if not inst_check(fd, nil, q.c) then return end
+    if not M.install_file_ok(q.f) then return reply_err(fd, 400, "bad file name") end
+    local off, n = qint(q.off) or 0, qint(q.len) or 0
+    if off < 0 or n < 0 then return reply_err(fd, 400, "bad range") end
+    local rc, got = inst_read(q.c, q.f, off, n)
+    responded = true
+    if send_str(fd, M.response_head(200, "application/octet-stream", got, {"X-Gfs-Status: " .. tostring(u32(rc))}))
+            and got > 0 then
+        send_ptr(fd, buf, got)
+    end
+end
+
+local function h_inst_probe(fd, q)
+    local out = {}
+    for name in (q.c or ""):gmatch("[^,]+") do
+        if #out >= 16 or not inst_check(fd, nil, name) then
+            if #out >= 16 then reply_err(fd, 400, "at most 16 containers") end
+            return
+        end
+        local rc, got = inst_read(name, "gfs.tag", 0, 16)
+        local hex = rc == 0 and (buf_string(got):gsub(".", function(ch) return string.format("%02x", ch:byte()) end))
+            or nil
+        out[#out + 1] = M.obj{name = name, exists = u32(rc) ~= 0x809F0008, tag = hex}
+    end
+    reply_json(fd, M.obj{ok = true, containers = out})
+end
+
+-- the request's body, whole (at most CHUNK bytes) into buf: its length, or nil
+local function body_into_buf(fd, req, pre_ptr, pre_len)
+    local len = qint(req.headers["content-length"])
+    if not len or len < 0 or len > CHUNK then return nil end
+    local pre = math.min(pre_len, len)
+    for i = 0, pre - 1 do write8(buf + i, read8(pre_ptr + i)) end
+    if pre < len and recv_exact(fd, buf + pre, len - pre) ~= len - pre then return nil end
+    return len
+end
+
+-- write n bytes of buf as f into the mounted mp: 0, or an error
+local function put_file(mp, f, n)
+    local h, rc = open(mp .. "/" .. f, 0x601, 0x1b6)
+    if not h then return rc end
+    local w = n > 0 and kwrite(h, buf, n) or 0
+    local crc = close(h)
+    if w ~= n then return w < 0 and w or -2 end
+    return crc
+end
+
+local function h_inst_write(fd, q, req, pre_ptr, pre_len, create)
+    if not inst_check(fd, create and "put" or "write", q.c) then return end
+    if not M.install_file_ok(q.f) then return reply_err(fd, 400, "bad file name") end
+    local blocks = qint(q.blocks) or 0
+    if create and (blocks < M.MIN_BLOCKS or blocks > M.MAX_BLOCKS) then return reply_err(fd, 400, "bad blocks") end
+    local n = body_into_buf(fd, req, pre_ptr, pre_len)
+    if not n then return reply_err(fd, 400, "the body must be 0 to 4 MiB, with Content-Length") end
+    if inst and inst.name == q.c then inst_close() end
+    local mp, rc
+    if create then
+        delete(q.c)
+        mp, rc = mount(q.c, 6, blocks)
+    else
+        mp, rc = mount(q.c, 2, 0)
+    end
+    if not mp then return reply_rc(fd, rc) end
+    local wrc = put_file(mp, q.f, n)
+    local urc = umount(mp)
+    if wrc ~= 0 then return reply_rc(fd, wrc) end
+    if urc ~= 0 then return reply_rc(fd, urc) end
+    if create then          -- check what was committed
+        local vrc, got = inst_read(q.c, q.f, 0, n)
+        if vrc ~= 0 or got ~= n then return reply_rc(fd, vrc ~= 0 and vrc or -2) end
+    end
+    say(string.format("install: %s %s/%s, %d bytes", create and "put" or "write", q.c, q.f, n))
+    reply_rc(fd, 0)
+end
+
+local function h_inst_delete(fd, q)
+    if not inst_check(fd, "delete", q.c) then return end
+    if inst and inst.name == q.c then inst_close() end
+    local rc = delete(q.c)
+    say(string.format("install: delete %s -> %s", q.c, M.errtext(rc)))
+    reply_rc(fd, rc)
+end
+
+-- whether `want` bytes fit: 1 GiB probes GFSFREE00.. until they do or the
+-- storage is full (NO_SPACE_FS reports the blocks missing), then deleted
+local function h_inst_free(fd, q)
+    local want = qint(q.bytes) or 0
+    local have, made, status = 0, 0, 0
+    while have < want and made < 100 do
+        local name = string.format("GFSFREE%02d", made)
+        delete(name)
+        local mp, rc, missing = mount(name, 6, M.MAX_BLOCKS)
+        if not mp then
+            if u32(rc) == 0x809F000A then
+                if missing and missing < M.MAX_BLOCKS then have = have + (M.MAX_BLOCKS - missing) * M.BLOCK end
+            else
+                status = rc
+            end
+            break
+        end
+        umount(mp)
+        made = made + 1
+        have = have + (1 << 30)
+    end
+    for i = 0, made do delete(string.format("GFSFREE%02d", i)) end
+    say(string.format("install: free %d MiB wanted, %d MiB fit (%d probes, %s)", want >> 20, have >> 20, made,
+        M.errtext(status)))
+    reply_rc(fd, status, {have = have})
+end
+
+local function verify_size(name, f, size)
+    local mp, rc = mount(name, 1, 0)
+    if not mp then return rc end
+    local _, _, got = stat(mp .. "/" .. f)
+    umount(mp)
+    return got == size and 0 or -2
+end
+
+local function h_inst_data(fd, q, req, pre_ptr, pre_len)
+    local name = q.c
+    if not inst_check(fd, "data", name) then return end
+    local size, blocks, off = qint(q.size), qint(q.blocks), qint(q.off)
+    local len = qint(req.headers["content-length"])
+    local lid = tostring(q.lid or "")
+    if not (size and blocks and off and len) or size < 1 or blocks < M.MIN_BLOCKS or blocks > M.MAX_BLOCKS
+            or size > blocks * M.BLOCK or off < 0 or len < 0 or off + len > size or #lid > 32 then
+        return reply_err(fd, 400, "bad data request")
+    end
+    if off == 0 then
+        inst_close()
+        delete(name)
+        local mp, rc, required = mount(name, 6, blocks)
+        if not mp then
+            local extra = u32(rc) == 0x809F000A and string.format(" (%d more blocks needed)", required or 0) or ""
+            say("install: create " .. name .. ": " .. M.errtext(rc) .. extra)
+            return reply_rc(fd, rc)
+        end
+        mounted[mp] = nil
+        write_string(path, mp .. "/data.bin")
+        local h = kopen(path, 0x601, 0x1b6)
+        if not fd_ok(h) then
+            mounted[mp] = name
+            umount(mp)
+            return reply_rc(fd, h)
+        end
+        inst = {name = name, size = size, blocks = blocks, lid = lid, written = 0, fd = h, mp = mp, t0 = gettime()}
+    elseif not inst or inst.name ~= name or inst.size ~= size or inst.lid ~= lid or inst.written ~= off then
+        local same = inst and inst.name == name and inst.size == size and inst.lid == lid
+        return reply(fd, 409, "application/json", M.json(M.obj{ok = false, written = same and inst.written or 0,
+            error = "the console has " .. (same and inst.written or 0) .. " bytes of " .. name}))
+    end
+    set_timeout(fd, SO_RCVTIMEO, 30)
+    local ok, werr = true, 0
+    local pre = math.min(pre_len, len)
+    if pre > 0 then
+        local w = kwrite(inst.fd, pre_ptr, pre)
+        if w ~= pre then ok, werr = false, w end
+        if ok then inst.written = inst.written + pre end
+    end
+    local rest, lost = len - pre, false
+    if ok and rest > 0 then
+        pump_setup()
+        if pump then
+            write32(pump_ctx + 0x28, fd)
+            write32(pump_ctx + 0x2c, inst.fd)
+            write64(pump_ctx + 0x30, rest)
+            local st = pump(pump_ctx)
+            inst.written = inst.written + read64(pump_ctx + 0x70)
+            if st == -1 then lost = true elseif st ~= 0 then ok, werr = false, st end
+        else
+            local done = 0
+            while done < rest do
+                local want = math.min(CHUNK, rest - done)
+                local got = recv_exact(fd, buf, want)
+                if got > 0 then
+                    local w = kwrite(inst.fd, buf, got)
+                    if w ~= got then ok, werr = false, w break end
+                    inst.written = inst.written + got
+                    done = done + got
+                end
+                if got ~= want then lost = true break end
+            end
+        end
+    end
+    if not ok then
+        say(string.format("install: %s: write -> %s after %d MiB", name, M.errtext(werr), inst.written >> 20))
+        inst_close()
+        return reply_rc(fd, werr ~= 0 and werr or -2)
+    end
+    if lost then
+        say(string.format("install: %s: connection lost at %d MiB (kept open: the page carries on)", name,
+            inst.written >> 20))
+        responded = true
+        return
+    end
+    if inst.written < size then return reply_json(fd, M.obj{ok = true, rc = 0, written = inst.written}) end
+    local t0 = inst.t0
+    local h = inst.fd
+    inst.fd = nil
+    local crc = kclose(h)
+    local urc = inst_close()
+    local millis = (gettime() - t0) // 1000
+    if crc ~= 0 or urc ~= 0 then return reply_rc(fd, urc ~= 0 and urc or crc) end
+    local vrc = verify_size(name, "data.bin", size)
+    say(string.format("install: %s: %d MiB in %.1f s (%.1f MB/s%s), verify %s", name, size >> 20, millis / 1000,
+        size / 1000 / math.max(millis, 1), pump and ", pump" or "", M.errtext(vrc)))
+    if vrc ~= 0 then return reply_rc(fd, vrc) end
+    reply_json(fd, M.obj{ok = true, rc = 0, written = size, done = true, millis = millis})
+end
+
+local function h_inst_note(fd, q, done)
+    local what = (q.name and q.name ~= "" and q.name or q.title or "a game"):sub(1, 64)
+    if done == nil then
+        say(string.format("install: begin %s %s, %s bytes", tostring(q.title), what, tostring(q.total)))
+        send_notification(string.format("ghostldr: installing %s", what))
+    else
+        say(string.format("install: end %s: %s", tostring(q.title), q.ok == "1" and "installed" or "stopped"))
+        send_notification(q.ok == "1" and string.format("ghostldr: %s installed", what)
+            or string.format("ghostldr: install of %s stopped", what))
+    end
+    reply_json(fd, M.obj{ok = true})
+end
+
 local PAGE_HEADERS = {"Content-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; "
     .. "style-src 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'", "X-Frame-Options: DENY"}
 local running, last_note = true, 0
@@ -1741,6 +3151,9 @@ local function handle(fd)
     if m == "GET" then
         if p == "/" or p == "/index.html" then return reply(fd, 200, "text/html; charset=utf-8", M.PAGE, PAGE_HEADERS) end
         if p == "/favicon.ico" then return reply(fd, 204, "text/plain", "") end
+        if p == "/install" then return reply(fd, 200, "text/html; charset=utf-8", M.INSTALL_PAGE, PAGE_HEADERS) end
+        if p == "/api/install/info" then return h_inst_info(fd) end
+        if p == "/api/install/read" then return h_inst_read(fd, q) end
         if p == "/api/state" then
             local s, e = state()
             if not s then return reply_err(fd, 500, e) end
@@ -1750,7 +3163,7 @@ local function handle(fd)
         if p == "/api/download" then return h_download(fd, q) end
         return reply_err(fd, 404, "not found")
     elseif m == "POST" then
-        if p == "/api/exit" then
+        if p == "/api/exit" or p == "/api/install/exit" then
             running = false
             return reply_json(fd, M.obj{ok = true})
         end
@@ -1762,7 +3175,15 @@ local function handle(fd)
         end
         local ok, code, msg = check_token(req)
         if not ok then return reply_err(fd, code, msg) end
-        if p == "/api/auth" then return reply_json(fd, M.obj{ok = true}) end
+        if p == "/api/auth" or p == "/api/install/auth" then return reply_json(fd, M.obj{ok = true}) end
+        if p == "/api/install/probe" then return h_inst_probe(fd, q) end
+        if p == "/api/install/data" then return h_inst_data(fd, q, req, pre_ptr, pre_len) end
+        if p == "/api/install/put" then return h_inst_write(fd, q, req, pre_ptr, pre_len, true) end
+        if p == "/api/install/write" then return h_inst_write(fd, q, req, pre_ptr, pre_len, false) end
+        if p == "/api/install/delete" then return h_inst_delete(fd, q) end
+        if p == "/api/install/free" then return h_inst_free(fd, q) end
+        if p == "/api/install/begin" then return h_inst_note(fd, q, nil) end
+        if p == "/api/install/end" then return h_inst_note(fd, q, true) end
         if p == "/api/check-restore" then return h_check(fd, q) end
         if p == "/api/restore" then return h_restore(fd, q, req, pre_ptr, pre_len) end
         if p == "/api/copy" then return h_copy(fd, q) end
@@ -1849,6 +3270,7 @@ local function serve()
 end
 
 local ok, err = pcall(serve)
+pcall(inst_close)
 pcall(cleanup)
 if not ok then
     say("stopped: " .. tostring(err))

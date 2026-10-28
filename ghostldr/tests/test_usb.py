@@ -605,7 +605,7 @@ def put(root: Path, rel: str, data: bytes = b"x") -> None:
 def console_files(root: Path) -> None:
     """What the fake console's sandbox sees: a mapped drive at /mnt/usb0, and a dev /data."""
     lib = "mnt/usb0/ghostldr"
-    put(root, f"{lib}/CUSA11111/app0/eboot.bin", b"e" * 11)
+    put(root, f"{lib}/CUSA11111/app0/eboot.bin", b"0123456789A")  # 11 bytes, each its own
     put(root, f"{lib}/CUSA22222/app0/eboot.bin", b"e" * 22)
     put(root, f"{lib}/CUSA22222/prefix", b"GHOST\n")
     put(root, f"{lib}/CUSA33333/notes.txt")                         # no app0: not a game
@@ -669,7 +669,8 @@ class AppRootTests(unittest.TestCase):
         cls.tmp_dir = tempfile.TemporaryDirectory()
         cls.tmp = Path(cls.tmp_dir.name)
         cls.exe = cls.tmp / "approot_host"
-        build_with_hostfs(cls.exe, [HERE / "ext_native/approot_host.c", NATIVE / "ext/src/approot.c", *cls.SOURCES],
+        build_with_hostfs(cls.exe, [HERE / "ext_native/approot_host.c", NATIVE / "ext/src/approot.c",
+                                    NATIVE / "ext/src/usb_live.c", *cls.SOURCES],
                           [HERE / "ext_native", NATIVE / "ext/include", NATIVE / "include"], cls.DEFINES)
         cls.fs = cls.tmp / "fs"
         console_files(cls.fs)
@@ -693,8 +694,11 @@ class AppRootTests(unittest.TestCase):
                 _, tid, flags, path, folder, note = rest.split("\t")
                 r["lib"].append((tid, int(flags), path, folder, note))
             elif kind in ("profile", "saves", "eboot", "registered", "mount", "prepared", "home", "mount-after",
-                          "session", "after-pick", "session-flag"):
+                          "session", "after-pick", "session-flag", "again", "gen", "read-after", "notifications",
+                          "live-mount", "waiting", "path-other", "opened", "live-root"):
                 r[kind] = rest
+            elif kind == "notify":
+                r.setdefault("notify", []).append(rest)
         return r
 
     MAP = ("--map", "/mnt/usb0")
@@ -707,7 +711,10 @@ class AppRootTests(unittest.TestCase):
         r = self.run_root("usb:/ghostldr", *self.MAP, "--pick", "CUSA22222")
         self.assertIn("RequestMap2 0x", r["log"])                        # found through the unwind table
         self.assertIn("sceUsbStorageInit -> 0", r["log"])
-        self.assertIn("USB drive 1001 mounted at /ghostldr_usb: 0; /ghostldr_usb/ghostldr found", r["log"])
+        self.assertIn("USB drive 1001 mounted at /ghostldr_usb: 0", r["log"])
+        self.assertIn("/ghostldr_usb/ghostldr found", r["log"])
+        self.assertIn("USB drive 1001: Maker Drive, 65536 MiB, 32768 MiB free, usb 0000:0000, features 80 (exFAT)",
+                      r["log"])                                          # GetDeviceInfo
         self.assertIn("approot: 3 games in ghostldr", r["log"])         # CUSA11111, CUSA22222, HOMEBREW_1
         self.assertEqual(r["init"], (1, "usb:/ghostldr", self.LIB, True))
         self.assertEqual([(t, f) for t, f, *_ in r["lib"]],
@@ -788,8 +795,28 @@ class AppRootTests(unittest.TestCase):
 
     def test_the_drive_with_games_out_of_two(self) -> None:
         r = self.run_root("usb:/", "--other", "/data/empty", *self.ANY, "--title", "LAPY20001")
-        self.assertIn("fake: unmounted 1000", r["log"])                  # the first drive has no game
-        self.assertEqual(r["init"][:2], (0, "/ghostldr_usb/Homebrew/PS4 Xplorer (LAPY20001)"))
+        self.assertEqual(r["init"][:2], (0, "/ghostldr_usb2/Homebrew/PS4 Xplorer (LAPY20001)"))
+        self.assertEqual(r["mount"], "/ghostldr_usb /ghostldr_usb2")      # both stay mounted (FTP, /mnt/usb1)
+        self.assertIn("approot: 4 games on 2 USB drives", r["log"])
+
+    def test_games_on_two_drives(self) -> None:
+        # the same folder on both drives: the games of both, in one list
+        r = self.run_root("usb:/", "--other", "/mnt/usb0", *self.ANY, "--pick", "-")
+        folders = [folder for _, f, _, folder, _ in r["lib"] if not f & self.BAD]
+        self.assertIn("/ghostldr_usb/ghostldr/CUSA11111", folders)       # the first drive's
+        self.assertIn("/ghostldr_usb2/Homebrew/PS4 Xplorer (LAPY20001)", folders)  # the second's
+        self.assertIn("approot: 9 games on 2 USB drives", r["log"])
+        self.assertIn("USB 2/Bloodborne copy", r["log"])                 # how the second drive's are named
+        r = self.run_root("usb:/", "--other", "/mnt/usb0", *self.ANY, "--title", "CUSA00900")
+        self.assertEqual(r["init"][:2], (0, "/ghostldr_usb2/Bloodborne copy/app0"))
+        self.assertEqual(r["eboot"], "found 9")
+        # a folder only one of them has
+        r = self.run_root("usb:/ghostldr", "--other", "/mnt/usb1", "--map", "/mnt/usb0", "--title", "CUSA22222")
+        self.assertIn("/ghostldr_usb2/ghostldr found", r["log"])
+        self.assertEqual(r["init"][:2], (0, "/ghostldr_usb2/ghostldr/CUSA22222/app0"))
+        # /mnt/usb1 for homebrew is the second drive
+        r = self.run_root("usb:/", "--other", "/mnt/usb0", *self.ANY, "--title", "CUSA00900", "--ftp")
+        self.assertEqual(r["home"], "/ghostldr_usb")
 
     def test_a_large_drive_is_looked_at_only_so_far(self) -> None:
         fs = self.tmp / "big"
@@ -810,10 +837,11 @@ class AppRootTests(unittest.TestCase):
 
     def test_the_drive_that_holds_the_library(self) -> None:
         r = self.run_root("usb:/ghostldr", "--other", "/data/empty", *self.MAP, "--title", "CUSA11111")
-        self.assertIn("USB drive 1000 mounted at /ghostldr_usb: 0; /ghostldr_usb/ghostldr missing", r["log"])
-        self.assertIn("fake: unmounted 1000", r["log"])
-        self.assertIn("USB drive 1001 mounted at /ghostldr_usb: 0; /ghostldr_usb/ghostldr found", r["log"])
-        self.assertEqual(r["init"][0], 0)
+        self.assertIn("USB drive 1000 mounted at /ghostldr_usb: 0", r["log"])
+        self.assertIn("/ghostldr_usb/ghostldr missing", r["log"])
+        self.assertIn("USB drive 1001 mounted at /ghostldr_usb2: 0", r["log"])
+        self.assertIn("/ghostldr_usb2/ghostldr found", r["log"])
+        self.assertEqual(r["init"][:2], (0, "/ghostldr_usb2/ghostldr/CUSA11111/app0"))
 
     def test_title_given(self) -> None:
         r = self.run_root("usb:/ghostldr/", *self.MAP, "--title", "CUSA11111")
@@ -831,7 +859,7 @@ class AppRootTests(unittest.TestCase):
         r = self.run_root("/data/lib", *self.MAP, "--title", "CUSA55555", "--ftp")
         self.assertEqual(r["mount"], "none")
         self.assertIn("sceUsbStorageInit -> 0", r["log"])
-        self.assertIn("USB drive 1001 mounted at /ghostldr_usb: 0; /ghostldr_usb/ found", r["log"])
+        self.assertIn("USB drive 1001 mounted at /ghostldr_usb: 0", r["log"])
         self.assertEqual((r["prepared"], r["home"], r["session"]), ("/ghostldr_usb", "/ghostldr_usb", "1"))
         # no FTP server: the title's own Init and Term reach the library
         r = self.run_root("/data/lib", *self.MAP, "--title", "CUSA55555")
@@ -845,6 +873,59 @@ class AppRootTests(unittest.TestCase):
         # the drive pulled out: a client starts in /, and the session stays open
         r = self.run_root("/data/lib", *self.MAP, "--title", "CUSA55555", "--ftp", "--unplug")
         self.assertIn("the USB drive at /ghostldr_usb is gone", r["log"])
+
+    # ---- the title's drive going away while it runs (usb_live.c) ----
+
+    def live(self, scenario: str, *more: str) -> dict:
+        return self.run_root("usb:/ghostldr", *self.MAP, "--title", "CUSA11111", "--live", scenario, *more)
+
+    def test_the_drive_pulled_out_and_plugged_in_again(self) -> None:
+        r = self.live("unplug")
+        self.assertEqual(r["again"], "1")                                # the failed read is made again
+        self.assertEqual(r["gen"], "1")
+        self.assertEqual(r["read-after"], "2 23")                        # the same fd, at its offset
+        self.assertIn("ghostldr: the USB drive was removed. Plug it back in", r["notify"][0])
+        self.assertIn("ghostldr: the USB drive is back", r["notify"][-1])
+        self.assertIn("fake: mounted 1002 at /ghostldr_usb", r["log"])  # the new id, the same mount point
+        self.assertIn("usb: 1 of the title's files on the drive opened again", r["log"])
+        self.assertEqual(r["live-mount"], "/ghostldr_usb")
+
+    def test_an_fd_the_system_closed_is_opened_again_where_it_was(self) -> None:
+        r = self.live("closed")
+        self.assertEqual((r["again"], r["read-after"]), ("1", "2 23"))  # at offset 2, from the calls' count
+        self.assertRegex(r["log"], r"usb: fd \d+: offset -1, 2 by the title's calls")
+
+    def test_a_mount_point_still_taken_gives_way_to_another(self) -> None:
+        r = self.live("stale")
+        self.assertEqual((r["again"], r["read-after"]), ("1", "2 23"))
+        self.assertIn("usb: drive 1002 at /ghostldr_usb: 80f40003; at /ghostldr_usb_1: 0", r["log"])
+        self.assertEqual(r["live-root"], "/ghostldr_usb_1/ghostldr/CUSA11111/app0")  # /app0 follows
+
+    def test_a_drive_without_the_game_is_not_taken_for_it(self) -> None:
+        r = self.live("wrong")
+        self.assertEqual((r["again"], r["read-after"]), ("1", "2 23"))
+        self.assertIn("usb: drive 1003 mounted at /ghostldr_usb: 0, not the title's drive", r["log"])
+        self.assertTrue(any("doesn't have the game on it" in n for n in r["notify"]))
+        self.assertEqual(r["log"].count("fake: mounted 1003"), 1)       # tried once, not again and again
+        self.assertIn("fake: mounted 1002 at /ghostldr_usb", r["log"])
+
+    def test_rest_mode_takes_the_mount_alone(self) -> None:
+        r = self.live("rest")
+        self.assertEqual((r["again"], r["read-after"]), ("1", "2 23"))
+        self.assertEqual(r["log"].count("fake: mounted 1001 at /ghostldr_usb"), 2)  # the same drive again
+        self.assertNotIn("notify", r)                                    # back at once: nothing to say
+
+    def test_a_missing_file_on_a_drive_that_answers_does_not_wait(self) -> None:
+        r = self.live("path")
+        self.assertEqual((r["again"], r["path-other"], r["gen"]), ("0", "0", "0"))
+        self.assertNotIn("notify", r)
+
+    def test_the_watch_brings_the_drive_back_and_notices_rest_mode(self) -> None:
+        r = self.live("watch")
+        self.assertIn("usb: watch started: the title runs from a USB drive", r["log"])
+        self.assertIn("usb: back from rest mode", r["log"])
+        self.assertEqual((r["gen"], r["waiting"], r["read-after"]), ("1", "0", "2 23"))
+        self.assertIn("ghostldr: the USB drive was removed", r["notify"][0])
 
     def test_a_reserved_prefix_is_not_used(self) -> None:
         r = self.run_root("usb:/ghostldr", *self.MAP, "--title", "HOMEBREW_1")

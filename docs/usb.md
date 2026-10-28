@@ -4,7 +4,7 @@ ghostldr can boot games from a USB drive plugged into the PS5 instead of install
 
 **This is the recommended way to run games.** There's no install step and no packing: a game is its dump's folder copied onto the drive, in a folder of any name. Games load faster than installed ones, and SWRR's saved data only holds their progress. Install into the saved data instead when you have no spare drive, or in Jak X, where drives are untested.
 
-Tested on a stock PS5 at firmware 13.60 with SWRR (US), with no jailbreak: Ghost of Tsushima and Bloodborne boot from a drive into gameplay, started directly and through the game selector, and PS4-Xplorer reaches its menus. Both games load faster from the drive than from an install ([Measured](#booting-titles-from-the-drive)). Missing or empty folders stop the boot cleanly.
+Tested on a stock PS5 at firmware 13.60 with SWRR (US), with no jailbreak: Ghost of Tsushima and Bloodborne boot from a drive into gameplay, started directly and through the game selector, and PS4-Xplorer reaches its menus. Two drives at once are both read, a FAT32 stick as well as exFAT drives, a game runs on through rest mode, and a drive pulled out and plugged back in is picked up again ([Pulling the drive out, rest mode](#pulling-the-drive-out-rest-mode)). Both games load faster from the drive than from an install ([Measured](#booting-titles-from-the-drive)). Missing or empty folders stop the boot cleanly.
 
 ## In short
 
@@ -93,7 +93,7 @@ python3 ghostldr.py check ps5
 
 **By hand** (Finder, Explorer, `cp`): copy the dump's folder anywhere on the drive. Nothing is packed or converted. If the dump has no `sce_sys/param.sfo` (Ghost's often hasn't), put the title ID in the folder's name, `Ghost of Tsushima (CUSA11456)` for one. Then `ghostldr.py check` says whether the PS5 will find it.
 
-`gfs_pack.py --usb DRIVE` (what the desktop app runs) does what `copy` does, with periodic progress lines instead of a bar, and takes the same `--folder` and `--verify`. Name and art for the selector: `--name`, `--icon`, `--backdrop`, `--fetch-art` ([compatibility.md](compatibility.md#1-pack)).
+`gfs_pack.py --usb DRIVE` does what `copy` does, with periodic progress lines instead of a bar, and takes the same `--folder` and `--verify`. Name and art for the selector: `--name`, `--icon`, `--backdrop`, `--fetch-art` ([compatibility.md](compatibility.md#1-pack)).
 
 **Removing a game:** delete its folder on the computer, or `python3 ghostldr/host/usb_drive.py remove DRIVE CUSA12345`, which removes only folders laid out by the copy (`app0`, `prefix`, `meta.bin` and nothing else) and leaves copies made by hand to you. Its progress stays in SWRR's saved data.
 
@@ -152,12 +152,12 @@ SWRR's sandbox has no `/mnt` and sees no USB drive by itself. The PS5's USB stor
 
 1. **Find the call.** It sits 0xA0 bytes before `sceUsbStorageRequestMap` (0x90 in later PS4 builds of the library). The library's code is execute-only, so it can't be read: the module's unwind table (`.eh_frame_hdr`, in a readable segment) must list a function that starts exactly there and ends before `RequestMap`. Otherwise the boot stops and says so; nothing is called on a guess.
 2. **Open the session once.** `sceUsbStorageGetDeviceList` comes first: until `sceUsbStorageInit` it answers 0x80F40009, and only then does ghostldr call Init. A second Init answers 0x80F40002 and leaves the library uninitialized, with every mount gone.
-3. **Mount the drive.** For each drive in the list (device IDs change with every boot and plug), it mounts the drive's root at `/ghostldr_usb` and keeps the first whose root has the boot's top folder (`My Games` for `usb:/My Games`), or, for the whole drive, the first with a game. The others are unmounted again.
-4. **Find the games** as [above](#how-the-ps5-finds-games): one directory listing per folder, breadth first, stopping at a game's folder.
-5. **Serve `/app0`.** The game's folder under `/ghostldr_usb` becomes the app root, and the kernel's own file calls read and write it, as on a dev setup. The mount is read-write, and so is the title's `/app0` on it: a title that writes there (homebrew file managers do) writes to the drive.
+3. **Mount the drives.** Every drive in the list (device IDs change with every boot and plug), up to four, is mounted in the list's order: the first at `/ghostldr_usb`, the others at `/ghostldr_usb2`, `/ghostldr_usb3` and `/ghostldr_usb4`. A boot that names a folder (`usb:/My Games`) looks in it on every drive that has it; the drive's top (`usb:/`, `auto`) is every drive. What the system says of each drive goes to the log: its size, free space, maker and model, and its file system (`sceUsbStorageGetDeviceInfo`'s features word: 0x80 exFAT, 0x40 FAT32). Measured on a 13.60 PS5: an NVMe enclosure and a 4 TB USB drive (exFAT both) mounted together, 36 games listed from both, a game's second copy on the other drive named as such; then the 4 TB drive with a 16 GB FAT32 stick, a game started from the stick, writing and reading its files there.
+4. **Find the games** as [above](#how-the-ps5-finds-games), on every drive: one directory listing per folder, breadth first, stopping at a game's folder. The games of all the drives are listed together.
+5. **Serve `/app0`.** The game's folder under the drive's mount point becomes the app root, and the kernel's own file calls read and write it, as on a dev setup. The mount is read-write, and so is the title's `/app0` on it: a title that writes there (homebrew file managers do) writes to the drive.
 6. **Keep it.** The session stays open for the whole run: `sceUsbStorageTerm`, or the session ending, would unmount the title's files. If the title calls `sceUsbStorageInit` or `Term` itself, `hle_usbstorage.c` answers them without reaching the library.
 
-If the boot stops before the title loads (no drive, no folder, no title), the drive is unmounted and the extension's code gives back its JIT block, so the next boot finds both free.
+If the boot stops before the title loads (no drive, no folder, no title), the drives are unmounted and the extension's code gives back its JIT block, so the next boot finds both free.
 
 ### The boot
 
@@ -204,13 +204,27 @@ Stock 13.60, no jailbreak (no payloads on the console), each boot in a freshly s
 
 ## Limits
 
-- **Tested on 13.60 only.** Another firmware may move the function (the unwind check then refuses), or AutoMounter may stop honouring the debug data (the mount is then refused, 0x80F40014). Both stop the boot with a log line.
-- **Not yet tried:** unplugging the drive while a title runs, rest mode, a FAT32 drive, two drives at once, and Jak X (UltraC0re) as the host.
+- **Firmware:** every PS5 firmware from 13.60 up is marked working; the measurements here are from 13.60. Should a later one move the function (the unwind check then refuses) or stop honouring the debug data (the mount is then refused, 0x80F40014), the boot stops with a log line.
+- **Not yet tried:** Jak X (UltraC0re) as the host, and what the console says when a file past FAT32's 4 GiB limit is written to a FAT32 drive (copying from a computer checks it first).
 - **The selector shows no size** for titles on a drive (0 MiB): it reads sizes from an install's index, which a drive has none of.
 - **One SWRR session, one mount.** The mount lasts as long as SWRR. Anything else in SWRR that calls `sceUsbStorageInit` again ends it: send no other USB storage scripts while a title runs.
-- **One drive:** the first one listed whose root holds the folder, or, for the whole drive, the first with a game.
-- **Up to 64 games** on a drive, 4 folders down at most ([How the PS5 finds games](#how-the-ps5-finds-games)).
+- **Up to four drives**, in the order the system lists them, and **up to 64 games** on them in all, 4 folders down at most ([How the PS5 finds games](#how-the-ps5-finds-games)).
 - **Paths up to about 250 bytes** from the drive's top to a game's folder.
+
+## Pulling the drive out, rest mode
+
+A game started from a drive keeps going when the drive goes away for a while: pulled out by mistake, or powered off while the PS5 is in rest mode.
+
+- **While it is gone,** the game's reads from the drive wait (the game may stop where it is, or show its own loading screen), and the TV says: "ghostldr: the USB drive was removed. Plug it back in: the game carries on when it's back." (again every minute while it waits). Nothing is written to the drive meanwhile; the game's saves are in SWRR's saved data, not on the drive, so they're untouched.
+- **Plug the same drive back in** (any port). Within a second or two ghostldr mounts it again, opens the game's files again where it left them, and the game carries on: "ghostldr: the USB drive is back: the game carries on." It is known by the game's `eboot.bin` (its size and time). Another drive is not taken for it: "this USB drive doesn't have the game on it. Plug in the drive the game was started from."
+- **Rest mode:** put the PS5 in rest mode with the game running and wake it up. The game resumes. The drive itself comes back as a new device (the PS5 turns its USB ports off in rest mode), and the game's files on it can't be read through their old handles: ghostldr mounts it again and opens them again, as above, and nothing is said unless that takes more than 3 seconds. Measured on a 13.60 PS5 after 23 minutes in rest mode: the drive was mounted again within the second the game resumed.
+- **If the drive can't be mounted again** (the system refuses), the TV says so: close SWRR (PS button, then close the game) and start again; the game's saves are kept.
+
+**When reads from the drive time out.** The drive's folders list but its files can't be read: each read fails after about 25 seconds with an I/O error (EIO), from ghostldr and over FTP alike. That's the drive's USB link, not ghostldr: on a 13.60 PS5 it happened to a USB 3 NVMe enclosure after a second drive was plugged in beside it, and unplugging the drives and plugging them in again fixed it (a probe that uses only the system's own calls read 32 MiB at 524 MB/s afterwards). What to do: unplug the drive and plug it in again, preferably in a rear USB port; a bus-powered SSD or hard drive beside another one may need a port of its own (or a powered hub). If reads still fail, restart the PS5.
+
+How (`ext/src/usb_live.c`): the game's open files on the drive are tracked (`hle_file.c`: the path each was opened with, its flags, and the offset its reads, writes and seeks left). A call on one that fails as calls on a vanished device do (EIO, ENXIO, EBADF, ENODEV, ESTALE), or a call on a path on the drive that fails while the drive doesn't answer, waits until the drive is mounted again: the same drive, known by the game's `eboot.bin` (its size and time), at the same mount point, or at another (`/ghostldr_usb_1`) if the old one is still taken, which the game's `/app0` then follows. The USB storage session is opened again first if it ended. Every tracked file is then opened again onto its own number, at its offset, and the call is made once more: the game sees a slow call, not an error. (`dup2` answers EPERM in SWRR's sandbox, so the old number is closed and `dup` fills the free numbers below it until it hands that one back.) A file the system closed meanwhile (EBADF) is opened again the same way. A thread (`ghostldr-usb`) checks the drive every 2 seconds, so the drive is mounted again before the game asks for it, and notices rest mode (the clock jumps past its 1-second sleep). After rest mode the FTP server's listening sockets are checked and made again if they stopped working ([ftp.md](ftp.md)).
+
+Not covered: files the game maps into memory (`mmap`) from the drive, reads it queues with `sceKernelAio*` (neither Ghost of Tsushima nor Bloodborne does either), and files opened through SWRR's own C library (homebrew without a libc of its own) — those fail as they would without ghostldr.
 
 ## Route B: the extension's own storage stack (off by default)
 

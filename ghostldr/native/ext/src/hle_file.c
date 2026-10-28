@@ -124,6 +124,56 @@ const char *title_sandbox_path(const char *path, char *buf, size_t size)
     return buf;
 }
 
+/* ---- a title on a USB drive (usb_live.c; not in the ELF loader's extension) ----
+ * Its fds on the drive are tracked, and a call on one, or on a path on the
+ * drive, that fails because the drive went away (pulled out, rest mode)
+ * waits until it is back and is made again. */
+int usb_slot_of(const char *path) HIDDEN __attribute__((weak));
+void usb_live_open(s32 fd, const char *path, int flags) HIDDEN __attribute__((weak));
+void usb_live_close(s32 fd) HIDDEN __attribute__((weak));
+void usb_live_dup(s32 from, s32 to) HIDDEN __attribute__((weak));
+void usb_live_moved(s32 fd, s64 n, bool to) HIDDEN __attribute__((weak));
+bool usb_live_fd_failed(s32 fd, s32 e) HIDDEN __attribute__((weak));
+bool usb_live_path_failed(const char *path, s32 e) HIDDEN __attribute__((weak));
+
+#define I32 0x200 /* the function returns an int */
+
+/* the errno a call that returned rc failed with: an SCE error's low bits, or
+ * errno in the POSIX convention; 0 when it didn't fail */
+static s32 failed(u32 i, s64 rc)
+{
+    if (i & PX)
+        return rc == -1 && K.errno_fn ? *K.errno_fn() : 0;
+    return rc < 0 && ((u64)rc >> 16 & 0xFFFF) == 0x8002 ? (s32)(rc & 0xFFFF) : 0;
+}
+
+/* pass, made once more when it failed on the title's drive (on fd a, or on
+ * path) and the drive is back (usb_live.c); errno stays as the call left it */
+static NOINLINE u64 pass_usb(u32 i, const char *path, u64 a, u64 b, u64 c, u64 d)
+{
+    u64 r = pass(i, a, b, c, d, 0);
+    if (!usb_live_fd_failed)
+        return r;
+    s32 e = failed(i, (i & I32) ? (s64)(s32)r : (s64)r);
+    if (e) {
+        if (!(path ? usb_slot_of(path) >= 0 && usb_live_path_failed(path, e) : usb_live_fd_failed((s32)a, e))) {
+            if ((i & PX) && K.errno_fn)
+                *K.errno_fn() = e;
+            return r;
+        }
+        r = pass(i, a, b, c, d, 0); /* once more */
+        if (failed(i, (i & I32) ? (s64)(s32)r : (s64)r))
+            return r;
+    }
+    /* the offset a read, write or seek left, for a reopen */
+    u32 k = i & 0xFF;
+    bool seek = k == R_sceKernelLseek || k == R_lseek;
+    if (!path && (seek || k == R_sceKernelRead || k == R_read || k == R__read || k == R_sceKernelReadv ||
+                  k == R_readv || k == R__readv || k == R_sceKernelWrite || k == R_write || k == R__write))
+        usb_live_moved((s32)a, (s64)r, seek);
+    return r;
+}
+
 /* the virtual devices and files a jailbroken title sees (hle_jbc.c; not in the ELF loader's extension) */
 bool jbc_open(const char *path, int flags, int mode, s64 *fd) HIDDEN __attribute__((weak));
 bool jbc_stat(const char *path, void *st, s32 *rc) HIDDEN __attribute__((weak));
@@ -144,7 +194,9 @@ static NOINLINE u64 h_open(u64 path, u64 flags, u64 mode, u64 d, u64 e, u32 i)
         return ret(i, jfd);
     char buf[512];
     const char *p = remap_path((const char *)path, buf, sizeof(buf));
-    s32 fd = (s32)pass(i, (u64)p, flags, mode, 0, 0);
+    s32 fd = (s32)pass_usb(i | I32, p, (u64)p, flags, mode, 0);
+    if (fd >= 0 && usb_live_open && usb_slot_of(p) >= 0)
+        usb_live_open(fd, p, (int)flags);
     static u32 opens;
     if (fd < 0 || (profile_has && profile_has(PF_TRACE_OPENS)) || __atomic_fetch_add(&opens, 1, __ATOMIC_RELAXED) < 400)
         logf("open %s (%s) flags %x -> %x", (const char *)path, p, (u32)flags, fd);
@@ -175,7 +227,8 @@ static NOINLINE u64 h_stat(u64 path, u64 st, u64 c, u64 d, u64 e, u32 i)
     if (jbc_stat && jbc_stat((const char *)path, (void *)st, &jrc))
         return ret(i, jrc);
     char buf[512];
-    s64 rc = (s64)pass(i, (u64)remap_path((const char *)path, buf, sizeof(buf)), st, 0, 0, 0);
+    const char *p = remap_path((const char *)path, buf, sizeof(buf));
+    s64 rc = (s64)pass_usb(i | I32, p, (u64)p, st, 0, 0);
     if (rc != 0 && st && ns_parent((const char *)path)) {
         memset((void *)st, 0, 0x78);
         *(u16 *)(st + 8) = 040755; /* st_mode: a directory */
@@ -197,7 +250,7 @@ static NOINLINE u64 h_access(u64 path, u64 mode, u64 c, u64 d, u64 e, u32 i)
         return ret(i, jrc);
     char buf[512];
     const char *p = remap_path((const char *)path, buf, sizeof(buf));
-    s64 rc = (s64)pass(i, (u64)p, mode, 0, 0, 0);
+    s64 rc = (s64)pass_usb(i | I32, p, (u64)p, mode, 0, 0);
     if (rc != 0 && K.stat && K.stat(p, st) == 0) {
         /* SWRR's access() refuses some paths stat() finds (seen on a PS5: its /temp0) */
         static u32 said;
@@ -216,7 +269,7 @@ static NOINLINE u64 h_path(u64 path, u64 b, u64 c, u64 d, u64 e, u32 i)
     ALIAS(path);
     char buf[512];
     const char *p = remap_path((const char *)path, buf, sizeof(buf));
-    s64 rc = (s64)pass(i, (u64)p, b, c, 0, 0);
+    s64 rc = (s64)pass_usb(i | I32, p, (u64)p, b, c, 0);
     static u32 said;
     if (rc < 0 && __atomic_fetch_add(&said, 1, __ATOMIC_RELAXED) < 64)
         logf("path call %u on %s (%s) -> %lx", i & 0xFF, (const char *)path, p, (u64)rc);
@@ -240,7 +293,7 @@ static NOINLINE u64 h_read(u64 fd, u64 buf, u64 n, u64 off, u64 e, u32 i)
     bool at = (i & 0xFF) == R_sceKernelPread || (i & 0xFF) == R_pread;
     if (gfs_owns((int)fd))
         return ret(i, at ? gfs_pread((int)fd, (void *)buf, n, (s64)off) : gfs_read((int)fd, (void *)buf, n));
-    u64 r = pass(i, fd, buf, n, off, 0);
+    u64 r = pass_usb(i, NULL, fd, buf, n, off);
     if (watched((s32)fd))
         logf("%sread(fd %x, %lx @ %lx) -> %lx", at ? "p" : "", (u32)fd, n, at ? off : 0, r);
     return r;
@@ -251,7 +304,7 @@ static NOINLINE u64 h_readv(u64 fd, u64 iov, u64 n, u64 off, u64 e, u32 i)
 {
     bool at = (i & 0xFF) == R_sceKernelPreadv || (i & 0xFF) == R_preadv;
     if (!gfs_owns((int)fd))
-        return pass(i, fd, iov, n, off, 0);
+        return pass_usb(i, NULL, fd, iov, n, off);
     if (at && (s64)off < 0)
         return ret(i, E_INVAL);
     const u64 *v = (const u64 *)iov;
@@ -270,18 +323,20 @@ static NOINLINE u64 h_readv(u64 fd, u64 iov, u64 n, u64 off, u64 e, u32 i)
 
 static NOINLINE u64 h_lseek(u64 fd, u64 off, u64 whence, u64 d, u64 e, u32 i)
 {
-    return gfs_owns((int)fd) ? ret(i, gfs_lseek((int)fd, (s64)off, (int)whence)) : pass(i, fd, off, whence, 0, 0);
+    return gfs_owns((int)fd) ? ret(i, gfs_lseek((int)fd, (s64)off, (int)whence)) : pass_usb(i, NULL, fd, off, whence, 0);
 }
 
 static NOINLINE u64 h_fstat(u64 fd, u64 st, u64 c, u64 d, u64 e, u32 i)
 {
-    return gfs_owns((int)fd) ? ret(i, gfs_fstat((int)fd, (void *)st)) : pass(i, fd, st, 0, 0, 0);
+    return gfs_owns((int)fd) ? ret(i, gfs_fstat((int)fd, (void *)st)) : pass_usb(i | I32, NULL, fd, st, 0, 0);
 }
 
 static NOINLINE u64 h_close(u64 fd, u64 b, u64 c, u64 d, u64 e, u32 i)
 {
     if (gfs_close((int)fd) == 0)
         return 0;
+    if (usb_live_close)
+        usb_live_close((s32)fd);
     if (jbc_close)
         jbc_close((s32)fd);
     if (watched((s32)fd)) {
@@ -297,7 +352,7 @@ static NOINLINE u64 h_close(u64 fd, u64 b, u64 c, u64 d, u64 e, u32 i)
 static NOINLINE u64 h_dents(u64 fd, u64 buf, u64 n, u64 basep, u64 e, u32 i)
 {
     if (!gfs_owns((int)fd))
-        return pass(i, fd, buf, n, basep, 0);
+        return pass_usb(i | I32, NULL, fd, buf, n, basep);
     bool base = (i & 0xFF) != R_sceKernelGetdents && (i & 0xFF) != R_getdents;
     if (base && basep)
         *(s64 *)basep = gfs_lseek((int)fd, 0, 1);
@@ -334,7 +389,10 @@ static NOINLINE u64 h_dup(u64 fd, u64 to, u64 c, u64 d, u64 e, u32 i)
 {
     if (gfs_owns((int)fd) || ((i & 0xFF) == R_dup2 && gfs_owns((int)to)))
         return ret(i, E_BADF);
-    return pass(i, fd, to, 0, 0, 0);
+    s32 r = (s32)pass(i, fd, to, 0, 0, 0);
+    if (r >= 0 && usb_live_dup)
+        usb_live_dup((s32)fd, r);
+    return (u64)(s64)r;
 }
 
 /* The title's stdout and stderr go to the UDP log, one line per record;
@@ -350,7 +408,7 @@ static NOINLINE u64 h_write(u64 fd, u64 buf, u64 len, u64 d, u64 e, u32 i)
     if (gfs_owns((int)fd))
         return ret(i, E_BADF);
     if (fd != 1 && fd != 2)
-        return pass(i, fd, buf, len, 0, 0);
+        return pass_usb(i, NULL, fd, buf, len, 0);
     const char *c = (const char *)buf;
     unsigned payload = elfldr_output((int)fd, c, len);
     spin_lock(&g_out_lock);

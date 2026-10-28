@@ -33,6 +33,12 @@
  * The FTP server (ftp_sys.c) serves the drive too, and mounts one for any
  * boot: usb_ftp_prepare as the title is about to start, usb_ftp_home when a
  * client logs in (a drive plugged in since).
+ *
+ * Every drive plugged in is mounted, up to USB_SLOTS: the first at
+ * /ghostldr_usb, the others at /ghostldr_usb2, 3 and 4, and the games on all
+ * of them are listed together.  A drive that goes away while its title
+ * runs (pulled out, or rest mode) is mounted again when it is back
+ * (usb_slot_reattach, for usb_live.c).
  */
 #include "ext.h"
 #include "usbstore.h"
@@ -69,18 +75,63 @@ static const struct appfs_ops *g_raw; /* route B's provider (usbfs) */
  *   - Device ids change with every boot and plug: always from the list.
  *   - One mount per directory: "/" again, or a folder inside a mounted one,
  *     is a conflict (0x80F40003).  The drive's "/" is mounted once. */
-#define USB_MOUNT "/ghostldr_usb" /* in SWRR's sandbox */
+#define USB_MOUNT "/ghostldr_usb" /* the first drive, in SWRR's sandbox; the others at USB_MOUNT "2" .. "4" */
+#define USB_SLOTS 4
 #define USBS_NOT_INIT ((s32)0x80F40009)
 
 static struct {
     s32 (*init)(void *);
+    s32 (*info)(u32 id, void *info);
     s32 (*list)(u32 *ids, s32 *count);
     s32 (*map2)(u32 id, const char *dir, const char *mount_point);
     s32 (*unmap)(u32 id, const char *dir);
-    u32 id;      /* the mounted drive's */
-    bool inited; /* the session is open: kept for the whole SWRR session */
-    bool mounted;
+    bool inited;            /* the session is open: kept for the whole SWRR session */
+    u32 id[USB_SLOTS];      /* the drive mounted at each slot's mount point */
+    bool mounted[USB_SLOTS];
 } U;
+static volatile int g_mount_lock; /* U's slots, once the title runs (usb_live.c's thread, FTP logins) */
+
+/* the games' folders on the drives (usb_open): one per drive that has it */
+static char g_roots[USB_SLOTS][256];
+static u32 g_nroots;
+
+/* the title's drive: its slot and its eboot.bin as it was at boot, to know
+ * the drive again when it comes back (usb_live.c) */
+static struct {
+    int slot;
+    s64 size, mtime;
+} g_ident = {-1, 0, 0};
+
+/* each slot's mount point: /ghostldr_usb, /ghostldr_usb2, ..., or, after a
+ * drive came back and its old mount point was still taken, one with a
+ * suffix (/ghostldr_usb_1) */
+static char g_mp[USB_SLOTS][24];
+
+HIDDEN const char *usb_slot_mp(u32 k)
+{
+    if (!g_mp[k][0])
+        fmt(g_mp[k], sizeof(g_mp[k]), k ? "%s%u" : "%s", USB_MOUNT, k + 1);
+    return g_mp[k];
+}
+
+/* slot k's mount point, in buf (the kernel and the IPC read it: not from the extension's code pages) */
+static const char *slot_mp(u32 k, char buf[24])
+{
+    strlcpy(buf, usb_slot_mp(k), 24);
+    return buf;
+}
+
+/* the slot whose mount point path is or is under: -1 when none */
+HIDDEN int usb_slot_of(const char *path)
+{
+    for (u32 k = 0; path && k < USB_SLOTS; k++) {
+        const char *mp = usb_slot_mp(k);
+        size_t n = strlen(mp);
+        if (strncmp(path, mp, n) == 0 && (path[n] == 0 || path[n] == '/'))
+            return (int)k;
+    }
+    return -1;
+}
 
 /* the length of the function starting at addr, from the unwind table of the
  * module handle; 0 when no function starts there */
@@ -111,6 +162,14 @@ static u64 fn_size_at(u32 handle, u64 addr)
     return 0;
 }
 
+/* why a boot stops, for its message on the TV (ext/src/failure.c, docs/failures.md) */
+__attribute__((noinline, minsize)) static void NOTE(u32 kind, const char *what)
+{
+    struct ghost_diag *D = GHOST_DIAG(G);
+    if (D)
+        D->note = kind, strlcpy(D->note_path, what, sizeof(D->note_path));
+}
+
 static int usb_lib(void)
 {
     u32 h = 0;
@@ -121,6 +180,7 @@ static int usb_lib(void)
         return -1;
     }
     U.init = host_dlsym(h, "sceUsbStorageInit");
+    U.info = host_dlsym(h, "sceUsbStorageGetDeviceInfo");
     U.list = host_dlsym(h, "sceUsbStorageGetDeviceList");
     U.unmap = host_dlsym(h, "sceUsbStorageRequestUnmap");
     u64 rm = (u64)host_dlsym(h, "sceUsbStorageRequestMap");
@@ -133,6 +193,7 @@ static int usb_lib(void)
     logf("approot: libSceUsbStorage %u: RequestMap %lx, RequestMap2 %p", h, rm, (void *)U.map2);
     if (!U.init || !U.list || !U.unmap || !U.map2) {
         logf("approot: libSceUsbStorage lacks what mounting needs (docs/usb.md)");
+        NOTE(FAIL_DRIVE_REFUSED, "");
         return -1;
     }
     return 0;
@@ -145,14 +206,28 @@ static int stat_type(const char *path)
 }
 static bool is_dir(const char *path) { return stat_type(path) == 0x4000; }
 
+static void usb_unmount_slot(u32 k)
+{
+    if (!U.mounted[k])
+        return;
+    char root[2] = "/", mp[24];
+    s32 rc = U.unmap(U.id[k], root);
+    logf("approot: unmounted the USB drive %x from %s (%x)", U.id[k], slot_mp(k, mp), rc);
+    U.mounted[k] = false;
+}
+
 static void usb_unmount(void)
 {
-    if (!U.mounted)
-        return;
-    char root[2] = "/";
-    s32 rc = U.unmap(U.id, root);
-    logf("approot: unmounted the USB drive %x from %s (%x)", U.id, USB_MOUNT, rc);
-    U.mounted = false;
+    for (u32 k = 0; k < USB_SLOTS; k++)
+        usb_unmount_slot(k);
+}
+
+static bool any_mounted(void)
+{
+    for (u32 k = 0; k < USB_SLOTS; k++)
+        if (U.mounted[k])
+            return true;
+    return false;
 }
 
 /* The drive list, after opening the session if it isn't open: the count,
@@ -176,86 +251,234 @@ static s32 usb_drives(u32 *ids, s32 max)
     logf("approot: sceUsbStorageGetDeviceList -> %x, %d drive(s)", rc, n);
     if (rc != 0 || n <= 0) {
         logf("approot: no USB drive%s", rc ? " (libSceUsbStorage refused)" : g_auto ? " in the PS5" : ": plug one into the PS5");
+        NOTE(rc ? FAIL_DRIVE_REFUSED : FAIL_NO_DRIVE, "");
         return -1;
     }
     return n < max ? n : max;
 }
 
-/* Mount drive id at USB_MOUNT: whether its root holds rel ("" for any drive);
- * a drive without it is unmounted again */
-static bool usb_try(u32 id, const char *rel)
+/* what the system says of drive id, in the log: its size, free space,
+ * maker and model, and its file system (SceUsbStorageDeviceInfo: u64 total
+ * and free bytes, vid/pid at 0x10, strings at 0x16, 0x120 and 0x228, the
+ * features word at 0x330: 0x80 exFAT, 0x40 FAT32) */
+static void usb_info(u32 id)
 {
-    /* the kernel and the IPC read these: not from the extension's code pages */
-    char root[2] = "/", mp[sizeof(USB_MOUNT)] = USB_MOUNT, want[320];
-    fmt(want, sizeof(want), "%s/%s", mp, rel);
-    U.unmap(id, root); /* a mount left by an earlier boot of this SWRR: 0x80F40002 when none */
-    s32 rc = U.map2(id, root, mp);
-    bool has = rc == 0 && is_dir(want);
-    logf("approot: USB drive %x mounted at %s: %x; %s %s", id, mp, rc, want, rc ? "-" : has ? "found" : "missing");
-    if (has) {
-        U.id = id;
-        U.mounted = true;
-    } else if (rc == 0) {
-        U.unmap(id, root);
+    u8 b[0x400];
+    if (!U.info)
+        return;
+    memset(b, 0, sizeof(b));
+    s32 rc = U.info(id, b);
+    if (rc != 0) {
+        logf("approot: USB drive %x: sceUsbStorageGetDeviceInfo -> %x", id, rc);
+        return;
     }
-    return has;
+    char vendor[40], product[40];
+    strlcpy(vendor, (const char *)b + 0x16, sizeof(vendor));
+    strlcpy(product, (const char *)b + 0x120, sizeof(product));
+    u32 feat = *(u32 *)(b + 0x330);
+    logf("approot: USB drive %x: %s %s, %lu MiB, %lu MiB free, usb %04x:%04x, features %x%s", id, vendor, product,
+         *(u64 *)b >> 20, *(u64 *)(b + 8) >> 20, *(u16 *)(b + 0x10), *(u16 *)(b + 0x12), feat,
+         feat & 0x80 ? " (exFAT)" : feat & 0x40 ? " (FAT32)" : "");
 }
 
-/* Mount the drive whose root holds rel ("ghostldr", "" for any drive) at
- * USB_MOUNT: 0, or -1 with the reason logged */
-static int usb_mount(const char *rel)
+/* Every drive plugged in mounted, the first USB_SLOTS of the list in its
+ * order: the number mounted */
+static u32 usb_mount_all(void)
 {
     u32 ids[16];
     s32 n = usb_drives(ids, (s32)ARRAY_SIZE(ids));
+    char root[2] = "/", mp[24];
     for (s32 i = 0; i < n; i++)
-        if (usb_try(ids[i], rel))
-            return 0;
-    if (n > 0)
-        logf("approot: no USB drive has /%s", rel);
-    return -1;
+        U.unmap(ids[i], root); /* a mount left by an earlier boot of this SWRR: 0x80F40002 when none */
+    u32 k = 0;
+    for (s32 i = 0; i < n && k < USB_SLOTS; i++) {
+        s32 rc = U.map2(ids[i], root, slot_mp(k, mp));
+        logf("approot: USB drive %x mounted at %s: %x", ids[i], mp, rc);
+        usb_info(ids[i]);
+        if (rc == 0) {
+            U.id[k] = ids[i];
+            U.mounted[k++] = true;
+        }
+    }
+    if (n > USB_SLOTS)
+        logf("approot: %d USB drives: the first %u are used", n, USB_SLOTS);
+    return k;
 }
 
 /* hle_usbstorage.c: the session this file opened, which the title must not end */
 HIDDEN bool usb_session_open(void) { return U.inited || (g_ctx->flags & CTX_FLAG_USB_SESSION); }
 
-/* ftp_sys.c, as the title is about to start: a drive mounted for FTP
- * clients when one is plugged in.  The session opens now, before the
+/* ftp_sys.c, as the title is about to start: the drives mounted for FTP
+ * clients when any is plugged in.  The session opens now, before the
  * title's code runs, so the title's own Init and Term stay off it. */
 HIDDEN void usb_ftp_prepare(void)
 {
-    if (!U.mounted)
-        usb_mount("");
+    spin_lock(&g_mount_lock);
+    if (!any_mounted())
+        usb_mount_all();
+    spin_unlock(&g_mount_lock);
 }
 
 /* ftp_sys.c, as a client logs in: where it starts.  A drive that went away
- * is forgotten, and one plugged in since is mounted. */
+ * is forgotten, and one plugged in since is mounted; the title's own drive
+ * is usb_live.c's to mount again. */
 HIDDEN const char *usb_ftp_home(void)
 {
-    static volatile int lock;
-    spin_lock(&lock);
-    if (U.mounted && !is_dir(USB_MOUNT)) {
-        logf("approot: the USB drive at %s is gone", USB_MOUNT);
-        U.mounted = false;
-    }
-    if (!U.mounted && usb_session_open())
-        usb_mount("");
-    bool m = U.mounted;
-    spin_unlock(&lock);
-    return m ? USB_MOUNT : "/";
+    char mp[24];
+    spin_lock(&g_mount_lock);
+    for (u32 k = 0; k < USB_SLOTS; k++)
+        if (U.mounted[k] && (int)k != g_ident.slot && !is_dir(slot_mp(k, mp))) {
+            logf("approot: the USB drive at %s is gone", mp);
+            U.mounted[k] = false;
+        }
+    if (!any_mounted() && usb_session_open() && g_ident.slot < 0)
+        usb_mount_all();
+    bool m = U.mounted[0];
+    spin_unlock(&g_mount_lock);
+    return m ? usb_slot_mp(0) : "/";
 }
 
-/* "/mnt/usb0/x": where a jailbroken PS4's apps see its first USB drive, and
- * homebrew made for one looks for it.  The drive ghostldr mounts in SWRR's
- * sandbox (usb_ftp_home: mounted now if it was plugged in later) stands in
- * for it; with no drive the path stays as it is and isn't found. */
+/* ---- the title's drive while it runs (usb_live.c) ---- */
+
+/* the slot of the drive the title runs from; -1: not from a drive */
+HIDDEN int usb_title_slot(void) { return g_ident.slot; }
+
+/* Whether slot's drive answers: 0, else the errno its check gave (ENOENT 2
+ * when the title's eboot.bin is gone or another drive's is there).  For the
+ * title's slot its eboot.bin, as it was at boot; for another, its mount
+ * point. */
+HIDDEN int usb_slot_check(int slot)
+{
+    char p[300];
+    u8 st[0x78];
+    if (slot < 0 || slot >= USB_SLOTS)
+        return 22;
+    /* the device first: a stat may still be answered from the cache a moment after it went */
+    u32 ids[16];
+    s32 n = 0;
+    if (U.list && U.mounted[slot] && U.list(ids, &n) == 0) {
+        bool there = false;
+        for (s32 i = 0; i < n && i < 16; i++)
+            there |= ids[i] == U.id[slot];
+        if (!there)
+            return 19; /* ENODEV */
+    }
+    if (slot != g_ident.slot)
+        slot_mp((u32)slot, p);
+    else
+        fmt(p, sizeof(p), "%s/eboot.bin", g_root);
+    s32 rc = (s32)vfs_stat(p, st);
+    if (rc != 0)
+        return ((u32)rc >> 16) == 0x8002 ? (int)(rc & 0xFFFF) : 5;
+    if (slot == g_ident.slot && (*(s64 *)(st + 0x48) != g_ident.size || *(s64 *)(st + 0x28) != g_ident.mtime))
+        return 2;
+    return 0;
+}
+
+/* slot's mount point is mp from now on: the title's app root follows */
+static void move_slot(u32 slot, const char *mp)
+{
+    size_t n = strlen(g_mp[slot]);
+    if ((int)slot == g_ident.slot && strncmp(g_root, g_mp[slot], n) == 0) {
+        char r[sizeof(g_root)];
+        fmt(r, sizeof(r), "%s%s", mp, g_root + n);
+        strlcpy(g_root, r, sizeof(g_root)); /* in place: g_ctx->app_root points at it */
+    }
+    strlcpy(g_mp[slot], mp, sizeof(g_mp[slot]));
+    logf("usb: slot %u is at %s now; the title's root %s", slot, mp, g_root);
+}
+
+/* Slot's drive mounted again, once it is plugged in (or back from rest
+ * mode): 0 when it answers again, 1 while no drive is there to mount, 2 when
+ * only drives without the title are (they're left unmounted), < 0 when the
+ * system refuses (the reason logged once).  The session is opened again if
+ * it ended. */
+HIDDEN int usb_slot_reattach(int slot)
+{
+    static s32 last_rc = 1, last_n = -1;
+    static u32 wrong[8], nwrong; /* drives (ids) found without the title: not mounted again */
+    if (slot < 0 || slot >= USB_SLOTS || usb_lib() != 0)
+        return -1;
+    spin_lock(&g_mount_lock);
+    u32 ids[16];
+    s32 n = 0;
+    memset(ids, 0, sizeof(ids));
+    s32 rc = U.list(ids, &n);
+    if (rc == USBS_NOT_INIT) {
+        rc = U.init(NULL);
+        logf("usb: the USB storage session had ended: sceUsbStorageInit -> %x", rc);
+        if (rc == 0)
+            rc = U.list(ids, &n);
+    }
+    if (rc != last_rc || n != last_n)
+        logf("usb: sceUsbStorageGetDeviceList -> %x, %d drive(s)", rc, n);
+    last_rc = rc, last_n = n;
+    int out = rc != 0 ? -1 : 1;
+    char root[2] = "/", mp[24];
+    slot_mp((u32)slot, mp);
+    if (rc == 0 && U.mounted[slot]) { /* the old mount first: its device may be gone, so the answer only goes to the log */
+        s32 u = U.unmap(U.id[slot], root);
+        logf("usb: the old mount of drive %x at %s released: %x", U.id[slot], mp, u);
+        U.mounted[slot] = false;
+    }
+    for (s32 i = 0; rc == 0 && i < n && i < 16 && out != 0; i++) {
+        bool other = false, bad = false;
+        for (u32 k = 0; k < USB_SLOTS; k++)
+            other |= (int)k != slot && U.mounted[k] && U.id[k] == ids[i];
+        for (u32 k = 0; k < nwrong && k < ARRAY_SIZE(wrong); k++)
+            bad |= wrong[k] == ids[i];
+        if (bad && out == 1)
+            out = 2;
+        if (other || bad)
+            continue;
+        U.unmap(ids[i], root);
+        s32 m = U.map2(ids[i], root, mp);
+        if (m != 0 && m != USBS_NOT_INIT) { /* the old mount point still taken: another one, and the title's paths follow */
+            char alt[24];
+            static u32 n_alt;
+            fmt(alt, sizeof(alt), "%s_%u", USB_MOUNT, ++n_alt);
+            if (slot)
+                fmt(alt, sizeof(alt), "%s%d_%u", USB_MOUNT, slot + 1, n_alt);
+            s32 m2 = U.map2(ids[i], root, alt);
+            logf("usb: drive %x at %s: %x; at %s: %x", ids[i], mp, m, alt, m2);
+            if (m2 == 0) {
+                m = 0;
+                move_slot((u32)slot, alt);
+                strlcpy(mp, alt, sizeof(mp));
+            }
+        }
+        int chk = m == 0 ? usb_slot_check(slot) : -1;
+        logf("usb: drive %x mounted at %s: %x%s", ids[i], mp, m, m ? "" : chk == 0 ? ", the title's drive" : ", not the title's drive");
+        if (m == 0 && chk == 0) {
+            U.id[slot] = ids[i];
+            U.mounted[slot] = true;
+            out = 0;
+        } else if (m == 0) {
+            U.unmap(ids[i], root);
+            wrong[nwrong++ % ARRAY_SIZE(wrong)] = ids[i];
+            out = 2;
+        }
+    }
+    spin_unlock(&g_mount_lock);
+    return out;
+}
+
+/* "/mnt/usb0/x": where a jailbroken PS4's apps see its first USB drive
+ * (/mnt/usb1 the second), and homebrew made for one looks for it.  The
+ * drives ghostldr mounts in SWRR's sandbox (usb_ftp_home: mounted now if
+ * plugged in later) stand in for them; with no such drive the path stays as
+ * it is and isn't found. */
 HIDDEN const char *usb_title_remap(const char *path, char *buf, size_t size)
 {
-    if (strncmp(path, "/mnt/usb0", 9) != 0 || (path[9] != '/' && path[9] != 0))
+    if (strncmp(path, "/mnt/usb", 8) != 0 || path[8] < '0' || path[8] >= '0' + USB_SLOTS ||
+        (path[9] != '/' && path[9] != 0))
         return NULL;
-    const char *home = usb_ftp_home();
-    if (strcmp(home, USB_MOUNT) != 0)
+    u32 k = (u32)(path[8] - '0');
+    usb_ftp_home();
+    char mp[24];
+    if (!U.mounted[k])
         return NULL;
-    fmt(buf, size, "%s%s", USB_MOUNT, path + 9);
+    fmt(buf, size, "%s%s", slot_mp(k, mp), path + 9);
     return buf;
 }
 
@@ -511,13 +734,21 @@ static void lib_free(void)
     g_lib[0] = 0;
 }
 
-/* a path as the user knows it: relative to the drive ("My Games/ghost") */
+/* a path as the user knows it: relative to the drive ("My Games/ghost"),
+ * the second drive's as "USB 2/My Games/ghost" */
 static const char *shown(const char *path)
 {
-    size_t n = strlen(USB_MOUNT);
-    if (g_usb && strncmp(path, USB_MOUNT, n) == 0)
-        return path[n] == '/' ? path + n + 1 : path[n] ? path : "the USB drive";
-    return path;
+    static char buf[2][280];
+    static u32 turn;
+    int k = g_usb ? usb_slot_of(path) : -1;
+    size_t n = k >= 0 ? strlen(usb_slot_mp((u32)k)) : 0;
+    if (k < 0)
+        return path;
+    if (k == 0)
+        return path[n] == '/' ? path + n + 1 : "the USB drive";
+    char *b = buf[turn++ & 1];
+    fmt(b, sizeof(buf[0]), path[n] == '/' ? "USB %d/%s" : "USB drive %d", k + 1, path + n + 1);
+    return b;
 }
 
 static struct lib_title *lib_add(const char *app0, size_t dir_len)
@@ -574,23 +805,13 @@ static bool skip_dir(const char *name)
            same_ci(name, "sce_sys") || same_ci(name, "sce_module");
 }
 
-/* the games under root into g_list, sorted: bootable ones by title ID then
- * folder, second copies marked, the others last */
-static void lib_scan(const char *root)
+/* the games under root (one drive's) into g_list */
+static void lib_scan_one(const char *root, char (*q)[256])
 {
-    lib_free();
-    g_cut = false;
-    g_list = page_alloc(sizeof(struct lib_title) * LIB_MAX);
-    const u64 qsize = (u64)SCAN_DIRS * 256 + SCAN_DIRS;
-    char (*q)[256] = page_alloc(qsize);
-    if (!g_list || !q) {
-        logf("approot: no memory to look for games");
-        if (q)
-            page_free(q, qsize);
-        return;
-    }
     u8 *depth = (u8 *)(q + SCAN_DIRS);
     u32 head = 0, tail = 1, listed = 0;
+    bool cut = g_cut;
+    g_cut = false;
     strlcpy(q[0], root, 256);
     depth[0] = 0;
     while (head < tail) {
@@ -654,11 +875,32 @@ static void lib_scan(const char *root)
             }
         }
     }
-    page_free(q, qsize);
-    strlcpy(g_lib, root, sizeof(g_lib));
     if (head < tail || g_cut)
         logf("approot: stopped looking after %u folders: keep games within %u folders of %s", listed, SCAN_DEPTH,
              shown(root));
+    g_cut |= cut;
+}
+
+/* the games under roots[0..n) (the same folder on each drive) into g_list,
+ * sorted: bootable ones by title ID then folder, second copies marked, the
+ * others last */
+static void lib_scan(char (*roots)[256], u32 n)
+{
+    lib_free();
+    g_cut = false;
+    g_list = page_alloc(sizeof(struct lib_title) * LIB_MAX);
+    const u64 qsize = (u64)SCAN_DIRS * 256 + SCAN_DIRS;
+    char (*q)[256] = page_alloc(qsize);
+    if (!g_list || !q) {
+        logf("approot: no memory to look for games");
+        if (q)
+            page_free(q, qsize);
+        return;
+    }
+    for (u32 i = 0; i < n; i++)
+        lib_scan_one(roots[i], q);
+    page_free(q, qsize);
+    strlcpy(g_lib, roots[0], sizeof(g_lib));
     /* sort: bootable first, by title ID, then by folder */
     for (u32 i = 1; i < g_count; i++)
         for (u32 j = i; j > 0; j--) {
@@ -708,6 +950,22 @@ static int give_up(void)
     return g_auto ? 2 : -1;
 }
 
+/* the title's drive, to know it again: its slot, and its eboot.bin's size
+ * and time (usb_live.c) */
+static void ident_take(void)
+{
+    char p[300];
+    u8 st[0x78];
+    fmt(p, sizeof(p), "%s/eboot.bin", g_root);
+    g_ident.slot = usb_slot_of(g_root);
+    if (g_ident.slot >= 0 && vfs_stat(p, st) == 0) {
+        g_ident.size = *(s64 *)(st + 0x48);
+        g_ident.mtime = *(s64 *)(st + 0x28);
+    } else {
+        g_ident.slot = -1;
+    }
+}
+
 /* serve the title in app0; dir: its folder (with its prefix file) */
 static int use_title(const char *title, const char *app0, const char *dir)
 {
@@ -719,6 +977,7 @@ static int use_title(const char *title, const char *app0, const char *dir)
     if (g_usb && !title) {
         logf("approot: %s: no title ID (no sce_sys/param.sfo TITLE_ID, and the folder isn't named after it): "
              "pass run.py --title", shown(app0));
+        NOTE(FAIL_NO_TITLE_ID, shown(app0));
         return -1;
     }
 #ifdef GHOST_USB_RAW
@@ -736,6 +995,7 @@ static int use_title(const char *title, const char *app0, const char *dir)
         char prefix[16];
         title_prefix(dir, title, prefix);
         gfs_use_saves(title, prefix);
+        ident_take();
     }
     logf("approot: %s from %s", title ? title : "the title", shown(app0));
     return 0;
@@ -792,12 +1052,17 @@ static int approot_init(const char **root)
             return give_up();
     } else {
         strlcpy(dir, r, sizeof(dir));
+        strlcpy(g_roots[0], r, sizeof(g_roots[0]));
+        g_nroots = 1;
     }
     size_t n = strlen(dir);
     while (n > 1 && dir[n - 1] == '/')
         dir[--n] = 0;
+    for (u32 i = 0; i < g_nroots; i++)
+        for (size_t k = strlen(g_roots[i]); k > 1 && g_roots[i][k - 1] == '/';)
+            g_roots[i][--k] = 0;
     const char *want = profile_requested();
-    if (is_file(dir, "eboot.bin")) { /* one game: its ID from --title, else as a found game's */
+    if (g_nroots == 1 && is_file(dir, "eboot.bin")) { /* one game: its ID from --title, else as a found game's */
         const char *slash = strrchr_c(dir, '/');
         size_t dir_len = slash && same_ci(slash + 1, "app0") ? (size_t)(slash - dir) : n;
         char folder[256], title[16];
@@ -813,13 +1078,16 @@ static int approot_init(const char **root)
         *root = g_root;
         return 0;
     }
-    if (!g_list || strcmp(g_lib, dir) != 0)
-        lib_scan(dir);
-    logf("approot: %u game%s %s%s%s", g_good, g_good == 1 ? "" : "s", g_usb && !strcmp(dir, USB_MOUNT) ? "on " : "in ",
-         g_usb && !strcmp(dir, USB_MOUNT) ? "the USB drive" : shown(dir),
+    lib_scan(g_roots, g_nroots);
+    bool top = g_usb && usb_slot_of(dir) >= 0 && strrchr_c(dir, '/') == dir;
+    char where[64];
+    if (top)
+        fmt(where, sizeof(where), g_nroots > 1 ? "on %u USB drives" : "on the USB drive", g_nroots);
+    logf("approot: %u game%s %s%s%s", g_good, g_good == 1 ? "" : "s", top ? where : "in ", top ? "" : shown(dir),
          g_count > g_good ? " (and folders that can't be booted, above)" : "");
     if (!g_good) {
         logf("approot: %s holds no games (a folder with eboot.bin, or with app0/eboot.bin)", shown(dir));
+        NOTE(FAIL_NO_GAMES, shown(dir));
         if (!g_usb && !g_auto) { /* a dev directory: the boot says what is missing, as before */
             lib_free();
             return 0;
@@ -828,6 +1096,7 @@ static int approot_init(const char **root)
     }
     if (want && !lib_find(want)) {
         logf("approot: %s is not among the games in %s", want, shown(dir));
+        NOTE(FAIL_NOT_ON_DRIVE, want);
         return give_up();
     }
     if ((g_ctx->flags & CTX_FLAG_SELECT) || (!want && g_good > 1)) {
@@ -847,12 +1116,12 @@ static int approot_init(const char **root)
     return 0;
 }
 
-/* the drive's directory for path ("/ghostldr" -> "/ghostldr_usb/ghostldr",
- * or route B's "/usb0/ghostldr").  With several drives and the drive's top
- * ("usb:/", "auto"), the first that holds a game. */
+/* the drives' directory for path ("/ghostldr" -> "/ghostldr_usb/ghostldr",
+ * or route B's "/usb0/ghostldr"), in out; g_roots: the same folder on each
+ * drive that has its top folder (every drive for the drive's top, "usb:/"
+ * and "auto"), their games listed together */
 static int usb_open(const char *path, char *out, size_t size)
 {
-    char base[64];
     while (*path == '/')
         path++;
     char top[64];
@@ -860,39 +1129,41 @@ static int usb_open(const char *path, char *out, size_t size)
     while (path[k] && path[k] != '/' && k < sizeof(top) - 1)
         top[k] = path[k], k++;
     top[k] = 0;
-    int rc = -1;
-    if (!top[0]) {
-        u32 ids[16];
-        s32 n = usb_drives(ids, (s32)ARRAY_SIZE(ids));
-        for (s32 i = 0; i < n && rc != 0; i++) {
-            if (!usb_try(ids[i], ""))
-                continue;
-            g_usb = true;
-            if (n > 1) /* several drives: the first with a game (its list is kept) */
-                lib_scan(USB_MOUNT);
-            if (n == 1 || g_good > 0 || i == n - 1)
-                rc = 0;
-            else
-                usb_unmount();
-        }
-    } else {
-        rc = usb_mount(top);
+    u32 m = usb_mount_all();
+    g_nroots = 0;
+    for (u32 s = 0; s < USB_SLOTS; s++) {
+        char mp[24], want[320];
+        if (!U.mounted[s])
+            continue;
+        slot_mp(s, mp);
+        fmt(want, sizeof(want), "%s/%s", mp, top);
+        bool has = !top[0] || is_dir(want);
+        if (top[0])
+            logf("approot: %s %s", want, has ? "found" : "missing");
+        if (has)
+            fmt(g_roots[g_nroots++], sizeof(g_roots[0]), *path ? "%s/%s" : "%s", mp, path);
     }
-    if (rc == 0) {
-        strlcpy(base, USB_MOUNT, sizeof(base));
+    if (g_nroots) {
+        g_usb = true;
+        strlcpy(out, g_roots[0], size);
+        return 0;
     }
+    if (m) {
+        logf("approot: no USB drive has /%s", top);
+        NOTE(FAIL_NO_FOLDER, top);
+    }
+    usb_unmount();
 #ifdef GHOST_USB_RAW
-    else if ((g_raw = usb_attach((u32)g_ctx->flags)) && appfs_register(g_raw) == 0) {
-        strlcpy(base, "/usb0", sizeof(base));
+    if ((g_raw = usb_attach((u32)g_ctx->flags)) && appfs_register(g_raw) == 0) {
         logf("approot: the extension reads the USB drive itself (route B)");
+        g_usb = true;
+        fmt(out, size, *path ? "/usb0/%s" : "/usb0", path);
+        strlcpy(g_roots[0], out, sizeof(g_roots[0]));
+        g_nroots = 1;
+        return 0;
     }
 #endif
-    else {
-        return -1;
-    }
-    g_usb = true;
-    fmt(out, size, *path ? "%s/%s" : "%s", base, path);
-    return 0;
+    return -1;
 }
 
 /* a save tool's scan before the title loads (ghost_api.save_prescan) */

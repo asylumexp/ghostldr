@@ -4,10 +4,13 @@
  * next to.  A console path "/x/y" is the host path <root>/x/y.
  */
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 static char g_root[1024];
@@ -142,3 +145,32 @@ int hfs_getdents(int h, void *buf, int size)
 long hfs_image_read(int fd, void *buf, unsigned long n, long off) { return pread(fd, buf, n, off); }
 int hfs_image_open(const char *path) { return open(path, O_RDONLY); }
 long hfs_image_size(int fd) { return lseek(fd, 0, SEEK_END); }
+
+/* real fds on the host's files (approot_host.c's libkernel for usb_live.c),
+ * threads, sleeps and the clock */
+int hfs_real_open(const char *path, int flags, int mode)
+{
+    char p[1200];
+    host(path, p, sizeof(p));
+    return open(p, flags, mode);
+}
+long hfs_real_lseek(int fd, long off, int whence) { return lseek(fd, off, whence); }
+long hfs_real_read(int fd, void *buf, unsigned long n) { return read(fd, buf, n); }
+int hfs_real_dup(int fd) { return dup(fd); }
+int hfs_real_close(int fd) { return close(fd); }
+int *hfs_errno(void) { return &errno; }
+int hfs_usleep(unsigned us) { return usleep(us); }
+long hfs_now_s(void)
+{
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    return (long)t.tv_sec;
+}
+int hfs_thread(void *(*fn)(void *), void *arg)
+{
+    pthread_t t;
+    int rc = pthread_create(&t, NULL, fn, arg);
+    if (rc == 0)
+        pthread_detach(t);
+    return rc;
+}

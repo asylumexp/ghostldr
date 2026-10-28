@@ -90,9 +90,10 @@ void budget_flex_note(s64 len);
 /* A title's new memory reads as zeros, as a fresh process's does on a PS4;
  * the physical pages ghostldr hands out held SWRR's emulator buffers or its
  * own data before (homebrew draws over framebuffers it never cleared).
- * Plan-free titles only: a memory plan's lazily backed pools must stay
- * uncommitted, and Ghost runs as measured. */
-static bool zero_new_memory(void) { return !budget_planned(); }
+ * Planned titles too: Bloodborne's engine heaps panic on stale contents
+ * ("DLLightMutex.cpp(126) Mutex is not initialized").  Lazily backed pools
+ * stay uncommitted: vdm.c zeroes each chunk as it commits it. */
+static bool zero_new_memory(void) { return true; }
 
 /* Flexible memory is scarce inside SWRR: back named/unnamed flexible
  * mappings with direct memory instead, within the title's flex budget

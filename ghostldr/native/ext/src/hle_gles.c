@@ -1450,6 +1450,7 @@ static void sw_draw(const struct gles_draw *d, u32 mode, struct gles_vert *v, u3
 #define CHK_VERTS 65536
 struct chk_draw {
     struct gles_draw d;
+    struct gles_tex tex[3]; /* as they were at the draw: a title changes filters between draws */
     u32 mode, first, n;
     bool clear;
     struct gles_rect r;
@@ -1491,6 +1492,9 @@ static void chk_draw(const struct gles_draw *d, u32 mode, const struct gles_vert
     struct chk_draw *c = &C_.dr[C_.ndr++];
     memset(c, 0, sizeof(*c));
     c->d = *d, c->mode = mode, c->first = C_.nv, c->n = n;
+    for (int i = 0; i < 3; i++)
+        if (d->tex[i])
+            c->tex[i] = *d->tex[i], c->d.tex[i] = &c->tex[i];
     memcpy(C_.v + C_.nv, v, sizeof(*v) * n);
     C_.nv += n;
 }

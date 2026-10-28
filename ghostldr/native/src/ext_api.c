@@ -96,4 +96,8 @@ const struct ghost_api g_ghost_api = {
     .title_user = &g_title_user,
     .save_prescan = boot_save_prescan,
     .title_pick = boot_title_pick,
+    .diag = log_diag,
+    .arena_drop = arena_drop,
+    .arena_adopt = arena_adopt,
+    .reclaim = &g_reclaim,
 };

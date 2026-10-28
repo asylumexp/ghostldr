@@ -49,6 +49,7 @@ struct sess {
 
 static struct sess *g_sess[FTP_SESSIONS];
 static int g_lfd = -1;
+static unsigned short g_port;
 static unsigned g_ids;
 
 static const char *err_text(long e)
@@ -887,6 +888,44 @@ static void *listener(void *arg)
     return arg;
 }
 
+/* the listening socket (ftp_sys.c, after rest mode): -1 with no server */
+int ftp_listen_fd(void) { return g_lfd; }
+
+/* After rest mode, when the listening sockets stopped working (ftp_sys.c):
+ * each made again, the server's on its port and every idle slot's passive
+ * one.  The listener thread's accept on the old socket fails as it closes,
+ * and it carries on with the new one.  0, or -errno. */
+int ftp_relisten(void)
+{
+    if (g_lfd < 0)
+        return -FV_EBADF;
+    fv_sclose(g_lfd); /* the port free first */
+    int fd = g_lfd = fv_listen(0, g_port, 8); /* -1 on failure: its number may be the title's next */
+    if (fd < 0) {
+        g_lfd = -1;
+        fv_log("ftp: TCP %u can't be listened on again: %s (errno %d)", g_port, err_text(fd), -fd);
+        return fd;
+    }
+    unsigned n = 0;
+    for (unsigned i = 0; i < FTP_SESSIONS; i++) {
+        struct sess *s = g_sess[i];
+        if (!s || __atomic_exchange_n(&s->busy, 1, __ATOMIC_ACQUIRE))
+            continue; /* a client's: its connection went with rest mode, and its slot is done with soon */
+        unsigned a;
+        int dl = fv_listen(0, 0, 4);
+        unsigned short port = 0;
+        if (dl >= 0 && fv_sockname(dl, &a, &port) == 0) {
+            fv_sclose(s->dl);
+            s->dl = dl, s->dport = port, n++;
+        } else if (dl >= 0) {
+            fv_sclose(dl);
+        }
+        __atomic_store_n(&s->busy, 0, __ATOMIC_RELEASE);
+    }
+    fv_log("ftp: listening on TCP %u again, %u passive ports made again", g_port, n);
+    return 0;
+}
+
 static void free_sessions(void)
 {
     for (unsigned i = 0; i < FTP_SESSIONS; i++)
@@ -930,6 +969,7 @@ int ftp_start(unsigned short port)
         return fd;
     }
     g_lfd = fd;
+    g_port = port;
     int rc = fv_thread(listener, NULL, "ghostldr-ftpd");
     if (rc != 0) {
         fv_log("ftp: no thread for the server");

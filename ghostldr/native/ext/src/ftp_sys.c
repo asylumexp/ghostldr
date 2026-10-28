@@ -434,6 +434,36 @@ int net_setup(void)
     return 0;
 }
 
+/* after rest mode (usb_live.c): whether the server's listening socket still
+ * answers, in the log */
+int ftp_listen_fd(void) HIDDEN __attribute__((weak)); /* ftp.c: not in the ELF loader's extension */
+int ftp_relisten(void) HIDDEN __attribute__((weak));
+HIDDEN void ftp_after_resume(void)
+{
+    int fd = ftp_listen_fd ? ftp_listen_fd() : -1;
+    if (fd < 0 || !S.poll)
+        return;
+    struct {
+        int fd;
+        s16 events, revents;
+    } p = {fd, POLLIN, 0};
+    long n = bsd(S.poll(&p, 1, 0));
+    int err = -1;
+    u32 len = 4;
+    if (S.getsockopt)
+        S.getsockopt(fd, SOL_SOCKET, 0x1007 /* SO_ERROR */, &err, &len);
+    struct sin a;
+    u32 alen = sizeof(a);
+    long gs = bsd(S.getsockname(fd, &a, &alen));
+    logf("ftp: after rest mode: listening socket %d: poll %ld revents %x, SO_ERROR %d, getsockname %ld port %u", fd, n,
+         (u16)p.revents, err, gs, gs == 0 ? be16(a.port) : 0);
+    /* POLLERR, POLLHUP, POLLNVAL, an error, or no address: made again (by
+     * the JIT compiler, as at the start: Luac0re's Lua is idle while a
+     * title runs) */
+    if (ftp_relisten && (n < 0 || (p.revents & 0x38) || err != 0 || gs != 0))
+        ftp_relisten();
+}
+
 void ftp_title_starting(void) HIDDEN;
 void ftp_title_starting(void)
 {

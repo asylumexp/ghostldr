@@ -44,7 +44,7 @@ ROOT = HERE.parents[1]
 NATIVE = ROOT / "ghostldr/native"
 SEL_BIN = ROOT / "build/ghostldr/selector.bin"
 FONT = NATIVE / "selector/font/notosans.glf"
-SHARED = [NATIVE / "selector/src" / f"{n}.c" for n in ("ui", "draw", "font", "sfo", "meta")]
+SHARED = [NATIVE / "selector/src" / f"{n}.c" for n in ("ui", "setui", "qr", "draw", "font", "sfo", "meta")]
 
 
 def x86_64_cc() -> list[str] | None:
@@ -201,6 +201,26 @@ class Selector(unittest.TestCase):
                 cat.append({"id": tid, "prefix": prefix, "index": prefix + "INDEX", "name": "", "version": "02.40",
                             "total": total, "containers": count, "flags": 0})
             catalogue(saves, cat)
+        # Settings: one title; nothing installed; two titles, and the catalogue after a third is
+        # installed over the network (the fake installer swaps GFSCATALOG for GFSCATALOG.after)
+        cls.one, cls.empty, cls.netsaves = t / "saves-one", t / "saves-empty", t / "saves-net"
+        cls.empty.mkdir()
+        for saves, ids in ((cls.one, ("CUSA00001",)), (cls.netsaves, ("CUSA00001", "CUSA00002", "CUSA00042"))):
+            cat = []
+            for tid in ids:
+                prefix = "G" + tid[-5:]
+                files = {"eboot.bin": b"\1" * 5000, "sce_sys/icon0.png": art((0, 2, 4)[len(cat)], "icon0.png")}
+                total, count = pack_title(saves, prefix, tid, files, 200 << 10, prefix + "INDEX")
+                cat.append({"id": tid, "prefix": prefix, "index": prefix + "INDEX", "name": "", "version": "01.00",
+                            "total": total, "containers": count, "flags": 0})
+            if saves == cls.netsaves:
+                catalogue(saves, cat[:2])
+                (saves / "GFSCATALOG").rename(saves / "GFSCATALOG.before")
+                catalogue(saves, cat)
+                (saves / "GFSCATALOG").rename(saves / "GFSCATALOG.after")
+                (saves / "GFSCATALOG.before").rename(saves / "GFSCATALOG")
+            else:
+                catalogue(saves, cat)
         # an app root (dev setups: no ghostfs)
         cls.approot = t / "approot"
         (cls.approot / "sce_sys").mkdir(parents=True)
@@ -215,6 +235,12 @@ class Selector(unittest.TestCase):
         cls.bundle.write_bytes(profiles.compile_blob(profiles.load("CUSA11456")) + profiles.compile_blob(named)
                                + profiles.compile_blob(profiles.load("APOL00004"))
                                + profiles.compile_blob(profiles.load(None)) + b"\0" * 8)
+        # a test module with the fake network installer linked in (as native/netinst will be)
+        cls.sel_net = t / "selnet/selector.bin"
+        if shutil.which("make") and subprocess.run(
+                ["make", "-C", str(NATIVE), f"OUT={t / 'selnet'}", f"SEL_NET_DIR={HERE / 'selector/netinst_fake'}",
+                 str(cls.sel_net)], capture_output=True).returncode != 0:
+            cls.sel_net = None
         cls.host = None
         xcc = None if os.environ.get("SELECTOR_NO_X86") else x86_64_cc()
         if xcc:
@@ -268,6 +294,10 @@ class Selector(unittest.TestCase):
         self.assertNotIn("boot title", p.stderr)                       # Cross on a folder that can't start
         for name in ("usb-copy", "usb-bad", "usb-why", "usb-bad-info"):
             self.assertGreater((self.shots / f"preview-{name}.png").stat().st_size, 10000, name)
+        # a second copy is said for users: where the other copy is, no run.py flag (preview-usb-copy.png's panel)
+        self.assertIn("second copy 1: the same game is also in Ghost of Tsushima (CUSA11456)", p.stderr)
+        self.assertIn("second copy 2: the same game is also in USB drive 1: Ghost of Tsushima (CUSA11456)", p.stderr)
+        self.assertIn("second copy 3: the same game is also in USB drive 2: My Games/Ghost", p.stderr)
 
     def preview_run(self, *args: str) -> str:
         p = subprocess.run([str(self.preview), "--font", str(FONT), "--out", str(self.shots), "--prefix", "preview-",
@@ -317,6 +347,25 @@ class Selector(unittest.TestCase):
             p = subprocess.run([str(self.preview), "--is-dump", *args], capture_output=True, text=True)
             self.assertEqual(p.stdout.strip(), want, args)
 
+    def test_qr_code(self) -> None:
+        """The network installer's QR code (qr.c, version 3-M): read back by macOS's Vision."""
+        texts = ["http://192.168.0.20:8090/", "http://255.255.255.255:65535/", "a", "0123456789",
+                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop"]           # 42 bytes: the most it holds
+        for i, t in enumerate(texts):
+            p = subprocess.run([str(self.preview), "--qr", t, str(self.shots / f"qr{i}.png")], capture_output=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+        p = subprocess.run([str(self.preview), "--qr", "x" * 43, str(self.shots / "qr-long.png")], capture_output=True)
+        self.assertNotEqual(p.returncode, 0)                            # too long: refused
+        if sys.platform != "darwin" or not shutil.which("swiftc"):
+            self.skipTest("reading QR codes back needs macOS's Vision (swiftc)")
+        dec = Path(self.tmp.name) / "qrdecode"
+        if subprocess.run(["swiftc", "-O", str(HERE / "selector/qrdecode.swift"), "-o", str(dec)],
+                          capture_output=True).returncode != 0:
+            self.skipTest("swiftc could not build the reader")
+        out = subprocess.run([str(dec), *(str(self.shots / f"qr{i}.png") for i in range(len(texts)))],
+                             capture_output=True, text=True, timeout=120).stdout.splitlines()
+        self.assertEqual(out, texts)
+
     def test_meta_art(self) -> None:
         """A meta.bin from gfs_meta.py, read and decoded by the module's code."""
         sys.path.insert(0, str(ROOT / "ghostldr/host"))
@@ -345,14 +394,16 @@ class Selector(unittest.TestCase):
         self.assertGreater((self.shots / "meta-single.png").stat().st_size, 10000)
 
     # ---- the real module through the core's loader ----
-    def run_host(self, mode: str, shots: str = "", in_memory: bool = False) -> str:
+    def run_host(self, mode: str, shots: str = "", in_memory: bool = False, module: Path | None = None) -> str:
         if not self.host:
             self.skipTest("no way to build and run x86-64 code here")
+        module = module or SEL_BIN
         saves = {"multi": self.multi, "approot": self.approot, "apollo": self.apollo,
-                 "apollo-one": self.apollo_one}.get(mode, self.legacy)
+                 "apollo-one": self.apollo_one, "one": self.one, "empty": self.empty,
+                 "settings": self.netsaves}.get(mode, self.legacy)
         env = dict(os.environ, SEL_SHOTS=shots, SEL_PROFILES=str(self.bundle), SEL_BUNDLE="1" if in_memory else "")
-        crc = hex(zlib.crc32(SEL_BIN.read_bytes()))
-        p = subprocess.run([str(self.host), mode, str(SEL_BIN), crc, str(saves), str(self.shots)],
+        crc = hex(zlib.crc32(module.read_bytes()))
+        p = subprocess.run([str(self.host), mode, str(module), crc, str(saves), str(self.shots)],
                            capture_output=True, text=True, env=env, timeout=300)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertNotIn("FAILED", p.stdout)
@@ -440,8 +491,53 @@ class Selector(unittest.TestCase):
         self.assertIn("title 0 (APOL00004) opens the saves of user 10000001", out)
 
     def test_one_title_is_not_shown(self) -> None:
+        """With --title (boot.c: profile_requested) the core doesn't load the module."""
         out = self.run_host("skip")
         self.assertNotIn("selector:", out)  # the core closes the socket without loading the module
+
+    def test_one_title_with_settings(self) -> None:
+        """One title, none asked for: the selector shows it beside its Settings tile; Cross boots it."""
+        out = self.run_host("one", "1200:one,2200:gear")
+        self.assertIn("1 title(s) installed (GFSCATALOG)", out)
+        self.assertIn("Cross on title 0 (CUSA00001)", out)
+
+    def test_nothing_installed(self) -> None:
+        """Nothing installed: the Settings tile alone, Settings opens, and Close ghostldr goes back to the
+        loader (SEL_EXIT_LOADER) with everything given back."""
+        # Settings > Advanced's store from a boot that left its switches out (safe mode, ghostldr.lua)
+        conf = self.empty / "GLDRCONF/settings.txt"
+        conf.parent.mkdir(exist_ok=True)
+        conf.write_text("# ghostldr settings\ndialogs=off\nflags_on=0x400000\nflags_off=0x0\npending=safe\n")
+        out = self.run_host("empty", "1200:empty,1900:settings,4400:close")
+        self.assertIn("0 title(s) installed (nothing)", out)
+        self.assertIn("the last boot with them stopped before the selector: left out of this one", out)
+        self.assertEqual(conf.read_text(), "# ghostldr settings: the game selector's Settings writes this file\n"
+                                           "dialogs=off\nflags_on=0x400000\nflags_off=0x0\n")   # pending gone
+        conf.unlink()
+        conf.parent.rmdir()
+        self.assertIn("settings: opened (0 title(s)", out)
+        self.assertIn("settings: Close ghostldr: Yes: back to Luac0re's loader", out)
+        self.assertIn("empty chose -20", out)
+
+    def test_settings_on_the_console_side(self) -> None:
+        """The real module: Settings, the network installer (a fake: a title installed while it runs joins
+        the row, which then boots it), the log switch; the drive check reads libSceUsbStorage (absent here)."""
+        if not self.sel_net:
+            self.skipTest("the test module with the fake network installer didn't build")
+        out = self.run_host("settings", "1900:games,3000:network,4000:netinst,5500:busy,7000:installed,9500:logs,12000:row",
+                            module=self.sel_net)
+        self.assertIn("settings: opened (2 title(s)", out)
+        self.assertIn("netinst_fake: started", out)
+        self.assertIn("settings: network install finished (1 this session): Skyward Harbour", out)
+        self.assertIn("settings: catalogue again: 3 title(s) (had 2, 1 new)", out)
+        self.assertRegex(out, r"netinst_fake: stopped after \d+ polls")
+        self.assertIn("settings: logs to the USB drive off: now 0", out)
+        conf = (self.netsaves / "GLDRCONF/settings.txt").read_text()   # the store ghostldr.lua reads
+        self.assertIn("log_usb=off\n", conf)
+        self.assertIn("flags_on=0x1000000\nflags_off=0x0\n", conf)
+        (self.netsaves / "GLDRCONF/settings.txt").unlink()
+        (self.netsaves / "GLDRCONF").rmdir()
+        self.assertIn("Cross on title 2 (CUSA00042)", out)
 
     def test_catalogue(self) -> None:
         out = self.run_host("multi", "2000:home,2560:moving,4000:third,4500:launch")

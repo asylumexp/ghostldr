@@ -157,6 +157,7 @@ s32 savedata_foreign_mount(s32 user, const char *tid, const char *dir, const cha
     return (s32)0x809F000B;
 }
 s32 savedata_umount(const char *mp) { return 0; }
+void savedata_data_release(void) {} /* the prescan lets go of /data (nothing mounted here) */
 static const char *g_saves; /* prescan: "CUSA00001=2,..." */
 s32 savedata_foreign_search(s32 user, const char *tid, char (*dirs)[32], struct sd_param *params, u64 *blocks,
                             u32 max, u32 *hits)

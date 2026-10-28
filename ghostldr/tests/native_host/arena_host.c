@@ -21,7 +21,11 @@
  * ps4-nocheck: that layout, with the compiler checks (jit_ps4_check) failing.
  * Also: arena_host heap -- ps4_keep_heap's cases; arena_host layout -- the
  * boot context's offsets that ghostldr.lua writes; arena_host ps5 drop -- the
- * buffers bigexec.c can take, and the arena after it took two.
+ * buffers bigexec.c can take, and the arena after it took two; arena_host
+ * MODEL adopt -- after a reclaim: no buffer left, a fresh object mapped where
+ * EE was and written by the compiler elsewhere (arena_adopt); arena_host
+ * MODEL exttop -- the extension's code without a new JIT block
+ * (arena_buffer_top).
  */
 #include "ghost.h"
 
@@ -256,6 +260,37 @@ int main(int argc, char **argv)
     u64 lo = 0, hi = 0;
     int sel = arena_code_region(&lo, &hi);
     printf("selector region %d +%lx-+%lx\n", sel, sel ? 0 : lo - g_ipu, sel ? 0 : hi - g_ipu);
+    if (argc > 2 && !strcmp(argv[2], "exttop")) {
+        u64 at = arena_buffer_top(0xa5000), again = arena_buffer_top(0xa5000), st[8], en[8];
+        printf("ext at +%lx, again +%lx\n", at ? at - g_ipu : 0, again ? again - g_ipu : 0);
+        u32 n = arena_buffers(st, en, 8);
+        for (u32 i = 0; i < n; i++)
+            printf("buffer +%lx-+%lx\n", st[i] - g_ipu, en[i] - g_ipu);
+        u8 code[16] = {0xC3};
+        printf("ext write %d\n", at ? arena_write(at, code, sizeof(code)) : -9);
+        return 0;
+    }
+    if (argc > 2 && !strcmp(argv[2], "adopt")) { /* bigexec.c's reclaim: fresh objects only */
+        u64 st[8], en[8], size = 0x1408000, cw = 0x7800000000UL;
+        u32 n = arena_buffers(st, en, 8);
+        for (u32 i = 0; i < n; i++)
+            arena_drop(st[i]);
+        for (u32 i = 0; i < g_ncomp; i++) /* the compiler unmapped the buffers */
+            if (g_comp[i].start >= g_ee && g_comp[i].start < g_ee + 0x400c000)
+                g_comp[i].prot = 0;
+        u8 *bytes = (u8 *)g_ee; /* the fresh object: its view here is where EE was */
+        g_comp[g_ncomp++] = (struct range){cw, cw + size, 3, bytes};
+        printf("adopt %d, buffers left %u\n", arena_adopt(g_ee, g_ee + size, (s64)(cw - g_ee)), arena_buffers(st, en, 8));
+        g_modules = &g_mods[0];
+        g_mods[1].next = NULL; /* libc and Fios2 */
+        int rc = arena_code_region(&lo, &hi);
+        printf("code region %d +%lx-+%lx\n", rc, rc ? 0 : lo - g_ipu, rc ? 0 : hi - g_ipu);
+        for (struct module *m = g_modules; m; m = m->next) {
+            u64 base = place(m);
+            printf("%s: compiler bytes %s\n", m->name, bytes[base - g_ee] == 0x90 ? "written" : "NOT written");
+        }
+        return 0;
+    }
     if (argc > 2 && !strcmp(argv[2], "drop")) { /* bigexec.c takes the EE and VU1 buffers */
         u64 st[8], en[8];
         u32 n = arena_buffers(st, en, 8);

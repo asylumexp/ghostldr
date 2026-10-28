@@ -102,7 +102,9 @@ COLD void tls_setup(struct module *main_mod)
             if (pass)
                 logf("tls: %s has initial-exec TLS: static image at -%lx", m->name, off);
         }
-    g_static_size = ALIGN_UP(off, g_static_align);
+    /* at least 64 bytes: an OpenOrbis prx's thread-local variables sit
+     * below the thread pointer even when the executable has none (loader.c) */
+    g_static_size = ALIGN_UP(off > 64 ? off : 64, g_static_align);
     g_host_tls_get_addr = host_dlsym((u32)g_ctx->libkernel_handle, "__tls_get_addr");
     logf("tls: main static block %lx (align %lx), host __tls_get_addr %p", g_static_size, g_static_align,
          g_host_tls_get_addr);
@@ -127,7 +129,9 @@ COLD static struct gthread *block_get(void)
     if (gt) {
         g_free = gt->next;
     } else {
-        u64 need = g_static_size + g_static_align + sizeof(struct gthread);
+        /* before tls_setup or tls_static_reserve the alignment is still 0 */
+        u64 align = g_static_align ? g_static_align : 16;
+        u64 need = g_static_size + align + sizeof(struct gthread);
         if (g_pool_cur + need > g_pool_end) {
             /* 64 KiB, doubling up to 1 MiB: MAX_POOLS covers any thread count */
             u64 size = ALIGN_UP((0x10000ULL << (g_npools < 4 ? g_npools : 4)) + need, 0x4000);
@@ -141,7 +145,7 @@ COLD static struct gthread *block_get(void)
             __atomic_store_n(&g_npools, g_npools + 1, __ATOMIC_RELEASE);
             g_pool_cur = (u64)p, g_pool_end = (u64)p + size;
         }
-        gt = (struct gthread *)ALIGN_UP(g_pool_cur + g_static_size, g_static_align);
+        gt = (struct gthread *)ALIGN_UP(g_pool_cur + g_static_size, align);
         g_pool_cur = (u64)gt + sizeof(struct gthread);
     }
     spin_unlock(&g_lock);

@@ -1407,9 +1407,12 @@ bool savedata_fingerprint(s32 user, const char *tid, char out[65])
 
 /* ---- Mount ---- */
 
+/* The filesystem keeps about 45 blocks of a container (measured on a PS4: a
+ * 100-block container took a 55-block file, a 1031-block one 984): a title's
+ * save gets that much more, and a little room besides */
 static u64 real_blocks_for(u64 blocks)
 {
-    u64 rb = MAX(BLOCKS_MIN, blocks) + MAX(4ull, blocks / 32);
+    u64 rb = MAX(BLOCKS_MIN, blocks) + 48 + MAX(4ull, blocks / 32);
     if (rb > BLOCKS_MAX) {
         rb = BLOCKS_MAX;
         logf("savedata: a %lu-block save has no headroom in its container: filling it completely may fail to "
@@ -1767,6 +1770,26 @@ const char *savedata_data_root(void)
     }
     unlock();
     return g_data_state == 1 ? g_data_mp : NULL;
+}
+
+/* The selector's save scan (hle_fsvsh.c save_prescan) runs in an extension
+ * that is given back before the title starts when the ELF loader runs
+ * beside the selector: its /data mount would outlive it, and the title's
+ * own mount of the container would be refused (BUSY), leaving /data in
+ * /temp0 and the scan's answers out of sight.  So the scan lets go of it;
+ * the next use mounts it again. */
+void savedata_data_release(void)
+{
+    lock();
+    if (g_data_state == 1) {
+        s32 rc = gfs_umount(g_data_mp, COMMIT_MS);
+        logf("savedata: the title's /data let go after the save scan (%s): %x", g_data_mp, (u32)rc);
+        if (rc == 0) {
+            gfs_slot_release();
+            __atomic_store_n(&g_data_state, 0, __ATOMIC_RELEASE);
+        }
+    }
+    unlock();
 }
 
 /* ---- GetMountInfo, params, icons ---- */
@@ -2274,11 +2297,25 @@ static s32 sd_clear_progress(void) { return g_init ? 0 : E_NOT_INITIALIZED; }
 
 /* ---- save data memory ---- */
 
-static u64 mem_blocks(u64 size)
+/* A save container holds less than its blocks: the filesystem keeps a share
+ * (an 8 MiB file did not fit a 266-block container, measured on a PS4).
+ * Containers made for save data memory get what gfs_pack.py gives a data
+ * container, which is known to hold its data: 48 blocks and a sixteenth
+ * (at least 64) more than the files need. */
+static u64 cont_blocks_for(u64 content)
 {
-    u64 b = (size + BLOCK - 1) / BLOCK;
-    return MIN(BLOCKS_MAX, MAX(BLOCKS_MIN, b + MAX(4ull, b / 32) + 2));
+    return MIN(BLOCKS_MAX, MAX(BLOCKS_MIN, content + 48 + MAX(64ull, content / 16)));
 }
+
+/* what the files may use of a container of total blocks (cont_blocks_for's inverse) */
+static u64 cont_usable(u64 total)
+{
+    u64 fs = 48 + MAX(64ull, total / 17);
+    return total > fs ? total - fs : 0;
+}
+
+/* the memory, an icon of up to ICON_MAX, its param and directories */
+static u64 mem_blocks(u64 size) { return cont_blocks_for((size + BLOCK - 1) / BLOCK + ICON_MAX / BLOCK + 4); }
 
 /* the slot's files: <prefix>SAVE (or its M container), or a dev directory */
 static s32 mem_begin(struct sess *s, const struct memslot *m, u32 slot, bool rw)
@@ -2323,8 +2360,8 @@ static void mem_icon_write(const struct sess *s, u32 slot, const void *data, u64
 static bool fits_in_save(const struct sess *s, u64 size)
 {
     u64 total = g_cath.save_blocks ? g_cath.save_blocks : SAVE_BLOCKS;
-    u64 need = (size + 0x10000 + BLOCK - 1) / BLOCK, margin = MAX(4ull, total / 32);
-    return used_blocks(s->root, true) + need + margin <= total;
+    u64 need = (size + 0x10000 + BLOCK - 1) / BLOCK;
+    return used_blocks(s->root, true) + need <= cont_usable(total);
 }
 
 /* the backing file grown (zero-filled) to size, created if missing */
@@ -2336,6 +2373,40 @@ static s32 mem_extend(const char *path, u64 size)
     s32 rc = size ? write_all(fd, "", 1, (s64)size - 1) : 0;
     kf.close(fd);
     return rc;
+}
+
+/* The slot's memory could not be made its size where it is, and holds
+ * nothing yet (no file, or an empty one: an M container an older ghostldr
+ * made too small, where the first extension already failed).  Only then is
+ * it moved: the empty M container is deleted and made again at the right
+ * size, or the empty files in <prefix>SAVE are removed and the slot gets an M
+ * container.  A memory with contents is never moved (the caller reports
+ * NO_SPACE), and nothing else in <prefix>SAVE is touched.  s is the session
+ * holding it now; on return (0) it is the new container's. */
+static s32 mem_move(struct sess *s, struct memslot *ms, u32 slot, u64 size)
+{
+    char p[320], name[32];
+    s32 rc;
+    if (ms->in_m) {
+        rc = sess_end(s);
+        cont_name(name, 'M', slot);
+        s32 rd = real_delete(s->user, name);
+        logf("savedata: memory slot %u: %s is too small for %lx bytes and holds nothing: made again (delete -> %x)",
+             slot, name, size, (u32)rd);
+    } else {
+        for (int k = 0; k < 3; k++) {
+            mem_path(p, sizeof(p), s, slot, k == 0 ? "bin" : k == 1 ? "param" : "png");
+            kf.unlink(p);
+        }
+        g_cath.mem_container[slot] = 1;
+        rc = cat_write_in(s);
+        s32 rc2 = sess_end(s);
+        rc = rc ? rc : rc2;
+        logf("savedata: memory slot %u (%lx bytes, empty) does not fit in %s: it gets its own container (%x)", slot,
+             size, gfs_save_name(), (u32)rc);
+    }
+    ms->in_m = true;
+    return rc ? rc : mem_begin(s, ms, slot, true);
 }
 
 static s32 mem_setup(s32 user, u32 slot, u64 size, const struct sd_param *init_param, const struct sd_icon *init_icon,
@@ -2381,7 +2452,17 @@ static s32 mem_setup(s32 user, u32 slot, u64 size, const struct sd_param *init_p
     mem_path(p, sizeof(p), &s, slot, "bin");
     s64 have = file_size(p);
     rc = have < 0 || (u64)have < size ? mem_extend(p, size) : 0;
-    if (rc == 0 && have < 0) {
+    if (rc == K_ENOSPC && cont_backend() && have <= 0) {
+        rc = mem_move(&s, &ms, slot, size);
+        mem_path(p, sizeof(p), &s, slot, "bin");
+        if (rc == 0)
+            rc = mem_extend(p, size);
+    } else if (rc == K_ENOSPC && have > 0) {
+        logf("savedata: memory slot %u holds %ld bytes and cannot grow to %lx where it is: left as it is", slot, have,
+             size);
+    }
+    mem_path(p, sizeof(p), &s, slot, "param");
+    if (rc == 0 && file_size(p) < 0) { /* new (or never set up completely) */
         struct sd_param prm;
         if (init_param)
             prm = *init_param;
@@ -2403,9 +2484,9 @@ static s32 mem_setup(s32 user, u32 slot, u64 size, const struct sd_param *init_p
         }
     }
     s32 rc2 = sess_end(&s);
-    logf("savedata: memory slot %u -> %s/sdmemory_%u.bin (%ld bytes existed, %lx requested)%s", slot,
+    logf("savedata: memory slot %u -> %s/sdmemory_%u.bin (%ld bytes existed, %lx requested)%s (%x, %x)", slot,
          ms.in_m ? "M container" : ms.legacy ? save_root() : cont_backend() ? gfs_save_name() : "user dir", slot,
-         have, size, rc || rc2 ? ": FAILED" : "");
+         have, size, rc || rc2 ? ": not set up" : "", (u32)rc, (u32)rc2);
     if (rc != 0)
         return rc == K_ENOSPC ? E_NO_SPACE_FS : E_INTERNAL;
     if (rc2 != 0)
@@ -2424,6 +2505,10 @@ static s32 mem_get(u32 slot, struct sd_mem_data *data, struct sd_param *param, s
         return E_MEMORY_NOT_READY;
     if (data && data->buf && data->offset < 0)
         return E_PARAMETER;
+    static u32 said;
+    if (said++ < 4)
+        logf("savedata: memory slot %u read (%lx bytes at %lx%s%s)", slot, data ? data->buf_size : 0,
+             data ? (u64)data->offset : 0, param ? ", param" : "", icon ? ", icon" : "");
     struct sess s;
     char p[320];
     s32 rc = mem_begin(&s, m, slot, false);
@@ -2490,8 +2575,10 @@ static s32 mem_set(u32 slot, const struct sd_mem_data *data, u32 num, const stru
     if (rc == 0 && icon && icon->buf)
         mem_icon_write(&s, slot, icon->buf, icon->data_size ? MIN(icon->buf_size, icon->data_size) : icon->buf_size);
     s32 rc2 = sess_end(&s); /* the commit: durable from here */
-    if (rc != 0 || rc2 != 0)
-        logf("savedata: memory slot %u write (%u blocks) -> %x, commit -> %x", slot, num, (u32)rc, (u32)rc2);
+    static u32 said;
+    if (rc != 0 || rc2 != 0 || said++ < 4)
+        logf("savedata: memory slot %u write (%u blocks, first %lx bytes at %lx%s) -> %x, commit -> %x", slot, num,
+             data ? data[0].buf_size : 0, data ? (u64)data[0].offset : 0, param ? ", param" : "", (u32)rc, (u32)rc2);
     if (rc != 0)
         return rc == K_ENOSPC ? E_NO_SPACE_FS : E_INTERNAL;
     return rc2 ? E_INTERNAL : 0;

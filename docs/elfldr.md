@@ -10,7 +10,7 @@ You need SWRR with Luac0re's Remote Lua Loader listening on TCP 9026, as for a g
 
 ### With nothing but nc
 
-The release page has `ghostldr.lua` and `ghostldr-elfldr.bin` ([using-the-release.md](using-the-release.md#boot-with-no-computer)). Send the first to Luac0re's loader and the second to the port it opens, where `CONSOLE` is the PS5's address (on Linux, `nc -N` for the first: Luac0re runs a script once its connection ends):
+The release page has `ghostldr.lua` and `ghostldr-elfldr.bin` ([using-the-release.md](using-the-release.md#4-boot)). Send the first to Luac0re's loader and the second to the port it opens, where `CONSOLE` is the PS5's address (on Linux, `nc -N` for the first: Luac0re runs a script once its connection ends):
 
 ```bash
 nc CONSOLE 9026 < ghostldr.lua
@@ -38,7 +38,7 @@ A bundle sent to the ELF loader's port is told apart from a payload by its first
 
 ### Later sessions: ghostldr.lua alone
 
-`ghostldr.lua` keeps the last bundle it took in SWRR's saved data ([using-the-release.md](using-the-release.md#later-sessions-ghostldrlua-alone)), so after the first time:
+`ghostldr.lua` keeps the last bundle it took in SWRR's saved data ([using-the-release.md](using-the-release.md#every-later-session-ghostldrlua-alone)), so after the first time:
 
 ```bash
 nc CONSOLE 9026 < ghostldr.lua

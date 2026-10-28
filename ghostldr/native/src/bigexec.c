@@ -28,9 +28,16 @@
  * read-write, then read-only, and never asked for execute permission (a
  * console with a kernel patch may grant that where a stock one would not).
  * The steps are separate: the code map (bxplan.c bx_code_runs), the backing
- * (bx_cover, find_objects: which whole objects go where), then mapping and
- * writing.  Backing the runs with fresh objects of their own size instead,
- * once the emulator's buffers are reclaimed, would replace only the backing.
+ * (which objects go where), then mapping and writing.  The backing is whole
+ * emulator buffers when they cover the code (bx_cover, find_objects), else
+ * the reclaim: every reference to the emulator's buffers is dropped, which
+ * gives their JIT memory back (the console's 65 MiB cap is global, and they
+ * hold all of it but 768 KiB), and fresh objects are made, one per code run
+ * (bx_fresh), plus one for the modules that stay in the arena, mapped where
+ * the largest buffer was.  The extension does that part (ext/src/reclaim.c,
+ * through ghost_api.h struct bx_reclaim), to keep the core small; it
+ * measures what is free before and after and drops nothing unless the plan
+ * fits.  Buffers the ELF loader still holds are left alone and not counted.
  *
  * The objects used leave the arena (arena_drop); their home mappings stay and
  * show the same bytes.  The game selector borrowed the largest buffer's start
@@ -38,19 +45,25 @@
  * it again.
  */
 #include "bxplan.h"
+#include "ghost_api.h"
 
 #define COLD GHOST_COLD
 #define MiB (1UL << 20)
 #define SYS_close 6
-#define BX_HINT 0x2000000000UL /* where the module's range is reserved (a hint) */
+/* where the module's range is reserved (a hint): high in the app map area
+ * (0x10_0000_0000-0xFC_0000_0000), away from the fixed addresses titles map
+ * their own memory at (Ghost: 0x10, 0x11, 0x20 and 0x30_0000_0000) */
+#define BX_HINT 0xE000000000UL
 #define BX_HIGH 0x1000000000UL /* fixed direct memory maps only above this */
+#define BX_FLEX_MAX (128UL << 20) /* system flexible memory punched in all, as loader.c's run-time limit */
 /* compiler-visible out parameters (jitrpc.c's private scratch: 0x300-0x30f is free) */
 #define OUT(off) (g_ctx->oob_scratch + 0x70000 + 0x300 + (off))
 
 struct bx_state {
     struct bx_layout lay;
-    struct jit_obj obj[BX_MAX_OBJS]; /* the candidates, largest first */
+    struct jit_obj obj[BX_MAX_VIEWS]; /* the candidate buffers, largest first; or the fresh objects, by view */
     u32 nobj, nruns, nforbid;
+    bool fresh;                       /* reclaimed: obj[] are fresh objects (home 0) */
     struct bx_range runs[BX_MAX_RUNS], forbid[BX_MAX_FORBID];
 };
 
@@ -108,11 +121,10 @@ COLD int jit_objects_find(struct jit_obj *o, u32 n, u32 want)
         }
         o[j].fd = fd, o[j].rx = rx, o[j].wr = at;
         have |= 1u << j;
-        logf("bigexec: compiler descriptor %d is the %lu MiB JIT object at %lx (RX alias here: %d)", fd, size / MiB,
-             at, rx);
+        logf("bigexec: compiler fd %d: the %lu MiB object at %lx (here %d)", fd, size / MiB, at, rx);
     }
     if (have != want)
-        logf("bigexec: only %x of the JIT objects %x found among the compiler's descriptors", have, want);
+        logf("bigexec: JIT objects %x of %x found", have, want);
     return have == want ? 0 : -1;
 }
 
@@ -159,17 +171,50 @@ COLD static u32 code_runs(const struct module *m, struct bx_range *runs)
     return n;
 }
 
+/* ---- the reclaim: fresh JIT objects sized to the code ---- */
+
+static struct bx_reclaim *g_rec; /* its answer, why it failed included */
+
+const char *bx_why(void) { return g_rec && g_rec->why[0] ? g_rec->why : NULL; }
+
+/* Instead of whole buffers: fresh objects sized to the code, made by the
+ * extension once every reference to the emulator's buffers is dropped
+ * (ghost_api.h struct bx_reclaim; ext/src/reclaim.c), and one for the other
+ * modules, which becomes the arena. */
+COLD static int reclaim(struct bx_state *s, struct module *big, u64 keep)
+{
+    struct bx_reclaim *r = g_rec = arena_alloc(sizeof(*r));
+    if (!r)
+        return -1;
+    r->name = big->name, r->nruns = s->nruns, r->nforbid = s->nforbid, r->text = big->text_size, r->keep = keep;
+    memcpy(r->runs, s->runs, sizeof(s->runs)), memcpy(r->forbid, s->forbid, sizeof(s->forbid));
+    if (ext_reclaim(r) != 0) {
+        logf("bigexec: no fresh JIT objects: %s", r->why);
+        return -1;
+    }
+    memcpy(s->obj, r->obj, sizeof(r->obj));
+    s->nobj = s->lay.nviews = r->n, s->fresh = true, s->lay.used = 0;
+    for (u32 v = 0; v < r->n; v++)
+        s->lay.view[v] = (struct bx_view){v, r->off[v]}, s->lay.used += r->size[v];
+    return 0;
+}
+
+/* A module the arena cannot hold (or every title, with CTX_FLAG_RECLAIM):
+ * its code runs from whole emulator buffers mapped over it, or, when they
+ * do not cover it, from fresh objects after a reclaim. */
 COLD int bx_prepare(void)
 {
-    u64 lo, hi, keep;
-    if (is_ps4() || !g_modules || arena_code_region(&lo, &hi) != 0 || bx_arena_holds(g_modules, lo, hi))
+    u64 keep, st[8], en[8], sizes[BX_MAX_OBJS], total = 0;
+    bool force = (g_ctx->flags & CTX_FLAG_RECLAIM) != 0, ps4 = is_ps4();
+    u32 nb = arena_buffers(st, en, ARRAY_SIZE(st)), l = 0;
+    for (u32 i = 1; i < nb; i++) /* the largest: where the modules go, past its header */
+        l = en[i] - st[i] > en[l] - st[l] ? i : l;
+    if (!g_modules || !nb || (!force && bx_arena_holds(g_modules, st[l] + JIT_BUF_HEADER, en[l])))
         return 0; /* placed in the arena as always (or failing there as always) */
     struct module *big = bx_pick(g_modules, &keep);
     struct bx_state *s = arena_alloc(sizeof(*s));
     if (!s)
         return -1;
-    u64 st[8], en[8], sizes[BX_MAX_OBJS], total = 0;
-    u32 nb = arena_buffers(st, en, ARRAY_SIZE(st));
     for (u32 i = 0; i < nb && s->nobj < BX_MAX_OBJS; i++) { /* largest first, then by address */
         u32 at = s->nobj++;
         for (; at && s->obj[at - 1].size < en[i] - st[i]; at--)
@@ -178,14 +223,18 @@ COLD int bx_prepare(void)
     }
     for (u32 i = 0; i < s->nobj; i++)
         sizes[i] = s->obj[i].size, total += sizes[i];
-    logf("bigexec: %s (text %lx) does not fit the arena with the other modules: its code goes in whole JIT objects",
+    logf(force ? "bigexec: %s (text %lx): reclaim asked for" : "bigexec: %s (text %lx) does not fit the arena",
          big->name, big->text_size);
     s->nruns = code_runs(big, s->runs);
     s->nforbid = bx_data_ranges(big, s->forbid);
-    if (!s->nruns || bx_cover(s->runs, s->nruns, s->forbid, s->nforbid, sizes, s->nobj, keep, &s->lay) != 0) {
-        logf("bigexec: %s: its code does not fit the emulator's %u JIT buffers (%lu MiB; %lu KiB kept for the other "
-             "modules): it cannot be loaded", big->name, s->nobj, total / MiB, keep >> 10);
-        return -1;
+    if (force || ps4 || !s->nruns ||
+        bx_cover(s->runs, s->nruns, s->forbid, s->nforbid, sizes, s->nobj, keep, &s->lay) != 0) {
+        /* views are a PS5's (on a PS4 the compiler's mapping of a buffer may not cover it whole) */
+        logf("bigexec: %s: no cover by %u buffers (%lu MiB)", big->name, s->nobj, total / MiB);
+        if (reclaim(s, big, keep) != 0)
+            return -1;
+        big->bx = s;
+        return 0;
     }
     for (u32 v = 0; v < s->lay.nviews; v++) {
         const struct jit_obj *o = &s->obj[s->lay.view[v].obj];
@@ -262,19 +311,28 @@ COLD int bx_place(struct module *m)
             return -1;
         }
     }
-    struct bx_range g[BX_MAX_OBJS + 1];
+    struct bx_range g[BX_MAX_VIEWS + 1];
     u32 ng = gaps(s, (s64)m->text_size, g);
-    u64 ro = 0, rw = 0, got;
+    u64 ro = 0, rw = 0, fl = 0, got;
     for (u32 i = 0; i < ng; i++) {
         if (!(got = map_rw(m->base + (u64)g[i].lo, (u64)(g[i].hi - g[i].lo))))
             return -1;
         ro += got;
         logf("bigexec: %s: +%lx-+%lx not executable (direct memory)", m->name, g[i].lo, g[i].hi);
     }
+    /* data segments from system flexible memory, as the arena's modules' are:
+     * each its own size, once, while ghostldr's punched total stays within
+     * what was measured to be safe (no API tells what is left of the
+     * console's pool, and mapping it until it fails freezes the console);
+     * else direct memory */
     for (u32 i = 0; i < s->nforbid; i++) {
-        if (!(got = map_rw(m->base + (u64)s->forbid[i].lo, (u64)(s->forbid[i].hi - s->forbid[i].lo))))
+        u64 at = m->base + (u64)s->forbid[i].lo, len = (u64)(s->forbid[i].hi - s->forbid[i].lo);
+        if (g_punched + len <= BX_FLEX_MAX && arena_punch_rw(at, len) == 0)
+            fl += len;
+        else if ((got = map_rw(at, len)))
+            rw += got;
+        else
             return -1;
-        rw += got;
     }
     for (u32 i = 0; i < m->phnum; i++) {
         const struct elf_phdr *p = &m->phdrs[i];
@@ -284,8 +342,8 @@ COLD int bx_place(struct module *m)
     if (m->proc_param)
         m->proc_param += m->base;
     logf("%s: placed at %lx (text %lx in %u JIT objects, %lu MiB); direct memory %lu KiB read-only + %lu KiB data, "
-         "taken from the title's direct memory", m->name, m->base, m->text_size, s->lay.nviews, s->lay.used / MiB,
-         ro >> 10, rw >> 10);
+         "%lu KiB data flexible (system flexible memory punched: %lu of %lu KiB)", m->name, m->base, m->text_size,
+         s->lay.nviews, s->lay.used / MiB, ro >> 10, rw >> 10, fl >> 10, g_punched >> 10, BX_FLEX_MAX >> 10);
     return 0;
 }
 
@@ -323,7 +381,7 @@ COLD int bx_write_text(struct module *m, const u8 *text)
             return -1;
         }
     }
-    struct bx_range g[BX_MAX_OBJS + 1];
+    struct bx_range g[BX_MAX_VIEWS + 1];
     u32 ng = gaps(s, end, g);
     for (u32 i = 0; i < ng; i++) {
         memcpy((void *)(m->base + (u64)g[i].lo), text + g[i].lo, (u64)(g[i].hi - g[i].lo));

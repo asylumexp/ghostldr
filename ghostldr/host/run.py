@@ -74,7 +74,7 @@ NOTIFY_HOOK = ROOT / "ghostldr/lua/notify_hook.lua"
 from console import LOADERS, console_ip, loader_port
 import profiles
 import usb_drive
-LOG_PORT = 18194
+LOG_PORT = int(os.environ.get("GHOSTLDR_PORT_BASE", "18194"))  # +1, +2 below; another base lets two run.py share a computer
 EXT_PORT = LOG_PORT + 1   # TCP
 SEL_PORT = LOG_PORT + 2   # TCP
 FTP_PORT = 1212           # the console's FTP server (TCP; docs/ftp.md); not ftpsrv's 2121
@@ -591,6 +591,7 @@ def boot_flags(args) -> int:
         | (4 if args.snap or args.count_imports or args.profile else 0) | (16 if args.profile else 0) \
         | (8 if args.count_imports else 0) | (32 if args.force_title_ready else 0) \
         | (64 if args.ext_jit else 0) | (128 if args.dialog_cancel else 0) | (256 if args.ime_fixed_name else 0) \
+        | (0x4000000 if args.reclaim else 0) | (0x2000000 if args.ext_buffer else 0) \
         | (0x400000 if args.dialog_auto else 0) \
         | (512 if args.keep_remote_play else 0) | (1024 if args.boot_start_modules else 0) \
         | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0) \
@@ -628,6 +629,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpu-heap-mib", type=int, default=0, help="CPU malloc heap at 0x1000000000 (default 384)")
     parser.add_argument("--force-title-ready", action="store_true",
                         help="experiment: set the title world's ready flag from the watchdog")
+    parser.add_argument("--reclaim", action="store_true",
+                        help="the title's code in fresh JIT objects after reclaiming the emulator's JIT buffers, even "
+                             "when it fits them (docs/compatibility.md, Large executables)")
+    parser.add_argument("--ext-buffer", action="store_true",
+                        help="the extension's code at the top of an emulator JIT buffer (as when no new JIT block "
+                             "takes it), not in a new JIT block")
     parser.add_argument("--ext-jit", action="store_true",
                         help="test: put the extension's code in a new JIT block instead of the core's RX area")
     parser.add_argument("--force-preflight", action="store_true",

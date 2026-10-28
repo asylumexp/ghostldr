@@ -3,7 +3,7 @@
  * an ordinary x86-64 process (Rosetta on Apple silicon).  The core's real
  * ext.c places, relocates and initializes the extension; this file fakes
  * the few core services it and the dialogs use (a clock, the user name,
- * the core's sysmodule override) and then calls the dialog functions the
+ * SWRR's libSceSysmodule) and then calls the dialog functions the
  * way a title would, through the extension's own lookup.  test_dialog.py
  * builds and runs it:
  *
@@ -162,9 +162,11 @@ static s32 fake_get_user_name(s32 user, char *buf, size_t size)
     strlcpy(buf, g_user_name, size);
     return 0;
 }
-static u32 g_core_loads, g_core_load_args, g_host_is_loaded;
-static s32 fake_core_load(u32 id) { return g_core_loads++, 0; }
-static s32 fake_core_load_arg(u32 id, size_t argc, const void *argv, u32 flags, s32 *res) { return g_core_load_args++, 0; }
+/* SWRR's libSceSysmodule, where the router (hle_sysmodule.c) sends ids that
+ * are neither dialogs, IsGame modules nor DiscMap */
+static u32 g_swrr_loads, g_swrr_load_args, g_host_is_loaded;
+static s32 fake_swrr_load(u32 id) { return g_swrr_loads++, 0; }
+static s32 fake_swrr_load_arg(u32 id, size_t argc, const void *argv, u32 flags, s32 *res) { return g_swrr_load_args++, 0; }
 static s32 fake_host_is_loaded(u32 id) { return g_host_is_loaded++, (s32)0x805A1001; }
 
 static void *host_real_(const char *name)
@@ -173,6 +175,10 @@ static void *host_real_(const char *name)
         return (void *)fake_process_time;
     if (strcmp(name, "sceSysmoduleIsLoaded") == 0)
         return (void *)fake_host_is_loaded;
+    if (strcmp(name, "sceSysmoduleLoadModule") == 0)
+        return (void *)fake_swrr_load;
+    if (strcmp(name, "sceSysmoduleLoadModuleInternalWithArg") == 0)
+        return (void *)fake_swrr_load_arg;
     return NULL;
 }
 static void *host_real_in_(const char *mod, const char *name)
@@ -181,15 +187,11 @@ static void *host_real_in_(const char *mod, const char *name)
         return (void *)fake_get_user_name;
     return NULL;
 }
-static u64 hle_lookup_(const char *lib, const char *name)
-{
-    if (strcmp(name, "sceSysmoduleLoadModule") == 0)
-        return (u64)fake_core_load;
-    if (strcmp(name, "sceSysmoduleLoadModuleInternalWithArg") == 0)
-        return (u64)fake_core_load_arg;
-    return 0;
-}
+static u64 hle_lookup_(const char *lib, const char *name) { return 0; }
 static const char *gfs_save_name_(void) { return "GHOSTSAVE"; }
+/* no app root here: title paths stay as they are and nothing exists */
+static const char *remap_path_(const char *path, char *buf, size_t size) { return path; }
+static int vfs_stat_(const char *path, void *st) { return (int)0x80020002; }
 
 const struct ghost_api g_ghost_api = {
     .version = GHOST_API_VERSION,
@@ -209,6 +211,8 @@ const struct ghost_api g_ghost_api = {
     .spin_unlock = spin_unlock_,
     .gfs_save_name = gfs_save_name_,
     .hle_lookup = hle_lookup_,
+    .remap_path = remap_path_,
+    .vfs_stat = vfs_stat_,
 };
 
 static int k_close(int fd) { return sys_close(fd); }
@@ -1029,7 +1033,10 @@ static void test_ime(void)
     expect_eq((u32)((s32(*)(s32))kclose)(0x1000), 0x80BC0002, "keyboard Close twice: NOT_OPENED");
 }
 
-/* ---- dialog sysmodules: 0 without loading ---- */
+/* ---- dialog sysmodules: 0 without loading ----
+ * The sysmodule router (hle_sysmodule.c) asks the dialog helpers first; other
+ * ids go to SWRR's library, IsGame ids (NpToolkit2 0x102) to the title's
+ * sce_module. */
 static void test_sysmodule(void)
 {
     void *load = fn("libSceSysmodule", "sceSysmoduleLoadModule");
@@ -1040,18 +1047,21 @@ static void test_sysmodule(void)
     g_group = "sysmodule";
     expect_eq((u32)((fid)is)(0xb2), 0x805A1001, "IsLoaded(NpProfileDialog) before loading: UNLOADED");
     mark();
-    expect(((fid)load)(0xa4) == 0 && ((fid)load)(0xb2) == 0 && g_core_loads == 0, "dialog ids load without the core");
+    expect(((fid)load)(0xa4) == 0 && ((fid)load)(0xb2) == 0 && g_swrr_loads == 0,
+           "dialog ids load without SWRR's library");
     expect(logged("sysmodule: a4 (libSceMsgDialog) is implemented by the extension: not loaded"), "logged once");
     expect_eq((u32)((fid)is)(0xb2), 0, "IsLoaded(NpProfileDialog) after loading: 0");
     expect(((s32(*)(u32, size_t, const void *, u32, s32 *))load_arg)(0xa0, 0, NULL, 0, &res) == 0 && res == 0 &&
-               g_core_load_args == 0,
+               g_swrr_load_args == 0,
            "InternalWithArg: a dialog id, res 0");
-    expect(((fid)load)(0x102) == 0 && g_core_loads == 1, "other ids go to the core's override");
+    expect(((fid)load)(0x80) == 0 && g_swrr_loads == 1, "other ids (0x80 Json) go to SWRR's library");
     expect(((s32(*)(u32, size_t, const void *, u32, s32 *))load_arg)(0x800000a4, 0, NULL, 0, &res) == 0 &&
-               g_core_load_args == 1,
+               g_swrr_load_args == 1,
            "an internal id is never a dialog id");
-    ((fid)is)(0x102);
-    expect(g_host_is_loaded == 1, "IsLoaded of other ids asks the host");
+    expect((u32)((fid)is)(0x80) == 0x805A1001 && g_host_is_loaded == 1, "IsLoaded of other ids asks SWRR's library");
+    expect((u32)((fid)load)(0x102) == 0x80020002 && g_swrr_loads == 1 && (u32)((fid)is)(0x102) == 0x805A1001 &&
+               g_host_is_loaded == 1,
+           "an IsGame id the title does not ship: ENOENT, UNLOADED, SWRR's library not asked");
 }
 
 int main(int argc, char **argv)

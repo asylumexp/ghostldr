@@ -316,15 +316,27 @@ static inline u32 lerp4(u32 a, u32 b, u32 f) /* f 0..256 */
     return rg | gg;
 }
 
+/* Texel coordinates are taken as the GPU's texture unit takes them: to the
+ * nearest 1/256 of a texel.  A pixel centre on a texel edge (text scaled by
+ * 1.5) then picks the texel GL's rule names, as the GPU does, rather than
+ * the one a float rounding error falls into (measured on a PS4: they
+ * differed at every such edge); nearest is floor(t + SUBTEXEL). */
+#define SUBTEXEL (1.0f / 512.0f)
+
+static inline s32 q8(float f) /* f to 1/256ths, rounded */
+{
+    return ifloor(f * 256.0f + 0.5f);
+}
+
 u32 gles_sample(const struct gles_tex *t, float u, float v, bool linear)
 {
     if (!t || !t->pix || !t->w || !t->h)
         return rgba(0, 0, 0, 255); /* an incomplete texture samples as black */
     if (!linear)
-        return texel(t, ifloor(u * (float)t->w), ifloor(v * (float)t->h));
-    float fx = u * (float)t->w - 0.5f, fy = v * (float)t->h - 0.5f;
-    s32 x0 = ifloor(fx), y0 = ifloor(fy);
-    u32 ax = (u32)((fx - (float)x0) * 256.0f), ay = (u32)((fy - (float)y0) * 256.0f);
+        return texel(t, ifloor(u * (float)t->w + SUBTEXEL), ifloor(v * (float)t->h + SUBTEXEL));
+    s32 qx = q8(u * (float)t->w - 0.5f), qy = q8(v * (float)t->h - 0.5f);
+    s32 x0 = qx >> 8, y0 = qy >> 8;
+    u32 ax = (u32)qx & 255, ay = (u32)qy & 255;
     u32 top = lerp4(texel(t, x0, y0), texel(t, x0 + 1, y0), ax);
     u32 bot = lerp4(texel(t, x0, y0 + 1), texel(t, x0 + 1, y0 + 1), ax);
     return lerp4(top, bot, ay);
@@ -532,9 +544,19 @@ static inline float edge_x(float xa, float ya, float xb, float yb, float y)
     return xa + (y - ya) * ((xb - xa) / (yb - ya));
 }
 
-void gles_triangle(const struct gles_draw *d, const struct gles_vert *a, const struct gles_vert *b,
-                   const struct gles_vert *c)
+/* a vertex position as the GPU's rasteriser takes it: to 1/256 of a pixel */
+static inline float snap8(float f) { return f > -1e6f && f < 1e6f ? (float)q8(f) / 256.0f : f; }
+
+void gles_triangle(const struct gles_draw *d, const struct gles_vert *a0, const struct gles_vert *b0,
+                   const struct gles_vert *c0)
 {
+    /* Positions to 1/256 of a pixel and GL's top-left rule in the target's
+     * memory rows (top first, as the GPU covers pixels): a pixel centre on an
+     * edge is drawn by the same triangle on both paths */
+    struct gles_vert sv[3] = {*a0, *b0, *c0};
+    for (int i = 0; i < 3; i++)
+        sv[i].x = snap8(sv[i].x), sv[i].y = snap8(sv[i].y);
+    const struct gles_vert *a = &sv[0], *b = &sv[1], *c = &sv[2];
     const struct gles_vert *v[3] = {a, b, c};
     /* sort by y */
     for (int i = 0; i < 2; i++)
@@ -572,7 +594,11 @@ void gles_triangle(const struct gles_draw *d, const struct gles_vert *a, const s
         linear = tex_linear(d->tex[0], magnify);
     }
     u32 bk = blend_kind(d);
-    s32 ytop = iceil(v[0]->y - 0.5f), ybot = iceil(v[2]->y - 0.5f);
+    /* rows whose centre is on an edge: the upper one in memory is drawn (for
+     * the window that is GL's higher y) */
+    bool up = d->dst->flip_y;
+    s32 ytop = up ? ifloor(v[0]->y - 0.5f) + 1 : iceil(v[0]->y - 0.5f);
+    s32 ybot = up ? ifloor(v[2]->y - 0.5f) + 1 : iceil(v[2]->y - 0.5f);
     if (ytop < d->clip.y0)
         ytop = d->clip.y0;
     if (ybot > d->clip.y1)
@@ -606,8 +632,8 @@ void gles_triangle(const struct gles_draw *d, const struct gles_vert *a, const s
             const struct gles_tex *t = d->tex[0];
             float fw = (float)t->w, fh = (float)t->h;
             float du = pu.dx * fw;
-            float fu = u * fw;
-            s32 ty = wrap(ifloor(vv * fh), t->h, t->wrap_t);
+            float fu = u * fw + SUBTEXEL;
+            s32 ty = wrap(ifloor(vv * fh + SUBTEXEL), t->h, t->wrap_t);
             float dvx = pv.dx * fh;
             if (dvx == 0.0f && t->wrap_s == GL_CLAMP_TO_EDGE && bk != BL_ANY && fu > -1e6f && fu < 1e6f) {
                 /* a row of a 2D blit: 16.16 steps, everything in the target's channel order (blending and
@@ -618,10 +644,11 @@ void gles_triangle(const struct gles_draw *d, const struct gles_vert *a, const s
                 u32 mod = (fs->flags & FSF_MUL_VCOLOR) ? flat_col : 0xFFFFFFFFu;
                 if (d->dst->bgra && mod != 0xFFFFFFFFu)
                     mod = (mod & 0xFF00FF00) | (mod & 255) << 16 | ((mod >> 16) & 255);
-                s64 u16 = (s64)(fu * 65536.0f), du16 = (s64)(du * 65536.0f);
+                /* 32.32 steps: a long row drifts by far less than SUBTEXEL */
+                s64 u32f = (s64)(fu * 4294967296.0f), du32 = (s64)(du * 4294967296.0f);
                 s32 maxx = (s32)t->w - 1;
-                for (s32 x = x0; x < x1; x++, p++, u16 += du16) {
-                    s32 ix = (s32)(u16 >> 16);
+                for (s32 x = x0; x < x1; x++, p++, u32f += du32) {
+                    s32 ix = (s32)(u32f >> 32);
                     ix = ix < 0 ? 0 : ix > maxx ? maxx : ix;
                     u32 c = trow[ix] | one;
                     if (swap)
@@ -632,14 +659,15 @@ void gles_triangle(const struct gles_draw *d, const struct gles_vert *a, const s
                 }
             } else if (dvx == 0.0f) {
                 const u32 *trow = t->pix + (u64)ty * t->pitch;
-                for (s32 x = x0; x < x1; x++, p++, fu += du) {
-                    u32 tc = swizzle(fs, trow[(u32)wrap(ifloor(fu), t->w, t->wrap_s)]);
+                for (s32 x = x0; x < x1; x++, p++) {
+                    u32 tc = swizzle(fs, trow[(u32)wrap(ifloor(fu + (float)(x - x0) * du), t->w, t->wrap_s)]);
                     put(d, bk, p, (fs->flags & FSF_MUL_VCOLOR) ? modulate(tc, flat_col) : tc);
                 }
             } else {
-                float fv = vv * fh;
-                for (s32 x = x0; x < x1; x++, p++, fu += du, fv += dvx) {
-                    u32 tc = swizzle(fs, texel(t, ifloor(fu), ifloor(fv)));
+                float fv = vv * fh + SUBTEXEL;
+                for (s32 x = x0; x < x1; x++, p++) {
+                    float i = (float)(x - x0);
+                    u32 tc = swizzle(fs, texel(t, ifloor(fu + i * du), ifloor(fv + i * dvx)));
                     put(d, bk, p, (fs->flags & FSF_MUL_VCOLOR) ? modulate(tc, flat_col) : tc);
                 }
             }

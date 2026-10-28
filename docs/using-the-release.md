@@ -1,309 +1,214 @@
-# Using the prebuilt release
+# Using the release
 
-This walks through running Ghost of Tsushima from a ghostldr release on a stock PS5: no jailbreak, no compiler, no build step. It covers download to gameplay. [ghost-on-stock-ps5.md](ghost-on-stock-ps5.md) has the background and more troubleshooting. Other games and OpenOrbis homebrew follow the same steps with their own dump; [compatibility.md](compatibility.md) says what is known to work.
+This takes a ghostldr release from download to gameplay on a stock PS5: no jailbreak, no Python, and no program left running on a computer. A computer or a phone only sends two small files to the PS5, and, if you install a game without a USB drive, opens a web page. Ghost of Tsushima is the example; other games and OpenOrbis homebrew go the same way with their own dump ([compatibility.md](compatibility.md) says what is known to work).
+
+**Supported:**
+
+- **PS5:** every firmware from 13.60 up, with *Star Wars Racer Revenge* (SWRR) from the USA or Europe.
+- **PS4:** homebrew and small titles. Big games can't run there: the kernel gives SWRR, a PS2 Classic, 2.5 GiB of memory at most ([ps4.md](ps4.md), and [below](#on-a-ps4-or-in-jak-x)).
+- **Jak X** with UltraC0re instead of SWRR: experimental ([jakx.md](jakx.md)).
 
 There are two ways to get a game to the PS5:
 
-- **A USB drive (recommended):** copy the game's folder to an exFAT USB drive and plug it into the PS5. There's no install step, games load faster (Ghost reaches its menu in about 35 seconds instead of 80), and SWRR's saved data only holds the game's progress ([usb.md](usb.md)).
-- **SWRR's saved data:** install the game over the network into SWRR's saved data, about 40 minutes for Ghost. Use this when you have no spare drive, or in Jak X, where USB drives are untested.
-
-Steps 1 to 4 below take the USB drive way. [The saved-data way](#the-saved-data-way) replaces steps 3 and 4. Every command is `python3 ghostldr.py` and a word: `doctor`, `copy`, `check`, `boot`, `logs` or `install` (`python3 ghostldr.py --help` lists them, `python3 ghostldr.py boot --help` explains one).
-
-Once a game is on the drive (or installed), starting it needs no Python and nothing serving files from the computer: [two files sent with `nc`](#boot-with-no-computer), from a computer or a phone, boot it.
+- **A USB drive (recommended):** copy the game's folder onto an exFAT drive and plug it into the PS5. There's no install step, games load faster (Ghost reaches its menu in about 35 seconds instead of 80), and SWRR's saved data only holds the game's progress ([usb.md](usb.md)).
+- **SWRR's saved data:** install the game from a browser on a computer or phone, over the network ([below](#no-drive-install-over-the-network)). About 35 minutes for a 50 GB game. Use it when you have no spare drive, on a PS4, or in Jak X.
 
 ## What you need
 
-- **A PS5 with *Star Wars Racer Revenge*, USA (CUSA03474) or Europe (CUSA03492).** Luac0re 2.4b must already work on it: its Remote Lua Loader starts when you open HALL OF FAME. Both regions work the same way; play each game from the same region every time, since US and EU SWRR keep separate saved data (and so separate progress).
-  - *Jak X: Combat Racing* (Europe, CUSA07992, update 1.04) with UltraC0re works too, experimentally: [jakx.md](jakx.md) has what it needs and how it differs. It takes its own install.
-- **Your own Ghost of Tsushima v2.18 dump (CUSA11456)** as a folder of files (`eboot.bin`, `sce_module/`, `cache/`, `movies/` ...), about 63 GB. The release contains no game files.
-- **A USB drive formatted exFAT, with about 70 GB free.** A USB 3 drive or SSD is best. FAT32 works too, but holds no file of 4 GiB or more, which many games have (Ghost doesn't). Your other files on the drive are left alone. (For the saved-data way instead: about 60 GB free on the PS5.)
-- **A computer on the same network as the PS5** with Python 3.11 or newer.
-  - macOS and Linux work; Windows is untested.
-  - A wired or fast Wi-Fi connection helps.
-- **The computer's firewall must let Python receive** on UDP port 18194 (the game's log), TCP port 18195 (the loader fetches its extension from the computer) and TCP port 18196 (the game selector, when there is more than one game to choose from). On macOS, click Allow when asked.
+- **A PS5 on firmware 13.60 or later with SWRR, USA (CUSA03474) or Europe (CUSA03492),** where Luac0re 2.4b already works: its Remote Lua Loader starts when you open HALL OF FAME. Both regions work the same way, but they keep separate saved data, so play each game from the same region every time.
+- **Your own dump of the game** as a folder of files: the folder with `eboot.bin` in it, with `sce_module/`, `sce_sys/` and the game's data (about 63 GB for Ghost of Tsushima v2.18, CUSA11456). Use a dump with its update merged in. The release has no game files.
+- **An exFAT USB drive** with room for the game. FAT32 works too, but holds no file of 4 GiB or more, which many games have (Ghost doesn't). Your other files on the drive are left alone. Without a drive: free space on the PS5 for the install instead.
+- **Something to send a file over TCP,** on the same network as the PS5: `nc` on macOS or Linux, or a payload-sender app on a phone or on Windows (or `nc` in WSL).
+- **To install without a drive:** a web browser on a computer or phone on the same network.
 
-## The easy way: the app
+## 1. Download
 
-The release includes a desktop app that does everything below without a terminal. It needs only Python 3.11 or newer.
+From the [release page](https://github.com/asylumexp/ghostldr/releases/latest), download `ghostldr-<version>.zip` and unpack it. It has six files, all at its top:
 
-1. Download and unpack the release as in step 1.
-2. Start the app from the `app` folder:
-   - **macOS:** double-click `ghostldr.command`. The first time, right-click it, choose **Open**, then **Open**.
-   - **Windows:** double-click `ghostldr.bat`.
-   - **Linux:** run `ghostldr.sh`.
+| File | What it is |
+|---|---|
+| `ghostldr.lua` | The bootstrap: you send it to Luac0re's loader every session. |
+| `ghostldr-ext.bin` | The games: ghostldr's extension and the game selector. Sent once; `ghostldr.lua` keeps it on the PS5 afterwards. |
+| `ghostldr-elfldr.bin` | The [ELF loader](elfldr.md) on its own, for payloads without games (PS5). |
+| `manager.lua` | The [web manager](manager.md): installs a game over the network, and backs up saves, without booting ghostldr. |
+| `README.txt` | The short version of this page. |
+| `SHA256SUMS.txt` | Their checksums. |
 
-The app takes you through the same steps as this guide, on one of two paths you choose at the top:
-
-- **USB drive (recommended):** copy each game to an exFAT USB drive and play it from there.
-- **Saved data:** install each game into SWRR's saved data.
-
-Either way the steps are:
-
-- **Console:** find the PS5, start Luac0re and check the setup.
-- **Game:** choose your dump (and, for saved data, prepare it).
-- **USB drive** or **Install**, then **Play**, with the game's log live.
-
-It also keeps a library of the games on the drive and installed, and offers the save manager.
-
-You still need everything under What you need, including the firewall rules. [app/README.md](../app/README.md) has more about the app. The rest of this guide is the command-line way, which is what the app runs for you.
-
-## 1. Download and unpack
-
-From the release page, download `ghostldr-v0.6.6.zip` and `SHA256SUMS.txt`. You only need the dev payload zip on a jailbroken console. Check the download:
+The same files are attached to the release page one by one too (handy on a phone). Check them in the folder they are in:
 
 ```bash
 shasum -a 256 --ignore-missing -c SHA256SUMS.txt
 ```
 
-Unpack it and work from inside the folder; every command below runs there:
+`ghostldr.lua` only takes a `.bin` from the same release: keep them together. The release page's `ghostldr-dev-payloads-<version>.zip` is for developers with a jailbroken console only. The Python tools and the source are in the [repository](https://github.com/asylumexp/ghostldr) ([For developers](#for-developers)).
 
-```bash
-unzip ghostldr-v0.6.6.zip
+## 2. Put the game on a USB drive
+
+Plug the drive into a computer and copy the dump's folder onto it: the folder with `eboot.bin` in it, as it is, with everything in it. Any folder name works, anywhere on the drive up to four folders down, and games sit side by side:
+
+```
+<drive>/
+    Ghost of Tsushima (CUSA11456)/      eboot.bin, sce_module/, sce_sys/, ...
+    Games/
+        bloodborne/
+            app0/                       eboot.bin, ...
 ```
 
-```bash
-cd ghostldr-v0.6.6
-```
+- **The title ID:** the PS5 reads it from the game's `sce_sys/param.sfo`. A dump without one (Ghost's often hasn't) needs the ID in its folder's name, like `Ghost of Tsushima (CUSA11456)`.
+- **Names and pictures in the game selector** come from the game's `sce_sys` (`param.sfo`, `icon0.png`, `pic1.png`). A game without them gets a tile drawn in its colour, named by ghostldr's profile for it when there is one (Ghost of Tsushima and Bloodborne have one), else by its title ID.
+- **The drive** must be used by the PS5 as USB storage, not as extended storage. Up to four drives are read at once, exFAT or FAT32.
+- **Updates** must be in the dump's folder (a dump of the updated game); a separate update folder isn't merged in. DLC isn't loaded.
 
-## 2. Prepare the PS5
+Then eject the drive and plug it into the PS5. [usb.md](usb.md#what-goes-on-the-drive) has the details: how the PS5 finds games, and the limits. While a game runs, ghostldr's FTP server can also put more games onto the drive in the PS5, from an FTP client ([ftp.md](ftp.md)); copying on a computer is quicker.
 
-1. **Rest mode:** stop the PS5 from sleeping during long transfers. Go to **Settings → System → Power Saving → Set Time Until PS5 Enters Rest Mode** and pick **Don't Put in Rest Mode** (or a long time) while playing media.
-2. **Start Luac0re:** start SWRR, click the right half of the touchpad at PRESS START, then go to **OPTIONS → HALL OF FAME**. Wait until the loader says it is listening on port 9026.
-   - If it says the exploit failed, close SWRR and try again.
-   - Never save from SWRR's own menus, and never confirm a "corrupted, will be deleted" prompt.
-3. **Find the PS5's address:** **Settings → Network → Connection Status → View Connection Status → IPv4 Address**. Then on the computer:
+No drive? Go on with steps 3 and 4: the game selector then has nothing to start, and [Install over network](#no-drive-install-over-the-network) puts a game into SWRR's saved data.
 
-   ```bash
-   export PS_HOST=192.168.1.123
-   ```
+## 3. Start Luac0re
 
-   You can usually skip this: the tools find the console themselves, and with several on they pick the one where Luac0re's loader is listening. `python3 ghostldr/host/console.py --list` shows what they see; `--console 192.168.1.123` on any command picks one.
-4. **Check the setup** with the loader still listening:
+1. Start SWRR, click the right half of the touchpad at PRESS START, then go to **OPTIONS → HALL OF FAME**. Wait until the loader says it is listening on port 9026. If it says the exploit failed, close SWRR and try again.
+2. Find the PS5's address: **Settings → Network → Connection Status → View Connection Status → IPv4 Address**. It is `CONSOLE` below.
 
-   ```bash
-   python3 ghostldr.py doctor
-   ```
+Never save from SWRR's own menus, and never confirm a "corrupted, will be deleted" prompt.
 
-   It prints one PASS, WARN or FAIL line per check: Python's version, the prebuilt core against `core.json`, the size of the Lua payload, whether UDP 18194 and TCP 18195 are free on this computer, and whether Luac0re's loader answers on the PS5, then the USB drives mounted on this computer and the games on them. Fix any FAIL before going on: each says what to do. `WARN title dump` is normal with a release: it has no name table to check the dump against. Doctor can't see the firewall, so the ports still need allowing as above.
+## 4. Boot
 
-## 3. Copy the game to the USB drive
-
-Plug the drive into the computer and copy the game onto it, naming the dump's folder (the one with `eboot.bin`, `sce_module` and `sce_sys` in it):
-
-```bash
-python3 ghostldr.py copy /path/to/CUSA11456/app0
-```
-
-- **Which drive:** the only exFAT or FAT drive mounted on the computer. With several, name it after the dump: `/Volumes/MYDRIVE` on macOS, a drive letter such as `E:\` on Windows, usually `/media/<you>/<drive>` on Linux.
-- **What it writes:** `ghostldr/CUSA11456/` on the drive: the game's `app0` as it is, a `prefix` file that names its progress save, and its name and art for the game selector (`meta.bin`). `--folder "Games/Ghost of Tsushima"` puts it somewhere else: any folder name works. Nothing else on the drive changes.
-- **It checks first:** the drive's format (FAT32 holds no file of 4 GiB or more) and its free space. If either rules the game out, it stops before copying anything.
-- **Progress:** a bar with the speed and the time left.
-- **Then it checks the copy:** every file's size, and the files a boot reads first byte for byte. A file the drive got wrong is copied again.
-- **If it stops,** run it again: files already on the drive are kept, and the copy carries on.
-- **More games:** run it with another dump; games sit side by side on the drive.
-- **Copying by hand** (Finder, Explorer) works too: put the dump's folder anywhere on the drive. If it has no `sce_sys/param.sfo` (Ghost's often hasn't), put the title ID in the folder's name, like `Ghost of Tsushima (CUSA11456)`. [usb.md](usb.md#what-goes-on-the-drive) has what goes on the drive.
-- **Check what the PS5 will find:** `python3 ghostldr.py check` lists the games on the drive, where their progress goes, and what is wrong with any folder it can't start.
-- **Without unplugging the drive from the PS5:** while a game runs through ghostldr, the PS5 serves FTP on port 1212 ([ftp.md](ftp.md)), so `python3 ghostldr.py copy /path/to/dump ps5` copies onto the drive in the PS5. That goes at network speed, and a game with as many files as Ghost takes about an hour, so copying on the computer is quicker.
-
-Then eject the drive from the computer and plug it into the PS5.
-
-## 4. Play
-
-1. **Restart SWRR:** close SWRR (PS button → SWRR's card → Options → Close Game), start it again and open HALL OF FAME.
-2. Start the game:
-
-   ```bash
-   python3 ghostldr.py boot
-   ```
-
-   With several games on the drive, the game selector shows them on the TV; `python3 ghostldr.py boot CUSA11456` (or `boot ghost`) starts one straight away.
-
-The PS5 mounts the drive itself as the boot starts: the log shows `approot: USB drive … mounted at /ghostldr_usb`, a line per game it found, and the one it starts. Before sending, it prints a `preflight:` line. With a release it says `skipped`: the release has no name table to check the dump against, so it boots straight on.
-
-The first boot takes a minute or two. On a new save Ghost goes through brightness, audio output, difficulty and experience (keep Standard: only English audio is installed), then the opening. Its progress goes into SWRR's saved data as `GHOSTSAVE`, and SWRR's own save is never touched.
-
-`ghostldr.py boot` keeps printing the console's log until you press Ctrl+C; stopping it doesn't stop the game. The session is also written to `build/ghostldr/run.log` (`python3 ghostldr.py logs --saved` prints its end). That file is what to look at, or share, if something goes wrong.
-
-While the game runs, the PS5 also serves FTP on port 1212 ([ftp.md](ftp.md)): the boot prints the address.
-
-**Every later session:** keep the drive plugged into the PS5, close SWRR, start it again, open HALL OF FAME, and run the same command.
-
-## The saved-data way
-
-Instead of steps 3 and 4, the game can be installed into SWRR's saved data over the network. It needs no drive, but a big game takes a while to install, and loads more slowly.
-
-### Install onto the PS5 (once, about 40–100 minutes)
-
-With SWRR at the Luac0re loader:
-
-```bash
-python3 ghostldr.py install /path/to/CUSA11456/app0
-```
-
-It first lays the game out for SWRR's save containers on the computer (a few minutes, in `build/ghostfs/CUSA11456/`; for Ghost, 40,100 files, 53.3 GiB, in 56 containers), then sends it. The two steps are `ghostldr/host/gfs_pack.py` and `gfs_install.py`, which take more options.
-
-- **Progress:** it prints a line per container (`[12/56] GHOST011: 992 MiB in 75 s ...`) and finishes with `install complete`.
-- **Check first:** `python3 ghostldr/host/gfs_install.py --dry-run` shows what is installed and what would change, without sending anything.
-- **If it stops** (network, PS5 asleep, SWRR closed): run the same command again. It keeps what was already sent. If SWRR closed, start Luac0re again first.
-- **`no space left on the console's storage`:** free space on the PS5 and run it again.
-- **A slow default network link** on the computer: `install DUMP --interface en0` sends through a chosen interface (macOS).
-- **Speed:** about 25 MB/s, which is as fast as the PS5 writes save data, so Ghost takes about 40 minutes. A wired PS5 or a good 5 GHz Wi-Fi link keeps up with that.
-
-The data lands in SWRR's saved data under the signed-in user, as 58 entries: `GHOST000`…`GHOST055`, `GHOSTINDEX` and `GFSCATALOG` (an install made with v0.1 has `GFSINDEX` instead of `GHOSTINDEX`, and keeps working). It belongs to the SWRR region you installed from: US and EU SWRR each keep their own saved data, so install from the one you will play in.
-
-- **Not enough space:** the installer checks before sending and stops without changing anything. Free space on the PS5 and run it again.
-- **Other titles** can be installed next to Ghost. Bloodborne 1.09 reaches gameplay; other games are untested ([compatibility.md](compatibility.md)).
-
-### Play an installed game
-
-1. **Restart SWRR after the install.** The loader can be left busy afterwards. Close SWRR (PS button → SWRR's card → Options → Close Game), start it again and open HALL OF FAME.
-2. Start the game:
-
-   ```bash
-   python3 ghostldr.py boot
-   ```
-
-   With no game on a USB drive in the PS5 it boots the installed ones; `boot --installed` skips the drive.
-
-Everything else is as in step 4: the preflight line, the first boot, the log and `GHOSTSAVE`. **Every later session:** close SWRR, start it again, open HALL OF FAME, and run the same command. The install is only needed once per PSN user.
-
-## Boot with no computer
-
-`ghostldr.py boot` builds the bootstrap on the computer and serves the PS5 two files while it starts. The release page also has the same boot as three files that need none of that: no Python, no firewall rules, no program left running. Anything that can send a file over TCP will do: `nc` on macOS or Linux, or a payload-sender app on a phone or on Windows.
-
-| File | What it is |
-|---|---|
-| `ghostldr.lua` | The bootstrap, with ghostldr's core, the title profiles and the defaults in it. Sent to Luac0re's loader. |
-| `ghostldr-ext.bin` | Boots a game: ghostldr's extension (every HLE family and the NID table, plus the ELF loader, the FTP server and the USB drive support) and the game selector. |
-| `ghostldr-elfldr.bin` | Starts the [ELF loader](elfldr.md) instead: only what it needs, about 110 KB. |
-
-`ghostldr.lua` takes only a `.bin` from the same release: download them together, and check them with `SHA256SUMS.txt` as in step 1.
-
-1. **Start Luac0re** as in step 2: SWRR, the right half of the touchpad at PRESS START, then **OPTIONS → HALL OF FAME**, until the loader listens on port 9026. Plug in the USB drive with the games, if you use one ([step 3](#3-copy-the-game-to-the-usb-drive)).
-2. **Send the bootstrap.** `CONSOLE` is the PS5's address (**Settings → Network → Connection Status → View Connection Status**):
-
-   ```bash
-   nc CONSOLE 9026 < ghostldr.lua
-   ```
-
-   Luac0re's dialog on the TV now shows ghostldr's prompt, with the PS5's address:
-
-   ```
-   ghostldr 236824efa5f1862e
-
-   Send ghostldr-ext.bin (games)
-   or ghostldr-elfldr.bin (ELF loader)
-   to 192.168.1.123:9021
-
-   Waiting 5 minutes
-   ```
-
-   It listens on TCP 9021, the port the PS5 scene uses for ELF loaders, which is free on a stock console. On a jailbroken PS5 whose own ELF loader has 9021 already, it takes **9022** and says `(9021 is taken)`. The same goes into a notification. Whatever happens next shows in that dialog too: what was received, a refusal and why, the ELF loader's port, the way back to Luac0re's loader.
-3. **Send the bundle** to that port within five minutes:
-
-   ```bash
-   nc CONSOLE 9021 < ghostldr-ext.bin
-   ```
-
-   It boots as `python3 ghostldr.py boot` does: the games on a USB drive in the PS5 first, else the ones installed in SWRR's saved data, in the game selector on the TV (even when there is only one), and the FTP server on port 1212 while the game runs. `nc` then shows the console's log, as `ghostldr.py boot` does, starting with:
-
-   ```
-   ghostldr: received ghostldr-ext.bin (2823146 bytes, build …) from 192.168.1.23 on TCP 9021
-   ghostldr: booting: the games on a USB drive in the PS5, else the installed ones; the log follows here …
-   [ghostldr 96] ghostldr core at 0x9009d8000, ctx flags 4bc000000201002
-   ```
-
-   Press Ctrl+C when you've seen enough: that stops the log, not the game. A payload-sender app that closes the connection right after sending works too; the game starts all the same, and only the log is lost.
-
-That's all. `ghostldr.lua` keeps the bundle on the PS5 (below), so every later session needs only the first file: close SWRR, start it again, open HALL OF FAME, and send `ghostldr.lua`.
-
-### Later sessions: ghostldr.lua alone
-
-The first time a bundle arrives, `ghostldr.lua` saves it, as it came, in a save container of its own in SWRR's saved data: `GLDRCACHE`, 16 MiB of the console's storage (the bundle is 2.8 MB, or 110 KB for `ghostldr-elfldr.bin`). The log says `cached ghostldr-ext.bin in this console's saved data (…): from now on send ghostldr.lua alone`. It holds one bundle, the last one sent. Next time:
+Send the bootstrap to Luac0re's loader:
 
 ```bash
 nc CONSOLE 9026 < ghostldr.lua
 ```
 
-- **The cached `ghostldr-ext.bin` opens the game selector at once,** on a PS5 or a PS4, with the games on a USB drive first, else the installed ones. It shows even when there is only one game: pick it to start it.
-- **The ELF loader beside the selector (PS5):** while the selector shows, the [ELF loader](elfldr.md) listens on 9021 (9022 on a jailbroken console): send payloads there as usual. When you pick a game it stops, once any payload still running has finished (the TV says so), and is removed from memory before the game loads. With only `ghostldr-elfldr.bin` cached, the ELF loader starts alone; send `boot` there to open the game selector once `ghostldr-ext.bin` is cached, or `quit` to go back to Luac0re's loader.
-- **The log:** with nothing sent there is no connection for the log to go to. To see a boot's log, send `log` to the ELF loader while the selector shows (`echo log | nc CONSOLE 9021`, or `nc` and type it): that connection gets the log, then the game's.
-- **A newer bundle at the ELF loader:** send `ghostldr-ext.bin` (or `ghostldr-elfldr.bin`) to the ELF loader's port, while the selector shows or with the ELF loader alone. A `.bin` that isn't ghostldr's (no `GLDRBNDL` header) is never taken for one: an ELF renamed `.bin` runs as a payload, anything else is refused with the reason. It is recognised by its header, checked, and kept in the cache, and the TV and the connection say `The new ghostldr ext file will be applied on the next ghostldr boot.` The ELF loader carries on as it was. A bundle from another release is kept too, and needs that release's `ghostldr.lua` next time. `ghostldr-elfldr.bin` doesn't replace a cached `ghostldr-ext.bin`, whose extension has the ELF loader too.
-- **A new release:** its `ghostldr.lua` finds the old release's bundle in the cache, shows `Version mismatch: the cached ghostldr-ext.bin is from build …, this ghostldr.lua expects build …` above the usual prompt, and the bundle you send replaces it.
-- **A damaged cache** (cut short, or a checksum that doesn't match: the selector's here, the extension's in the core, both before anything runs) is deleted, the TV says `The cached bundle is damaged: deleted. Send the bundle again.` above the prompt, and what you send is cached again.
-- **No room:** if the console's storage can't take 16 MiB more, the log says `not cached: the console's storage is full …; ghostldr goes on without it`, and the next session asks for the bundle again.
-- **Clearing it:** send `forget` to the ELF loader (`echo forget | nc CONSOLE 9021`): the cache is deleted and the prompt asks for a bundle. From a computer, `python3 ghostldr.py clear-cache` (or `ghostldr/host/run.py clear-cache`) deletes it while Luac0re's loader listens. With only `nc`, put one line before the script: `(echo "GHOSTLDR_CLEAR_CACHE = true"; cat ghostldr.lua) | nc CONSOLE 9026` clears it, then asks for a bundle. Deleting `GLDRCACHE` in SWRR's saved data (as under [Removing it](#removing-it)) works too; it is not a game's progress.
+Luac0re's dialog on the TV now shows ghostldr's prompt, with the PS5's address:
 
-### Notes
+```
+ghostldr 236824efa5f1862e
 
-- **Ports:** the bundle goes to 9021, or 9022 when 9021 is taken. The ELF loader takes over the bundle's port once ghostldr.lua has closed it: 9021 on a stock console, 9022 on a jailbroken one. A bundle sent to it is still taken (it is told apart from a payload by its first bytes). Both are on the TV, on the connection and in a notification.
-- **Nothing arrives in five minutes:** `ghostldr.lua` closes its port and gives SWRR back to Luac0re's loader untouched, and the TV says so above Luac0re's own text; send it again.
-- **Anything else on that port is refused,** with the reason and what it expected on the TV, on its connection and in a notification, and `ghostldr.lua` keeps waiting for the right file: an ELF (send `ghostldr-elfldr.bin` first), a Lua script (that goes to 9026), a bundle that arrived cut short, or one from another release: `version mismatch: ghostldr-ext.bin is from build …, this ghostldr.lua is build …: send ghostldr.lua and ghostldr-ext.bin from the same release`.
-- **What it doesn't do:** it takes `ghostldr.py boot`'s defaults and no options: no `--title` (the selector asks when there are several games), no `--folder`, no memory knobs, and no preflight check against your dump. A title profile written on your computer isn't in it; the release's own profiles are. For any of that, use `ghostldr.py boot`.
-- **On a PS4** the full bundle boots as on a PS5 (from saved data; [ps4.md](ps4.md)), and is cached the same way; the ELF loader's is refused, since the ELF loader needs a PS5, and the TV says to send `ghostldr-ext.bin` instead. In Jak X with UltraC0re, send `ghostldr.lua` to 8888 instead of 9026; that is untested, and `ghostldr.py boot` is the tested way there.
-- **Which `nc`:** Luac0re's loader runs a script once its connection ends. macOS's `nc` ends it after the file by itself; on Linux add `-N` to the first command (`nc -N CONSOLE 9026 < ghostldr.lua`), or `-q 0` with the traditional netcat, or the command waits until you press Ctrl+C. The bundle needs neither: `ghostldr.lua` reads its length from its header. On Windows, use a payload-sender app, or `nc` in WSL.
+Send ghostldr-ext.bin (games)
+or ghostldr-elfldr.bin (ELF loader)
+to 192.168.1.123:9021
 
-## Names and pictures in the game selector (optional)
-
-With more than one game to choose from, or with `ghostldr.py boot --select`, ghostldr shows a game picker in the style of the PS4 home screen before the game loads ([selector.md](selector.md)). A dump without `sce_sys` (Ghost's usually has none) shows its name from ghostldr's profile and a tile drawn in its colour.
-
-To show the game's official icon and background instead, for a game on a USB drive, copy it again with `--fetch-art` (only the name and art are rewritten; the game's files are already there):
-
-```bash
-python3 ghostldr.py copy /path/to/CUSA11456/app0 --fetch-art
+Waiting 5 minutes
 ```
 
-For an installed game, with SWRR at the Luac0re loader:
+Within five minutes, send the games' bundle to that port:
 
 ```bash
-python3 ghostldr/host/gfs_install.py --update-meta --title CUSA11456 --fetch-art
+nc CONSOLE 9021 < ghostldr-ext.bin
 ```
 
-Both download the art from the PlayStation Store's public pages into `build/ghostfs/CUSA11456/art`. The installed version writes one small entry, `GHOSTMETA` (about 3 MB), to the PS5; the game data, its progress and SWRR's own save are not touched, and nothing is reinstalled. Your own pictures work too: `--icon tile.png --backdrop background.png`. Restart SWRR before the next `ghostldr.py boot`.
+On a jailbroken PS5, whose own ELF loader has 9021 already, the prompt says `9022` instead: send it there. The game selector opens on the TV ([step 5](#5-the-game-selector)), and `nc` shows the console's log until you press Ctrl+C (that stops the log, not the game). A payload-sender app that closes the connection right after sending works too; only the log is lost.
 
-## Troubleshooting
+- **Which `nc`:** Luac0re's loader runs a script when its connection ends. macOS's `nc` ends it by itself; on Linux add `-N` to the first command (`nc -N CONSOLE 9026 < ghostldr.lua`), or `-q 0` with the traditional netcat. The bundle needs neither.
+- **Something else sent to 9021** (a Lua script, an ELF, a bundle from another release, one cut short) is refused with the reason on the TV and on its connection, and the prompt keeps waiting.
+- **Nothing in five minutes:** the TV says it timed out and SWRR is back at Luac0re's loader: send `ghostldr.lua` again.
 
-Each command says what went wrong and what to do; these are the common ones.
+### Every later session: ghostldr.lua alone
 
-- **`the PS5 at … isn't listening for ghostldr`:** Luac0re's loader isn't listening. Open HALL OF FAME again, or close SWRR, start it again and open HALL OF FAME. After a game has run, SWRR always needs restarting first.
-- **`no PS4 or PS5 answered discovery`:** the PS5 is off, asleep or on another network. Set `PS_HOST` to its address (step 2) or pass `--console ADDRESS`.
-- **`another run.py, ghostldr.py or the app is running on this computer`:** UDP 18194 or TCP 18195–18196 is taken. Stop the other one (Ctrl+C), then run the command again.
-- **`no USB drive is mounted on this computer`** (copy, check): plug it in, or name its folder after the dump.
-- **`… has no eboot.bin: point at the game's folder`** (copy, install): name the folder that has `eboot.bin` in it.
-- **`receiver did not come up` or `is SWRR at the Luac0re loader?`** (install): the loader isn't listening. Open HALL OF FAME again, or restart SWRR first.
-- **`building the core failed`:** run it from the release folder, which has the prebuilt core; `ghostldr.py` uses it.
-- **The boot command times out while sending:** restart SWRR, open HALL OF FAME, and send again.
-- **Black screen with no log lines on the computer:** the firewall is blocking UDP 18194, or `PS_HOST` points at another device.
-- **`extension: the console did not fetch it`, or the log stops at `ext: no extension from the computer`:** the firewall is blocking TCP 18195. Nothing was started: allow it and run the same command again.
-- **Any other `ext:` line that stops the boot:** the log follows it with a `[hint]` line giving the cause and the fix, for example a core and `ext.bin` from different builds.
-- **`approot: no USB drive: plug one into the PS5`:** the PS5 sees no drive. Plug it into the PS5 (exFAT or FAT32), restart SWRR and boot again. (Without `--usb`, the boot then tries the installed games.)
-- **`approot: … holds no games`, or `… is not among the games`:** the PS5 found no game, or not that one, on the drive. `python3 ghostldr.py check` on the computer shows what it finds there and what is wrong with any folder; the log lists every folder it couldn't start, with the reason.
-- **`approot: stopped looking after 256 folders`:** the drive has many folders; keep games near its top, or boot with `--folder "My Games"`.
-- **`approot: libSceUsbStorage lacks what mounting needs`:** USB drives were tested on a 13.60 PS5, and this console's firmware differs. Use [the saved-data way](#the-saved-data-way) instead.
-- **`ghostfs: … no index <prefix>INDEX (809f0008)`:** the console's save list has no entry for the game's index: it was deleted, or the console's saved-data database was put back from a copy made before the install (the files can still be there, unopenable). Install the game again (`install`, or `gfs_install.py --title ID --force`): it sends what the console can't open. Installing doesn't touch its progress (`<prefix>SAVE`).
-- **Not sure where it fails:** `python3 ghostldr.py doctor` checks Python, the prebuilt files, the computer's ports, the PS5's loader and the USB drives mounted here in one go.
+The first bundle you send is kept on the PS5, in SWRR's saved data (`GLDRCACHE`, 16 MiB). From then on, send only the first file:
+
+```bash
+nc CONSOLE 9026 < ghostldr.lua
+```
+
+- **The game selector opens at once,** with the games on the USB drives and the installed ones.
+- **On a PS5 the ELF loader listens beside it** on 9021 (9022 on a jailbroken console), until you pick a game: send payloads there as usual ([elfldr.md](elfldr.md)). When you pick a game, it waits for any payload still running (the TV says so) and goes away before the game loads.
+- **The log:** nothing was sent, so no connection carries it. `printf 'log\n' | nc CONSOLE 9021` while the selector shows makes that connection the log, the game's included. It is also on the USB drive ([When something goes wrong](#when-something-goes-wrong)).
+- **A new release:** its `ghostldr.lua` sees the old bundle, says `Version mismatch` above the usual prompt, and the bundle you send replaces it. A newer bundle sent to the ELF loader while the selector shows is kept for the next boot: "The new ghostldr ext file will be applied on the next ghostldr boot."
+- **A damaged cache** is deleted, the TV says `The cached bundle is damaged: deleted. Send the bundle again.`, and the prompt asks for it.
+- **Clearing it:** `printf 'forget\n' | nc CONSOLE 9021` while the ELF loader listens, or delete `GLDRCACHE` as under [Removing it](#removing-it).
+
+After a game has run, SWRR must be closed and started again before the next boot: PS button, SWRR's card, Options, Close Game. Then HALL OF FAME, and `ghostldr.lua` again.
+
+## 5. The game selector
+
+The selector shows every game it found, on the USB drives in the PS5 and installed in SWRR's saved data, even when there is only one ([selector.md](selector.md)):
+
+| Button | What it does |
+|---|---|
+| Left / Right, L1 / R1 | Move along the row (L1 and R1 jump five). |
+| Cross | Start the selected game. |
+| Triangle or Options | The game's details: title ID, version, where it is, and what's wrong with it, if anything. |
+| Square | Settings (as does the gear at the end of the row). |
+
+**Settings** (Up and Down choose a section, Right or Cross goes in, Left or Circle comes back out):
+
+- **Games:** the drive check. Every game, with `Ready`, or what is wrong and what to do in plain words: an install that isn't finished, a folder on a drive that can't start and why (no `eboot.bin`, no title ID, ...), a second copy of a game.
+- **USB drives:** each drive the PS5 has, its file system (exFAT or FAT32, with FAT32's 4 GiB limit), size and free space, the games found on it and the folders that can't start. **Look again** reads the drives again after you plug one in.
+- **Network:** the PS5's address, the ports ghostldr uses, and **Install over network** ([below](#no-drive-install-over-the-network)).
+- **Logs:** **Write logs to the USB drive** (on by default), and where the log goes ([logs.md](logs.md)).
+- **Advanced:** what were developer options, as switches: **Show the system's dialogs**, **Plan memory automatically**, **Keep Remote Play on**, and **Reset to defaults**. A change counts at once, for the game you pick next, and is kept in SWRR's saved data (`GLDRCONF`).
+- **Safe mode:** if a boot with Advanced's switches stops before the selector comes up, the next boot leaves them out once, and the TV says "Settings > Advanced is left out of this boot", so a switch can't lock you out. Change it there, or **Reset to defaults**.
+- **About:** ghostldr's version and build, the bundle cache, the console and its firmware, SWRR's region, and **Close ghostldr**: after a Yes, SWRR is back at Luac0re's loader ("Closed in Settings"), which takes `ghostldr.lua` again.
+
+Pick a game with Cross. The first boot of a game takes a minute or two. On a new save Ghost goes through brightness, audio output, difficulty and experience (keep Standard: only English audio is installed), then the opening. A game's progress goes into SWRR's saved data (`GHOSTSAVE` for Ghost, `<prefix>SAVE` for others), never onto the drive, and SWRR's own save is never touched. While a game runs, the PS5 also serves FTP on port 1212 ([ftp.md](ftp.md)).
+
+## No drive: install over the network
+
+A game can go into SWRR's saved data from a browser on a computer or phone. Nothing else is needed on that device ([manager.md](manager.md#install-a-game)).
+
+1. **Start the installer,** either way:
+   - **From the game selector:** Settings → Network → **Install over network**. A card on the TV shows the address to open, a QR code of it for a phone's camera, and a token.
+   - **Without booting ghostldr:** with Luac0re's loader listening, `nc CONSOLE 9026 < manager.lua`. A notification shows the address and the token; open `http://CONSOLE:8090/install`.
+2. **Open the address** in the browser and choose the game:
+   - **Choose folder…** on a computer: the dump's folder, the one with `eboot.bin` (dragging it onto the page works too);
+   - **Choose .zip…** on a phone (or a computer): a `.zip` of that folder.
+3. **Check** the name, title ID, version and size the page read, type the **token** from the TV, and **Install**.
+
+The page shows the progress, the speed and the time left. On a PS5 it goes at 22–25 MB/s, the rate the PS5 writes saved data at: a 50 GB game takes about 35 minutes. Keep the page open, and the phone or computer awake, until it says the game is installed.
+
+- **Keep the PS5 out of rest mode** while it installs (Settings → System → Power Saving).
+- **Interrupted** (Wi-Fi, a sleeping phone): the page carries on by itself. Closed the page? Choose the same game again and Install: what's on the PS5 already is kept.
+- **Not enough space:** the page checks before sending anything and says how much is missing.
+- **In the selector**, the new game joins the row when it's installed: pick it. With `manager.lua`, press **Exit** on the page (Luac0re's loader is back), then send `ghostldr.lua`.
+- **Remove:** the page's list of installed games has a **Remove** button per game. Its data goes; its progress stays.
+- **Several games** live side by side; installing one never deletes another.
+
+## When something goes wrong
+
+**ghostldr says every failure on the TV:** what went wrong and what to do, and where the log is ([failures.md](failures.md) lists every message):
+
+- **A boot that stops** before the game runs shows its message in the system's dialog. Press OK: SWRR goes back to Luac0re's loader, which says "The boot stopped. Back to Luac0re's loader." Send `ghostldr.lua` again. **If you press OK on that dialog too and the TV goes black, the next `ghostldr.lua` isn't taken** (seen in the final test): close SWRR from the PS button menu, start it again and open HALL OF FAME.
+- **A game that crashes** shows ghostldr's own page in place of its picture: close SWRR from the PS button menu and start it again. **A game that quits** closes SWRR (a PS5 starts it again).
+- **A game that stops drawing** gets a notification; it may come back by itself.
+- **The system's own error** ("Something went wrong with this game or app", CE-108255-1) is a crash ghostldr couldn't catch: press OK and start SWRR again. If it happens again at the same place, this game may not work with ghostldr yet.
+
+**The logs** ([logs.md](logs.md)): with a USB drive in the PS5, each boot's log is a file on it, `ghostldr/logs/NNNN_YYYY-MM-DD_HHMM.log` (the 30 newest boots are kept), so you can read it on a computer or attach it to a bug report. Without a drive it is `/temp0/ghostldr.log` inside SWRR, which ghostldr's FTP server shows while a game runs, and the connection the bundle was sent on (or `printf 'log\n' | nc CONSOLE 9021` beside the selector) gets it as it happens.
+
+**Common problems:**
+
+- **"No games found." or "No games on the USB drive."** Check the drive in Settings → USB drives (it may need **Look again**) and Settings → Games, which says what is wrong with each folder. Folders deeper than four levels aren't searched.
+- **"The game's folder doesn't say which game it is.":** name the folder after the title ID, like `My Game (CUSA12345)`, or copy the dump's `sce_sys/param.sfo` with it.
+- **Reads from the drive time out:** the game's files can't be read and each read fails after about 25 seconds. That's the drive's USB link: unplug the drive and plug it in again, preferably in a rear USB port. A bus-powered SSD or hard drive beside another drive may need a port of its own (or a powered hub). If reads still fail, restart the PS5 ([usb.md](usb.md#pulling-the-drive-out-rest-mode)).
+- **The drive was pulled out** while a game runs: the game waits, and the TV says to plug it back in. Plug the same drive back in (any port) and the game carries on. **Rest mode** with a game running: wake the PS5 and the game carries on ([usb.md](usb.md#pulling-the-drive-out-rest-mode)).
+- **`Version mismatch`, or a bundle refused as damaged:** `ghostldr.lua` and the `.bin` are from different releases. Send both from the same one.
+- **"The game needs more memory than SWRR has.":** this game can't run with ghostldr yet (on a PS4, most games: [ps4.md](ps4.md)).
 - **The PS5 asks for the disc:** the SWRR disc must be in the console that runs it.
+
+## On a PS4, or in Jak X
+
+- **PS4:** the same two files boot ghostldr there, and the cached bundle opens the selector at once, without the ELF loader (it needs a PS5; `ghostldr-elfldr.bin` is refused). Games come from SWRR's saved data only: install them over the network ([above](#no-drive-install-over-the-network); about 40 MB/s was measured on a PS4 Pro). Homebrew and small titles run; the selector marks a game's dump `May not run on PS4` and asks before it boots one. Logs stay in `/temp0/ghostldr.log`. [ps4.md](ps4.md) has why big games can't run.
+- **Jak X with UltraC0re** (Europe, CUSA07992, update 1.04) is experimental, with its own installs of each game. `ghostldr.lua` would go to UltraC0re's port 8888 instead of 9026, but the two-file boot hasn't been tried there: [jakx.md](jakx.md) has the tested way.
 
 ## Removing it
 
-**A game on the USB drive:** delete its folder (`ghostldr/CUSA11456`, or wherever you put it) from the drive on the computer, or:
+- **A game on the USB drive:** delete its folder on a computer. Its progress stays in SWRR's saved data.
+- **An installed game:** **Remove** in the install page's list of installed games (its progress stays). Or by hand in **Settings → Saved Data and Game/App Settings → Saved Data (PS4) → Console Storage → Star Wars Racer Revenge**: its data containers (`GHOST000`…`GHOST055` for Ghost), its index (`GHOSTINDEX`) and, if it's there, `GHOSTMETA`.
+- **The bundle cache,** `GLDRCACHE` (16 MiB): `printf 'forget\n' | nc CONSOLE 9021` while the ELF loader listens, or delete it in the same Saved Data list. **ghostldr's settings,** `GLDRCONF`: Settings → Advanced → **Reset to defaults** puts every switch back; the container can be deleted in the same list.
+- **Keep** the games' progress (`GHOSTSAVE`, `<prefix>SAVE`) and the Luac0re save (`SLUS-20268` on US SWRR, `SLES-50366` on EU) unless you mean to remove them too.
 
-```bash
-python3 ghostldr/host/usb_drive.py remove /Volumes/MYDRIVE CUSA11456
-```
+## Tested for 1.0
 
-Its progress, `GHOSTSAVE`, stays in SWRR's saved data.
+On a stock PS5 at 13.60 with US SWRR and two exFAT drives, booted this way (two files with `nc`, then `ghostldr.lua` alone, picks in the selector):
 
-**An installed game,** with Luac0re's loader listening:
+- the selector with 43 games from both drives, and every Settings section;
+- **Install over network** of a homebrew from the selector, and its removal (driven by the install page's own code from a computer, not through a browser's window);
+- a payload on the ELF loader beside the selector, then a game picked (it waited for the payload);
+- Ghost of Tsushima from a drive into gameplay, and a save; Bloodborne 1.09 from a drive, Continue into gameplay;
+- each boot's log on the drive, and a boot failure's message on the TV;
+- Apollo Save Tool from a drive.
 
-```bash
-python3 ghostldr/host/gfs_install.py --remove CUSA11456
-```
+Before the final build: a FAT32 stick, a game running through rest mode, and a drive pulled out and plugged back in (both with a test homebrew; the last fix to the drive's return is tested offline only). On a 12.50 PS4 Pro: the selector, Settings, and Install over network from `manager.lua` and from the selector (a folder and a `.zip`, an install cut short and carried on), then the installed homebrew booted from the row. The install page itself was tried in a desktop browser against an offline build; an install from a phone's browser hasn't been tried on a console yet.
 
-This deletes Ghost's data and index and keeps its progress, `GHOSTSAVE` (add `--remove-saves` to delete that too). Other installed titles and SWRR's own save are not touched.
+## For developers
 
-Or delete the entries by hand in **Settings → Saved Data and Game/App Settings → Saved Data (PS4) → Console Storage → Star Wars Racer Revenge**: `GHOST000`…`GHOST055` and `GHOSTINDEX` (or `GFSINDEX`).
-
-Keep `GHOSTSAVE` (Ghost's progress) and the Luac0re save (`SLUS-20268` on US SWRR, `SLES-50366` on EU) unless you mean to remove those too.
-
-**The bundle cache** (`GLDRCACHE`, 16 MiB, [above](#later-sessions-ghostldrlua-alone)): `python3 ghostldr.py clear-cache`, `forget` sent to the ELF loader, or delete `GLDRCACHE` in the same Saved Data list.
+The Python tools (`ghostldr.py copy`, `check`, `boot`, `install`, `run.py` and its developer options), building from source and making a release are in the repository: [host-tooling.md](host-tooling.md), [ghost-on-stock-ps5.md](ghost-on-stock-ps5.md) and [architecture.md](architecture.md).

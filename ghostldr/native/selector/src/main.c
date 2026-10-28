@@ -13,6 +13,9 @@
  *      something moves; for a save tool (its profile's "save_tool"), asks
  *      whose saves to open, mounts the title (ghost_api.title_pick) and runs
  *      the save scan (ghost_api.save_prescan) with its progress on screen;
+ *      Settings (setui.c, info.c) at the end of the row, also with one
+ *      title or none: the drive check, the network installer (whose new
+ *      titles join the row), the log on the USB drive, Close ghostldr;
  *   5. tears everything down: closes VideoOut, the system font, unloads the
  *      system modules it loaded, and unmaps and releases both blocks, then
  *      returns the chosen title.  The core then overwrites this image.
@@ -490,6 +493,59 @@ static void clock_now(struct sel *S, struct plat *P)
     ui_set_clock(S, (int)(day / 3600), (int)(day / 60 % 60), h24 != 0);
 }
 
+/* ---- the network installer changed the catalogue: the row again ---- */
+static struct title *reload(struct sel *S, struct plat *P, struct title *titles)
+{
+    if (!P->reload_ok || P->library || !P->ghostfs)
+        return titles;
+    struct cat_title *old = P->cat;
+    int had = P->ncat, n = cat_count(P), fresh = 0;
+    struct title *t = n > 0 ? sel_alloc(S, sizeof(struct title) * (u64)n) : titles;
+    if (n < 0 || !t || (n > 0 && cat_load(S, P, n) != 0)) {
+        P->cat = old, P->ncat = had;
+        LOG(P, "settings: catalogue again: unreadable, kept as it was");
+        return titles;
+    }
+    if (n == 0)
+        P->ncat = 0;
+    for (int i = 0; i < P->ncat; i++) {
+        const struct cat_title *c = &P->cat[i];
+        int k = -1;
+        for (int j = 0; j < had && k < 0; j++)
+            if (!strcmp(old[j].id, c->id))
+                k = j;
+        if (k >= 0) {
+            t[i] = titles[k]; /* its tiles as they are */
+            P->cat[i].meta = old[k].meta, P->cat[i].meta_state = old[k].meta_state, P->cat[i].indexed = old[k].indexed;
+            memcpy(P->cat[i].file, old[k].file, sizeof(old[k].file));
+            P->cat[i].cap = old[k].cap;
+        } else {
+            if (P->tiles_used >= P->ntitle_cap) { /* the heap has room for so many tiles */
+                LOG(P, "settings: catalogue again: no room for more titles' tiles (%d): kept as it was", P->ntitle_cap);
+                P->cat = old, P->ncat = had;
+                return titles;
+            }
+            memset(&t[i], 0, sizeof(t[i]));
+            str_copy(t[i].id, c->id, sizeof(t[i].id));
+            str_copy(t[i].name, c->name, sizeof(t[i].name));
+            str_copy(t[i].version, c->version, sizeof(t[i].version));
+            str_copy(t[i].prefix, c->prefix, sizeof(t[i].prefix));
+            t[i].size = c->total;
+            if (ui_title_alloc(S, &t[i]) != 0) {
+                P->cat = old, P->ncat = had;
+                return titles;
+            }
+            P->tiles_used++, fresh++;
+            LOG(P, "title %d: %s '%s' %s, %lu MiB: installed over the network", i, c->id, c->name, c->version,
+                c->total >> 20);
+        }
+        t[i].flags = (t[i].flags & TITLE_DUMP) | title_flags(c);
+    }
+    ui_set_titles(S, t, P->ncat);
+    LOG(P, "settings: catalogue again: %d title(s) (had %d, %d new)", P->ncat, had, fresh);
+    return t;
+}
+
 /* ---- one step: the pad, the clock, the users, the UI, a frame if it changed ---- */
 static void tick(struct sel *S, struct plat *P, u64 now, int *boot)
 {
@@ -557,6 +613,7 @@ extern const u8 sel_font_glf[];
 #define HEAP_TEMP (24u << 20) /* META's head, a backdrop's QOI and its pixels; or a title's index, a PNG file
                                  and its decoded image, PngDec's work memory */
 #define HEAP_SYSFONT (8u << 20)
+#define HEAP_SETTINGS (1u << 20) /* Settings' rows and what they show */
 
 __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_api *api, char chosen[16])
 {
@@ -588,10 +645,15 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         P.library ? P.root : !P.ghostfs ? "app root" : P.catalogue ? "GFSCATALOG" : P.legacy[0] ? P.legacy : "nothing",
         force ? ", shown on request" : ask_only ? ", a save tool: whose saves to open" : "",
         P.ps4 ? "; a PS4: game dumps are marked and ask before they boot" : "");
-    if (n <= 0 || (n == 1 && !force && !ask_only))
+    if (n < 0) /* the core shows the selector with one title or none too (Settings) */
         return -1;
     if (n > SEL_MAX_TITLES)
         n = SEL_MAX_TITLES;
+    /* an install over the network may add titles while it runs (ghostfs only) */
+    P.reload_ok = P.ghostfs && !ask_only && info_has_netinst();
+    P.ntitle_cap = n + (P.reload_ok ? NET_EXTRA : 0);
+    if (P.ntitle_cap > SEL_MAX_TITLES)
+        P.ntitle_cap = SEL_MAX_TITLES;
 
     /* 2. memory: two whole blocks at the top of the largest free run */
     int sysfont = !(P.ctx->flags & CTX_FLAG_SEL_FONT_BUILTIN);
@@ -599,8 +661,9 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     size_t run_len = 0;
     P.k->avail_direct(0, (off_t)P.k->direct_size(), 0x200000, &run, &run_len);
     P.video_size = 2 * FB_SLOT;
-    P.heap_size = (HEAP_BASE + (u64)n * HEAP_TITLE + HEAP_FONT + HEAP_TEMP + (sysfont ? HEAP_SYSFONT : 0) +
-                   sizeof(struct sel) + 0x1FFFFF) & ~0x1FFFFFull;
+    P.heap_size = (HEAP_BASE + (u64)P.ntitle_cap * HEAP_TITLE + (P.reload_ok ? (u64)n * HEAP_TITLE / 4 : 0) +
+                   HEAP_FONT + HEAP_TEMP + HEAP_SETTINGS + (sysfont ? HEAP_SYSFONT : 0) + sizeof(struct sel) +
+                   0x1FFFFF) & ~0x1FFFFFull;
     u64 top = (u64)run + run_len;
     P.video = block_alloc(&P, P.video_size, top, 3 /* write-combined, GPU */, 0x33 /* CPU+GPU RW */, &P.video_phys);
     P.heap = block_alloc(&P, P.heap_size, top - P.video_size, 0 /* write-back */, 0x03, &P.heap_phys);
@@ -620,10 +683,10 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         S = sel_alloc(&boot, sizeof(*S));
     }
     S->plat = &P;
-    if (cat_load(S, &P, n) != 0)
+    if (n && cat_load(S, &P, n) != 0)
         goto out;
     n = P.ncat;
-    struct title *titles = sel_alloc(S, sizeof(struct title) * (u64)n);
+    struct title *titles = sel_alloc(S, sizeof(struct title) * (u64)(n ? n : 1));
     if (!titles)
         goto out;
     for (int i = 0; i < n; i++) {
@@ -635,12 +698,9 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         titles[i].size = c->total;
         titles[i].flags = title_flags(c);
         str_copy(titles[i].note, c->note, sizeof(titles[i].note));
+        P.tiles_used++;
         if (P.library) { /* its folder, as the drive shows it: without the mount point and app0 */
-            const char *w = c->path;
-            int len = (int)c->dir_len, mp = str_len("/ghostldr_usb/");
-            if (len > mp && !memcmp(w, "/ghostldr_usb/", (size_t)mp))
-                w += mp, len -= mp;
-            str_copy(titles[i].where, w, len + 1 < (int)sizeof(titles[i].where) ? len + 1 : (int)sizeof(titles[i].where));
+            info_title_where(&P, c->path, c->dir_len, titles[i].where, (int)sizeof(titles[i].where));
             if (!titles[i].name[0] && !titles[i].id[0]) { /* nothing names it: its folder's name */
                 const char *base = titles[i].where;
                 for (const char *c = base; *c; c++)
@@ -648,6 +708,12 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
                         base = c + 1;
                 str_copy(titles[i].name, base, sizeof(titles[i].name));
             }
+        }
+        if (!P.ghostfs && !P.library && !strncmp(P.root, "/ghostldr_usb", 13)) { /* the one game on a USB drive */
+            u32 len = (u32)strlen(P.root);
+            if (len > 5 && !strcmp(P.root + len - 5, "/app0"))
+                len -= 5;
+            info_title_where(&P, P.root, len, titles[i].where, (int)sizeof(titles[i].where));
         }
         LOG(&P, "title %d: %s '%s' (name %s) %s, %lu MiB, %s %s%s, %s%s", i, c->id, c->name, name_src(c->name_src),
             c->version, c->total >> 20, P.library ? "at" : "index", P.library ? c->path : c->index[0] ? c->index : "-",
@@ -678,6 +744,9 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     for (int i = 0; i < n && i < 2; i++) /* the first icons; the rest load while the row is on screen */
         ui_load_icon(S, i);
 
+    /* Settings > Advanced: the switches, and a safe-mode boot's notice */
+    conf_load(&P);
+
     /* 4. screen and pad */
     if (video_open(&P) != 0) {
         LOG(&P, "no video output: booting the default title");
@@ -694,6 +763,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     /* 5. the loop: 30 fps at most, frames drawn only when something changed */
     u64 now = P.proc_time(), started = now;
     P.prev = now;
+    if (P.conf_safe) /* ghostldr.lua left the switches out: the last boot with them never got here */
+        ui_toast(S, now, "Settings \xE2\x80\xBA Advanced was left out of this boot: the last one with it stopped early");
     frame(S);
     for (;;) {
         now = P.proc_time();
@@ -701,6 +772,16 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         tick(S, &P, now, &boot);
         if (S->scan_req)
             run_scan(S, &P, S->sel, first + S->sel);
+        if (S->reload_req) {
+            S->reload_req = 0;
+            titles = reload(S, &P, titles);
+            n = P.ncat;
+        }
+        if (boot == UI_QUIT) {
+            choice = SEL_EXIT_LOADER;
+            LOG(&P, "Close ghostldr after %lu s: back to Luac0re's loader", (now - started) / 1000000);
+            break;
+        }
         if (boot >= 0) {
             choice = first + boot;
             memcpy(chosen, P.cat[boot].id, 16);
@@ -725,6 +806,7 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
 
 out:
     /* 6. give everything back */
+    info_netinst_stop(&P);
     video_close(&P);
     sysfont_close(&P);
     sys_unload(&P, &P.mod_png, "libScePngDec");

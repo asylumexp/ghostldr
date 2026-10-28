@@ -178,3 +178,6 @@ int main(int argc, char **argv)
     logf("imports %u, relocation rc %d", g_imports, rc);
     return 0;
 }
+
+/* fail.c: the loader's notes for a failure's message (not looked at here) */
+void fail_note(u32 kind, const char *path) { (void)kind, (void)path; }

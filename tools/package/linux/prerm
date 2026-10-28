@@ -1,7 +1,0 @@
-#!/bin/sh
-# Bytecode Python wrote in /opt/ghostldr (when the app ran as root) isn't part of the package.
-set -e
-if [ -d /opt/ghostldr ]; then
-    find /opt/ghostldr -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
-fi
-exit 0

@@ -66,6 +66,8 @@ class SaveDataFamily(unittest.TestCase):
                      "mount NULL: PARAMETER 0x809F0000", "a 7th: MOUNT_FULL 0x809F000C",
                      "unmount with a file open: BUSY", "the unmount committed the title's file",
                      "Get2 before Setup2: MEMORY_NOT_READY", "it lives in GTESTM05SAVE", "title_store_read",
+                     "GTESTM07SAVE made again with 404 blocks", "GTESTM06SAVE and its 4 KiB untouched",
+                     "slot 0 untouched in GTESTSAVE", "an existing container keeps its size and the title's files",
                      "sd_list: SAVE0 with its size, icon and userParam", "a save filled to its size still commits",
                      "no real call ever named SWRR's save"):
             self.assertIn(f"savedata_host: ok {line}", out)

@@ -17,12 +17,13 @@
 #pragma once
 #include "ghost.h"
 
-#define GHOST_API_VERSION 1
+#define GHOST_API_VERSION 2 /* 2: diag, arena_drop, arena_adopt, reclaim (1.0) */
 #ifndef GHOST_ABI
 #define GHOST_ABI 0u /* the Makefile passes the headers' checksum */
 #endif
 
 struct lib_title;
+struct bx_reclaim;
 
 struct ghost_api {
     u32 version; /* GHOST_API_VERSION */
@@ -192,6 +193,21 @@ struct ghost_api {
      * them.  Once: later calls return the first one's result.  0, or < 0
      * (the boot then stops). */
     int (*title_pick)(const char *title, int index);
+    /* ---- logs and failures (docs/logs.md, docs/failures.md) ----
+     * The log's files and the failure screens' state, shared with the
+     * extension (log.c, fail.c; ext/src/logfile.c, failure.c).  NULL when
+     * the first log line could not map it. */
+    struct ghost_diag *(*diag)(void);
+    /* The emulator's JIT buffers for the reclaim (struct ext_early.reclaim):
+     * a buffer leaves the code region (arena.c arena_drop), and a fresh
+     * object becomes it (arena_adopt: mapped read-execute at [start, end),
+     * the compiler writes it at start + delta). */
+    void (*arena_drop)(u64 start);
+    int (*arena_adopt)(u64 start, u64 end, s64 delta);
+    /* The planner's reclaim (bigexec.c), which the extension does (its
+     * ext_early sets it; ext/src/reclaim.c) to keep the core small: 0, or
+     * < 0 with r->why said.  NULL: this extension has none. */
+    int (**reclaim)(struct bx_reclaim *r);
 };
 
 /* A game found under an app root that is a folder of games (a USB drive, or
@@ -248,6 +264,40 @@ struct ext_early {
     int (*save_prescan)(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg);
 };
 typedef const struct ext_early *(*ext_early_fn)(const struct ghost_api *api);
+
+/* The reclaim (docs/compatibility.md, "Large executables").  Every
+ * reference to the emulator's JIT buffers arena_buffers lists is dropped
+ * (descriptors in both processes, the compiler's mapping and the view here
+ * at each one's home), which gives their JIT memory back; then fresh
+ * objects are made: n for the module's code, of size[i] (obj[i]: where the
+ * compiler writes it, an RX alias of it here, not mapped yet), and one for
+ * the other modules of at least amin bytes and at most the largest buffer's
+ * size, mapped where that buffer was and adopted as the code region.  The
+ * other modules' object gets amin + BX_RECLAIM_ROOM first (prx loaded at run
+ * time), then the code objects grow over the text after them, each up to
+ * limit[i] (its read-only data: less direct memory), then it gets the rest.
+ * Nothing is dropped unless the JIT memory measured free plus the buffers
+ * holds it all.  The extension's own code is placed before (ext.c's early
+ * entry), in a block of its own. */
+#define BX_RECLAIM_MAX 6 /* bxplan.h BX_MAX_VIEWS */
+#define BX_RECLAIM_ROOM (8UL << 20)
+struct bx_reclaim {
+    const char *name; /* the module, for the log */
+    /* in: its code runs and data segments (bxplan.c), the end of its text,
+     * and what the other modules need (bxplan.c bx_pick's keep) */
+    struct bx_range runs[6], forbid[8];
+    u32 nruns, nforbid;
+    u64 text, keep;
+    /* out: n objects of size[i] at module offset off[i]; amin: the other
+     * modules' least (keep + a header, at least 1 MiB) */
+    u32 n;
+    s64 off[BX_RECLAIM_MAX];
+    u64 size[BX_RECLAIM_MAX], amin;
+    u64 limit[BX_RECLAIM_MAX]; /* the most size[i] may grow to (the next object's offset, or the text's end) */
+    struct jit_obj obj[BX_RECLAIM_MAX];
+    u64 free_before, free_after, arena; /* KiB-exact bytes, for the log and tools */
+    char why[240];   /* what went wrong, for the user */
+};
 
 /* ---- what the extension registers and returns ---- */
 
@@ -325,6 +375,12 @@ struct ext_exports {
      * them; NULL in an extension without drawn dialogs. */
     void (*video_buffers)(s32 handle, s32 start, const u64 *addrs, s32 num, const void *attr);
     void (*pad_state)(s32 handle, u8 *data);
+    /* The watchdog's reads of Ghost of Tsushima 2.18's globals (profile
+     * flag PF_DIAG; ext/src/ghost_watch.c): crash.c calls it with phase 0, 1
+     * and 2 between its own lines, with the core image's range for naming
+     * addresses.  The core checks size before calling it; NULL in the ELF
+     * loader's extension. */
+    void (*title_watch)(u64 eboot, u32 phase, u64 core_lo, u64 core_hi);
 };
 
 typedef const struct ext_exports *(*ext_init_fn)(const struct ghost_api *api);
@@ -375,3 +431,85 @@ struct ext_blob {
 struct ext_reloc {
     u32 offset, addend;
 };
+
+/* ---- logs and failures (core log.c, fail.c, crash.c; ext/src/logfile.c,
+ * failure.c; docs/logs.md, docs/failures.md) ---- */
+#define LOG_TEMP "/temp0/ghostldr.log" /* every line, from the first one: wiped when the console restarts */
+#define LOG_TEMP_OLD "/temp0/ghostldr.1.log"
+#define LOG_TEMP_CAP (8u << 20)
+
+struct ghost_log_file {
+    int fd;         /* -1: none */
+    u32 lost;       /* a write failed and the file was closed: the drive went away */
+    u64 bytes;
+    char path[128]; /* the extension's: past its cap the file is renamed (.1) and started again */
+};
+
+/* A failure, as the screens say it (ext/src/failure.c's messages) */
+enum {
+    FAIL_NONE,
+    FAIL_BOOT,             /* none of these: the code */
+    FAIL_EXT,              /* the extension is missing or damaged (-7) */
+    FAIL_EXT_START,        /* the extension failed to start (-8) */
+    FAIL_NO_DRIVE,         /* usb: and no drive in the console */
+    FAIL_DRIVE_REFUSED,    /* the USB storage service refused the drive */
+    FAIL_NO_FOLDER,        /* usb:/FOLDER is not on the drive */
+    FAIL_NO_GAMES,         /* the drive (or folder) has no games */
+    FAIL_NOT_ON_DRIVE,     /* the game asked for is not on the drive */
+    FAIL_NO_TITLE_ID,      /* a game's folder names no title ID */
+    FAIL_NOTHING_INSTALLED,/* no game on a drive, none installed */
+    FAIL_NOT_INSTALLED,    /* the game asked for is not installed */
+    FAIL_INSTALL_INCOMPLETE,
+    FAIL_INSTALL_DAMAGED,
+    FAIL_FILE_MISSING,     /* note: a file the game needs is not there */
+    FAIL_FILE_READ,        /* note: it could not be read */
+    FAIL_ENCRYPTED,        /* note: it is encrypted (not a decrypted dump) */
+    FAIL_FILE_BAD,         /* note: it is not a PS4 executable the loader can use */
+    FAIL_MEMORY,           /* note: the memory plan: the game cannot fit */
+    FAIL_CODE_SPACE,       /* no executable memory for the game's code (-3) */
+    FAIL_LINK,             /* relocation failed (-4) */
+    FAIL_CODE_WRITE,       /* the code could not be written (-5) */
+    FAIL_THREAD,           /* the main thread was not created */
+    FAIL_CRASH,            /* at run time: the title crashed */
+    FAIL_EXIT,             /* it called _exit */
+    FAIL_RETURNED,         /* its entry returned */
+    FAIL_HANG,             /* it drew nothing new for a long time */
+    FAIL_NO_PICTURE,       /* it never drew anything */
+    FAIL_COUNT
+};
+
+struct ghost_diag {
+    u32 size;
+    volatile int lock;              /* while a line is written or a file swapped */
+    u8 drives;                      /* USB drives seen (the extension) */
+    u8 title;                       /* the title's main thread is about to start, or runs */
+    u8 reserved[6];
+    struct ghost_log_file f[2];     /* [0] LOG_TEMP; [1] this boot's file on a USB drive */
+    u64 start;                      /* f[0]'s size when this boot began */
+    u64 copied;                     /* f[0] up to here is in the drive's file too (attaching copies the rest) */
+    u64 since_sync;                 /* bytes written to the drive's file since its last fsync */
+    /* the extension's code: NULL once it is gone (ext.c) */
+    void (*sink)(const char *line, size_t n); /* takes the log's lines (lock held) */
+    void (*show)(u32 kind, s64 code);         /* a failure on the TV (FAIL_BOOT: code is ghost_boot's result) */
+    /* noted while booting (fail.c): the last module file that failed, and
+     * whether a failure's message was on the TV already */
+    u32 note, shown;
+    char note_path[256];            /* the file, title or folder; or a sentence for the user (bigexec.c's bx_why) */
+    char where[160];                /* where the log goes, for Settings and the messages */
+    /* at run time (crash.c): the crash, for the extension's screen */
+    volatile u32 crashed;           /* 1: reported */
+    s32 sig;
+    u64 rip, addr;
+    char at[96];                    /* the extension's: "eboot.bin+1234" */
+};
+
+/* the state, from the extension (its api; NULL from an older core) */
+#define GHOST_DIAG(api) \
+    ((api)->size >= __builtin_offsetof(struct ghost_api, diag) + 8 && (api)->diag ? (api)->diag() : NULL)
+
+/* the core's side (log.c, fail.c): not for the extension, which has ghost_api */
+struct ghost_diag *log_diag(void);
+void fail_note(u32 kind, const char *path);  /* a title file the loader could not use (FAIL_FILE_*, FAIL_MEMORY) */
+int fail_result(int rc);                     /* a boot's result: a failure is said on the TV */
+void fail_title(u32 kind, s64 code);         /* the title's run ended (FAIL_RETURNED) */
+void fail_notify(const char *text);          /* a system notification */

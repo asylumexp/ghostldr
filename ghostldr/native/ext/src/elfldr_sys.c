@@ -885,9 +885,13 @@ static bool g_can_boot;
 /* the message dialog Luac0re's loader shows its own text in (its
  * show_dialog: Terminate, Initialize, Open with an OK button), opened again
  * for each change */
+void diag_notice(const char *text, u32 seconds) HIDDEN __attribute__((weak)); /* failure.c: not in ext-elfldr.bin */
+
 static void dialog(const char *text)
 {
-    static u8 param[0x88 + 0x20] __attribute__((aligned(16)));
+    /* the user message parameter is 0x30 bytes and more: all of it zero but
+     * the two fields (0x20 left bytes after the array: 0x80B8000A) */
+    static u8 param[0x88 + 0x40] __attribute__((aligned(16)));
     s32 (*term)(void) = host_real_in("libSceMsgDialog", "sceMsgDialogTerminate");
     s32 (*init)(void) = host_real_in("libSceMsgDialog", "sceMsgDialogInitialize");
     s32 (*open)(void *) = host_real_in("libSceMsgDialog", "sceMsgDialogOpen");
@@ -907,8 +911,11 @@ static void dialog(const char *text)
     *(s32 *)(p + 0x58) = uid;
     *(u64 *)(m + 0x08) = (u64)text;                    /* buttonType 0: OK */
     s32 rc = open(p);
-    if (rc != 0)
+    if (rc != 0) {
         logf("elfldr: the TV's dialog did not open (%x)", rc);
+        if (diag_notice) /* a notification shows over anything */
+            diag_notice(text + (strncmp(text, "ghostldr\n\n", 10) == 0 ? 10 : 0), 0);
+    }
 }
 
 void el_ui(unsigned n)

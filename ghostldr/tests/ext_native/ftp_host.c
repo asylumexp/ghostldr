@@ -7,7 +7,9 @@
  *
  * prints "listening PORT" once clients can connect (PORT 0: the port the
  * system picked), then serves until its stdin closes.  The log goes to
- * stderr.  HOME is the directory clients start in (default "/").
+ * stderr.  HOME is the directory clients start in (default "/").  An "r"
+ * on stdin makes the listening sockets again, as after rest mode
+ * (ftp_relisten), and prints "relisten RC".
  */
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -299,9 +301,13 @@ int main(int argc, char **argv)
     }
     printf("listening %d\n", port);
     fflush(stdout);
+    int ftp_relisten(void);
     char c;
     while (read(0, &c, 1) > 0)
-        ;
+        if (c == 'r') {
+            printf("relisten %d\n", ftp_relisten());
+            fflush(stdout);
+        }
     return 0;
 }
 #endif

@@ -133,13 +133,23 @@ extern const struct ext_early g_approot_early HIDDEN;
 /* the title's main thread is next (ext_exports.title_starting) */
 void ftp_title_starting(void) HIDDEN;
 void net_pool_fill(void) HIDDEN; /* hle_net.c */
+void usb_live_start(void) HIDDEN __attribute__((weak)); /* usb_live.c: not in the ELF loader's extension */
 
-/* the title's main thread is next, on the boot thread: the FTP server, and
- * the title's own sockets where SWRR makes none (hle_net.c) */
+/* logs and failures (logfile.c, failure.c; not in the ELF loader's extension) */
+const struct ext_early *diag_early(const struct ext_early *inner) HIDDEN __attribute__((weak));
+void diag_title_starting(void) HIDDEN __attribute__((weak));
+/* the title's main thread is next, on the boot thread: the FTP server, the
+ * title's own sockets where SWRR makes none (hle_net.c), the failure
+ * monitor (failure.c), and the watch on its USB drive and rest mode
+ * (usb_live.c) */
 static void title_starting(void)
 {
     net_pool_fill();
     ftp_title_starting();
+    if (diag_title_starting)
+        diag_title_starting();
+    if (usb_live_start)
+        usb_live_start();
 }
 /* no title: the ELF loader (elfldr_sys.c) */
 int elfldr_main(void) HIDDEN;
@@ -148,13 +158,19 @@ void rawsys_patch_text(struct module *m, u8 *text, u64 size) HIDDEN;
 /* drawn dialogs (dlg_overlay.c); the ELF loader's extension has none */
 void ov_video_buffers(s32 handle, s32 start, const u64 *addrs, s32 num, const void *attr) HIDDEN __attribute__((weak));
 void ov_pad_state(s32 handle, u8 *data) HIDDEN __attribute__((weak));
+/* the watchdog's Ghost 2.18 reads (ghost_watch.c); not in the ELF loader's extension */
+void ghost_watch(u64 eboot, u32 phase, u64 core_lo, u64 core_hi) HIDDEN __attribute__((weak));
+
+/* the planner's reclaim (reclaim.c); not in the ELF loader's extension */
+int jit_reclaim(struct bx_reclaim *r) HIDDEN __attribute__((weak));
 
 const struct ext_early *ext_early(const struct ghost_api *api)
 {
     if (!api || api->version != GHOST_API_VERSION || api->size < sizeof(struct ghost_api))
         return NULL;
     G = api;
-    return &g_approot_early;
+    *api->reclaim = jit_reclaim;
+    return diag_early ? diag_early(&g_approot_early) : &g_approot_early;
 }
 
 const struct ext_exports *ext_init(const struct ghost_api *api)
@@ -191,6 +207,6 @@ const struct ext_exports *ext_init(const struct ghost_api *api)
     }
     g_exports = (struct ext_exports){EXT_EXPORTS_MAGIC, sizeof(g_exports), ext_lookup, lib_policy, g_hle,
                                      g_nhle, nfam, g_nlibs, ext_sysmodule_failed, title_starting, elfldr_main,
-                                     rawsys_patch_text, ov_video_buffers, ov_pad_state};
+                                     rawsys_patch_text, ov_video_buffers, ov_pad_state, ghost_watch};
     return &g_exports;
 }

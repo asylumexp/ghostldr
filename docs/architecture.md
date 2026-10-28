@@ -14,6 +14,7 @@ A map of the repository, for reading or changing the code. To run ghostldr, star
 | `ghostldr/tests/` | Offline tests, below. |
 | `host/payloads/` | **Dev-only console payloads** for a jailbroken console, below. |
 | `tools/fetch_deps.sh` | Fetches the public build inputs: the PS4 symbol names (idc/ps4libdoc) to `build/nid/` and Luac0re 2.4b to `build/luac0re-src/`. |
+| `tools/make_release.py` | Makes a release: the files, their checksums and the zip ([host-tooling.md](host-tooling.md#making-a-release)). `tools/release-README.txt` is the zip's `README.txt`. |
 
 ## The core
 
@@ -44,15 +45,11 @@ In `ghostldr/host/`:
 
 ## Releases
 
-A release zip is this repository plus a prebuilt core and extension: `build/ghostldr/core.bin`, `core.json` and `ext.bin`, all from one build. `selector.bin`, the game selector, is optional and must come from the same build. The core refuses an extension built against other headers.
-
-With these, booting needs only Python: no LLVM and no symbol list, since `ext.bin` holds every known PS4 name. The dev payloads are a separate zip; extract it into the same folder (`build/payloads/`).
-
-Next to the zip and the installers (`tools/package/build_all.py`), the release has the two-file boot's files, which need no Python at all: `ghostldr.lua`, `ghostldr-ext.bin` and `ghostldr-elfldr.bin` (below).
+A release is the two-file boot's files and the web manager, which need no Python and no computer program: `ghostldr.lua`, `ghostldr-ext.bin` and `ghostldr-elfldr.bin` (below), and `ghostldr/lua/manager.lua` ([manager.md](manager.md)). `tools/make_release.py` builds them and writes `ghostldr-<version>.zip` (the four, a `README.txt` and their `SHA256SUMS.txt`, flat, reproducible) with the same files beside it for the release page ([host-tooling.md](host-tooling.md#making-a-release)). The zip has no Python and no source: developers take the repository, where `run.py` builds the core, extension and selector itself. The dev payloads for jailbroken consoles are a separate zip; extract it into the repository (`build/payloads/`).
 
 ## Two-file boot
 
-`make -C ghostldr/native` also makes, with `ghostldr/tools/mkbundle.py`, a boot that needs only a network sender ([using-the-release.md](using-the-release.md#boot-with-no-computer)):
+`make -C ghostldr/native` also makes, with `ghostldr/tools/mkbundle.py`, a boot that needs only a network sender ([using-the-release.md](using-the-release.md#4-boot)):
 
 - **`ghostldr.lua`:** `ghostldr/lua/ghostldr.lua` with the core, every profile in `ghostldr/data/titles` (nothing of the computer it was built on), `run.py boot`'s default flags and app root (`auto`), and the pins of the two bundles: `GHOSTLDR_MODE = "listen"`. (`run.py` prepends `GHOSTLDR_MODE = "connect"`, and the script works as before.)
 - **`ghostldr-ext.bin`:** a header, `ext.bin`, then `selector.bin`.
@@ -88,7 +85,7 @@ In the core, all this is a context flag, two short branches (`ext.c`, `sel.c`) a
 
 ## The bundle cache
 
-After the first time, only `ghostldr.lua` is sent: it keeps the last bundle it took in a save container of its own, and runs it from there when it is this build's ([using-the-release.md](using-the-release.md#later-sessions-ghostldrlua-alone)).
+After the first time, only `ghostldr.lua` is sent: it keeps the last bundle it took in a save container of its own, and runs it from there when it is this build's ([using-the-release.md](using-the-release.md#every-later-session-ghostldrlua-alone)).
 
 - **Where:** `GLDRCACHE` in the host's saved data (SWRR's; Jak X's under UltraC0re), one file, `bundle.bin`: the bundle as it came, header first. The container is sized as `gfs_pack.data_blocks` sizes a small one: 512 blocks, 16 MiB, for either bundle. One bundle at a time: a new one deletes the container and makes it again. `ghostldr-elfldr.bin` doesn't replace a cached `ghostldr-ext.bin`, whose extension has the ELF loader too.
 - **How:** in Lua, with the ghostfs installer's calls (`gfs_receiver.lua`): `sceSaveDataMount` from the eboot's import table, the file calls through libkernel's own exports (or the commit stays busy), the unmount waited out. A bundle is cached as soon as it is taken, before the core has its memory. No core code: everything the cache needs is in `ghostldr.lua` or the extension.

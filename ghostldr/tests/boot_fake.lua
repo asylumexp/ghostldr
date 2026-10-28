@@ -525,6 +525,8 @@ local function fake_elfldr(ctx, flags)
             rc = 1
         elseif step == "forget" then
             rc = 3
+        elseif step == "close" then   -- the selector's Settings: Close ghostldr (SEL_EXIT_LOADER)
+            rc = -20
         elseif step:match("^pick:") then
             local index, title, user = step:match("^pick:(-?%d+):([^:]*):?(%x*)$")
             local blk = read64(ctx + 0x210)

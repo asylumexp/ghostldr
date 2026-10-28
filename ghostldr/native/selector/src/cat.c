@@ -457,3 +457,31 @@ s64 cat_file(struct sel *S, struct plat *P, int t, int which, void *buf, u64 cap
     }
     return (s64)done;
 }
+
+/* The titles installed in saved data (GFSCATALOG), for Settings when the row
+ * shows a USB drive's games: how many, at most max */
+int cat_installed(struct sel *S, struct plat *P, struct sel_inst *out, int max)
+{
+    struct cat_hdr h;
+    memset(&h, 0, sizeof(h));
+    if (read_in(P, "GFSCATALOG", "catalog.bin", 0, &h, sizeof(h)) != (s64)sizeof(h) || memcmp(h.magic, "GFSC", 4) ||
+        h.header_size < 64 || h.entry_size < CAT_ENTRY || h.count > SEL_MAX_TITLES)
+        return 0;
+    u64 size = (u64)h.header_size + (u64)h.count * h.entry_size, m = sel_mark(S);
+    u8 *buf = sel_alloc(S, size);
+    int n = 0;
+    if (buf && read_in(P, "GFSCATALOG", "catalog.bin", 0, buf, size) == (s64)size)
+        for (u32 i = 0; i < h.count && n < max; i++, n++) {
+            const u8 *e = buf + h.header_size + (u64)i * h.entry_size;
+            struct sel_inst *t = &out[n];
+            copy_str(t->id, e, 16, sizeof(t->id));
+            copy_str(t->name, e + 0x40, 64, sizeof(t->name));
+            copy_str(t->version, e + 0x80, 16, sizeof(t->version));
+            memcpy(&t->size, e + 0x98, 8);
+            u32 flags;
+            memcpy(&flags, e + 0xA4, 4);
+            t->incomplete = (flags & CAT_INCOMPLETE) != 0;
+        }
+    sel_release(S, m);
+    return n;
+}

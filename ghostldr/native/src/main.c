@@ -1,5 +1,5 @@
 /* ghostldr entry point.  Lua calls ghost_entry(ctx) through call_rop. */
-#include "ghost.h"
+#include "ghost_api.h"
 
 extern char __image_start[] HIDDEN;
 extern char __rela_start[] HIDDEN;
@@ -38,9 +38,11 @@ __attribute__((section(".text.entry"), force_align_arg_pointer, used)) u64 ghost
              ctx->size >= __builtin_offsetof(struct boot_ctx, fw) + 8 ? ctx->fw & 0xff : 0);
     if (ctx->flags & CTX_FLAG_DIAG)
         return (u64)ghost_diag();
-    if (ctx->flags & CTX_FLAG_ELFLDR)
-        return (u64)ghost_elfldr();
+    if (ctx->flags & CTX_FLAG_ELFLDR) { /* beside the selector, its root can fail as a boot's does */
+        int rc = ghost_elfldr();
+        return (u64)(rc == -6 || rc == -8 ? fail_result(rc) : rc);
+    }
     if (ctx->flags & 1)
         return (u64)ghost_probe();
-    return (u64)ghost_boot();
+    return (u64)fail_result(ghost_boot());
 }

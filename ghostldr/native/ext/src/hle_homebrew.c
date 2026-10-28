@@ -110,6 +110,9 @@ static void hb__exit(int code)
     u64 ra = (u64)__builtin_return_address(0);
     struct module *m = g_main_mod;
     logf("title called _exit(%d) from eboot+%lx: SWRR ends with it", code, m && ra > m->base ? ra - m->base : ra);
+    struct ghost_diag *D = GHOST_DIAG(G); /* said on the TV first (failure.c) */
+    if (D && D->show)
+        D->show(FAIL_EXIT, code);
     if (real)
         real((u64)code, 0, 0, 0, 0, 0);
     for (;;)

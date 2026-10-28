@@ -58,7 +58,8 @@ class ScanTests(unittest.TestCase):
         anywhere_files(cls.fs)
         cls.drive = cls.fs / "mnt/usb1"
         cls.exe = cls.tmp / "approot_host"
-        build_with_hostfs(cls.exe, [HERE / "ext_native/approot_host.c", NATIVE / "ext/src/approot.c"],
+        build_with_hostfs(cls.exe, [HERE / "ext_native/approot_host.c", NATIVE / "ext/src/approot.c",
+                                    NATIVE / "ext/src/usb_live.c"],
                           [HERE / "ext_native", NATIVE / "ext/include", NATIVE / "include"])
 
     @classmethod
@@ -311,7 +312,8 @@ class ExfatTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             exe = tmp / "approot_host"
-            build_with_hostfs(exe, [HERE / "ext_native/approot_host.c", NATIVE / "ext/src/approot.c"],
+            build_with_hostfs(exe, [HERE / "ext_native/approot_host.c", NATIVE / "ext/src/approot.c",
+                                    NATIVE / "ext/src/usb_live.c"],
                               [HERE / "ext_native", NATIVE / "ext/include", NATIVE / "include"])
             src = dump(tmp / "dumps/CUSA12345-app", "CUSA12345", {"data/Ünïcödé.bin": b"u" * 99})
             label = f"GLGAMES{os.getpid() % 1000:03d}"

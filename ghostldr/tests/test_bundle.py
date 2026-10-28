@@ -517,6 +517,57 @@ class BundleCache(FakeConsole):
         self.assertEqual(self.cached(), self.slim.read_bytes())
         self.assertEqual(r["elfldr"], ["elfldr port 9021 can-boot 0", "elfldr listening 9021"])
 
+    # ---- Settings > Advanced: GLDRCONF/settings.txt's flag masks (selector/src/conf.c)
+
+    def conf(self, text: str) -> Path:
+        """GLDRCONF/settings.txt as the selector's Settings leaves it."""
+        d = self.saves / "GLDRCONF"
+        d.mkdir(exist_ok=True)
+        (d / ".blocks").write_text("96")
+        (d / "settings.txt").write_text(text)
+        return d / "settings.txt"
+
+    def test_settings_switches_reach_both_calls(self) -> None:
+        """flags_on is set and flags_off cleared in the selector's call and the game's; pending=1 is
+        written first (the selector clears it when it comes up)."""
+        self.cache()
+        f = self.conf("# ghostldr settings\ndialogs=off\nflags_on=0x400000\nflags_off=0x1000\n")
+        r = self.boot("elfldr=pick:0:CUSA00900")
+        self.assertEqual(len(r["ctxs"]), 2)
+        for c in r["ctxs"]:
+            self.assertEqual(c[FLAGS] & 0x401000, 0x400000)
+        self.assertEqual(f.read_text(), "# ghostldr settings\ndialogs=off\nflags_on=0x400000\nflags_off=0x1000\n"
+                                        "pending=1\n")
+        self.assertLess(r["out"].index("save-umount GLDRCONF"), r["out"].index("core-call"))   # before the core
+
+    def test_settings_safe_mode(self) -> None:
+        """pending=1 left by a boot that never reached the selector: this one goes without the switches
+        to the selector, once (pending=safe), and the TV says so; the game's call, after the selector,
+        has them."""
+        self.cache()
+        f = self.conf("dialogs=off\nflags_on=0x400000\nflags_off=0x0\npending=1\n")
+        r = self.boot("elfldr=pick:0:CUSA00900")
+        self.assertEqual(r["ctxs"][0][FLAGS] & 0x400000, 0)
+        self.assertEqual(r["ctxs"][1][FLAGS] & 0x400000, 0x400000)
+        self.assertEqual(f.read_text(), "dialogs=off\nflags_on=0x400000\nflags_off=0x0\npending=safe\n")
+        self.assertTrue([t for t in r["tv"] if "left out of this boot" in t], r["tv"])
+
+    def test_close_ghostldr_in_settings(self) -> None:
+        """Settings > About > Close ghostldr beside the ELF loader (SEL_EXIT_LOADER, -20): no second call,
+        Luac0re's loader again, and the TV says why."""
+        self.cache()
+        r = self.boot("elfldr=close")
+        self.assertEqual(len(r["ctxs"]), 1)
+        self.assertIn("Closed in Settings.", r["tv"][-1])
+
+    def test_settings_at_their_defaults_change_nothing(self) -> None:
+        """No masks (or no GLDRCONF): the flags are run.py boot's, and nothing is written."""
+        self.cache()
+        self.conf("# ghostldr settings\nflags_on=0x0\nflags_off=0x0\n")
+        r = self.boot("elfldr=pick:0:CUSA00900")
+        self.assertEqual(r["ctxs"][1][FLAGS] & ~CTX_FLAG_BUNDLE, BOOT_FLAGS)
+        self.assertNotIn(("mount", "GLDRCONF 2 0 0"), r["saves"])
+
     # ---- later boots: ghostldr.lua alone
 
     def test_later_boot_opens_the_selector_beside_the_elf_loader(self) -> None:

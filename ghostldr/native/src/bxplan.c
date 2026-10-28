@@ -25,6 +25,12 @@
  * win, then the fewest objects, then the earliest objects (the lowest mask of
  * object indices), then the first found; the largest object left over must
  * hold `keep` bytes (the modules that stay in the arena).
+ *
+ * Fresh objects (bxplan.h bx_fresh), when no cover works and the emulator's
+ * buffers are reclaimed (ext/src/reclaim.c): any 16 KiB multiple can be
+ * created then, so each run gets an object of its own size at its own
+ * offset.  That is the fewest bytes there are; the runs are already 1 MiB or
+ * more apart.
  */
 #include "bxplan.h"
 

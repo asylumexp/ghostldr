@@ -29,6 +29,16 @@
  *                   the rest -> 0 (APOL00004) for user 10000001 (title_user)
  *           apollo-one the save tool alone, not requested (as boot.c shows it
  *                   for a save tool): asked at once, a short scan, no bar -> 0
+ *           one     one title, not requested: shown with its Settings tile
+ *                   (boot.c now shows it); Right, Left, Cross -> 0
+ *           empty   nothing installed: the Settings tile alone; Cross opens
+ *                   Settings, About, Close ghostldr, Yes -> SEL_EXIT_LOADER
+ *           settings two titles, a test module with the fake network installer
+ *                   (tests/selector/netinst_fake); Square, Network, Install over
+ *                   network (it waits, installs, then mounts NETFAKEINSTALLED,
+ *                   after which GFSCATALOG.after is served for GFSCATALOG),
+ *                   Circle stops it; Logs: the switch (a fake log_usb); the row
+ *                   now has three titles: Right, Right, Cross -> 2, the new one
  *
  * Environment: SEL_SHOTS="ms:name,..." saves what is on the screen at each
  * time as OUT_DIR/MODE-name.png.  SEL_BUNDLE=1: the module comes in memory,
@@ -42,6 +52,9 @@ void *sys_map(u64 size);
 void sys_unmap(void *p, u64 size);
 void sys_protect(void *addr, u64 size, int writable);
 int sys_open(const char *path);
+int sys_open_w(const char *path);
+s64 sys_write(int fd, const void *buf, u64 n);
+int sys_mkdir(const char *path);
 s64 sys_read(int fd, void *buf, u64 n);
 s64 sys_pread(int fd, void *buf, u64 n, s64 off);
 int sys_close(int fd);
@@ -325,19 +338,34 @@ static int mounted_now(void)
 }
 
 bool gfs_active(void) { return !str_eq(g_mode, "approot"); }
+static int g_net_installed, g_conf_creates, g_conf_writes;
 int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16])
 {
     char dir[1024];
     fmtx(dir, sizeof(dir), "%s/%s", g_art, dirname);
-    if (mode != 1) {
-        check(0, "the selector mounts read-only");
+    if (g_net_installed && str_eq(dirname, "GFSCATALOG")) /* the network installer wrote a new catalogue */
+        fmtx(dir, sizeof(dir), "%s/GFSCATALOG.after", g_art);
+    if (str_eq(dirname, "NETFAKEINSTALLED")) { /* the fake installer says it installed a title */
+        g_net_installed = 1;
+        say("selector_host: a title was installed over the network");
+        return (int)0x809f0008;
+    }
+    if (mode != 1 && !str_eq(dirname, "GLDRCONF")) {
+        check(0, "the selector mounts read-only (but its own settings, GLDRCONF)");
         return (int)0x809f0001;
+    }
+    if (mode == 6 && sys_file_size(dir) < 0) { /* create: a new container (96 blocks at least) */
+        check(blocks >= 96, "a new container of 96 blocks or more");
+        sys_mkdir(dir);
+        g_conf_creates++;
     }
     if (sys_file_size(dir) < 0)
         return (int)0x809f0008; /* SCE_SAVE_DATA_ERROR_NOT_FOUND */
+    if (mode != 1)
+        g_conf_writes++;
     for (int i = 1; i < 16; i++)
         if (!g_mp[i][0]) {
-            strcpy(g_mp[i], dirname);
+            strcpy(g_mp[i], g_net_installed && str_eq(dirname, "GFSCATALOG") ? "GFSCATALOG.after" : dirname);
             fmtx(mount_point, 16, "/savedata%d", i);
             g_mounts++;
             if (mounted_now() > g_max_mounted)
@@ -383,13 +411,14 @@ static int host_path(char *out, u64 size, const char *path)
 static int k_open(const char *path, int flags, int mode)
 {
     char p[1024];
-    int fd = host_path(p, sizeof(p), path) == 0 ? sys_open(p) : -1;
+    int fd = host_path(p, sizeof(p), path) == 0 ? (flags & 3 ? sys_open_w(p) : sys_open(p)) : -1;
     if (fd < 0)
         return (int)0x80020002;
     g_opens++;
     return fd;
 }
 static ssize_t k_read(int fd, void *buf, size_t n) { return sys_read(fd, buf, n); }
+static ssize_t k_write(int fd, const void *buf, size_t n) { return sys_write(fd, buf, n); }
 static ssize_t k_pread(int fd, void *buf, size_t n, off_t off) { return sys_pread(fd, buf, n, off); }
 static int k_close(int fd)
 {
@@ -427,6 +456,22 @@ static const struct step APOLLO[] = {{2500, 0x20},   {2600, 0}, {3000, 0x80},   
                                      {4200, 0x40},   {4300, 0}, {4800, 0x4000}, {4900, 0}, {5500, 0x10},   {5600, 0},
                                      {6200, 0x4000}, {6300, 0}, {8000, 0x2000}, {9000, 0}, {10000, 0x4000}, {10100, 0}};
 static const struct step APOLLO_ONE[] = {{1500, 0x4000}, {1600, 0}};
+/* Right (the gear), Left, Cross */
+static const struct step ONE[] = {{1500, 0x20}, {1600, 0}, {2500, 0x80}, {2600, 0}, {3500, 0x4000}, {3600, 0}};
+/* Cross (Settings), Down x5 (About), Right, Cross (Close ghostldr), Left (Yes), Cross */
+static const struct step EMPTY[] = {{1500, 0x4000}, {1600, 0}, {1800, 0x40}, {1900, 0}, {2000, 0x40},   {2100, 0},
+                                    {2300, 0x40},   {2400, 0}, {2600, 0x40}, {2700, 0}, {2900, 0x40},   {3000, 0},
+                                    {3300, 0x20},   {3400, 0}, {3700, 0x4000}, {3800, 0}, {4200, 0x80}, {4300, 0},
+                                    {4600, 0x4000}, {4700, 0}};
+/* Square, Down x2 (Network), Right, Down (Install over network), Cross: the
+ * installer (waits, installs a title by 6 s); Circle stops it, Left; Down
+ * (Logs), Right, Cross (the switch: off); Circle, Circle (Settings closes);
+ * Right x2 (the new title), Cross */
+static const struct step SETTINGS[] = {
+    {1500, 0x8000}, {1600, 0}, {2000, 0x40}, {2100, 0}, {2300, 0x40}, {2400, 0}, {2700, 0x20}, {2800, 0},
+    {3100, 0x40},   {3200, 0}, {3500, 0x4000}, {3600, 0}, {8000, 0x2000}, {8100, 0}, {8400, 0x80}, {8500, 0},
+    {8800, 0x40},   {8900, 0}, {9200, 0x20}, {9300, 0}, {9600, 0x4000}, {9700, 0}, {10000, 0x2000}, {10100, 0},
+    {10400, 0x2000}, {10500, 0}, {11000, 0x20}, {11100, 0}, {11500, 0x20}, {11600, 0}, {12500, 0x4000}, {12600, 0}};
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
 
 static int pad_open(s32 user, s32 type, s32 index, const void *param) { return user == 0x10000001 ? 5 : -1; }
@@ -435,8 +480,10 @@ static int pad_read(s32 handle, u8 *data)
 {
     shots();
     const struct step *s = str_eq(g_mode, "multi") ? MULTI : str_eq(g_mode, "ps4") ? PS4 : str_eq(g_mode, "apollo") ? APOLLO
-                         : str_eq(g_mode, "apollo-one") ? APOLLO_ONE : SINGLE;
-    int n = str_eq(g_mode, "ps4") ? N(PS4) : str_eq(g_mode, "apollo") ? N(APOLLO) : str_eq(g_mode, "apollo-one") ? N(APOLLO_ONE) : 6;
+                         : str_eq(g_mode, "apollo-one") ? APOLLO_ONE : str_eq(g_mode, "one") ? ONE
+                         : str_eq(g_mode, "empty") ? EMPTY : str_eq(g_mode, "settings") ? SETTINGS : SINGLE;
+    int n = str_eq(g_mode, "ps4") ? N(PS4) : str_eq(g_mode, "apollo") ? N(APOLLO) : str_eq(g_mode, "apollo-one") ? N(APOLLO_ONE)
+          : str_eq(g_mode, "one") ? N(ONE) : str_eq(g_mode, "empty") ? N(EMPTY) : str_eq(g_mode, "settings") ? N(SETTINGS) : 6;
     u32 ms = (u32)((g_now - 1000000) / 1000), b = 0;
     for (int i = 0; i < n; i++)
         if (ms >= s[i].ms)
@@ -508,6 +555,15 @@ static int save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total
     g_scan_cancels += stop != 0;
     return (int)(done / 4);
 }
+/* ---- Settings: the core's log switch (a fake); the network installer is the
+ * module's own (a test build linked with tests/selector/netinst_fake) ---- */
+static int g_pages;
+static void *f_page_alloc(size_t n)
+{
+    g_pages++;
+    return sys_calloc(n);
+}
+static void f_page_free(void *p, size_t n) { g_pages--; }
 static u32 f_profile_has(u32 mask) { return str_eq(g_mode, "apollo-one") ? mask & PF_SAVE_TOOL : 0; }
 static const char *f_title_id(void) { return str_eq(g_mode, "apollo-one") ? "APOL00004" : ""; }
 static int param_int(s32 id, s32 *v)
@@ -735,6 +791,7 @@ int main(int argc, char **argv)
     parse_shots();
     K = (struct kfuncs){0};
     K.usleep = k_usleep, K.open = k_open, K.read = k_read, K.pread = k_pread, K.close = k_close, K.stat = k_stat;
+    K.write = k_write;
     K.munmap = k_munmap, K.alloc_direct = k_alloc_direct, K.map_direct = k_map_direct;
     K.direct_size = k_direct_size, K.avail_direct = k_avail_direct, K.avail_flex = k_avail_flex;
     K.module_list = k_module_list, K.module_info = k_module_info, K.load_start_module = k_load_start_module;
@@ -760,8 +817,9 @@ int main(int argc, char **argv)
     cx->staging_size = 4u << 20, cx->staging = (u64)sys_calloc(cx->staging_size);
     cx->app_root = (u64)(str_eq(g_mode, "approot") ? "/data/test/app0" : "ghostfs");
     int apollo = str_eq(g_mode, "apollo") || str_eq(g_mode, "apollo-one");
-    cx->flags = (str_eq(g_mode, "skip") || apollo ? 0 : CTX_FLAG_SELECT) | 2 |
-                (str_eq(g_mode, "single") || str_eq(g_mode, "multi") || str_eq(g_mode, "ps4") || apollo
+    int settings = str_eq(g_mode, "one") || str_eq(g_mode, "empty") || str_eq(g_mode, "settings");
+    cx->flags = (str_eq(g_mode, "skip") || apollo || settings ? 0 : CTX_FLAG_SELECT) | 2 |
+                (str_eq(g_mode, "single") || str_eq(g_mode, "multi") || str_eq(g_mode, "ps4") || apollo || settings
                      ? CTX_FLAG_SEL_FONT_BUILTIN
                      : 0) |
                 (str_eq(g_mode, "ps4") ? CTX_FLAG_PS4 : 0);
@@ -772,6 +830,8 @@ int main(int argc, char **argv)
     a->gfs_active = gfs_active, a->gfs_mount = gfs_mount, a->gfs_umount = gfs_umount;
     a->profile_has = f_profile_has, a->title_id = f_title_id;
     a->title_user = &g_user_chosen, a->title_pick = title_pick, a->save_prescan = save_prescan;
+    a->page_alloc = f_page_alloc, a->page_free = f_page_free;
+
 
     u64 size = (u64)sys_file_size(argv[2]);
     const char *in_mem = sys_getenv("SEL_BUNDLE");
@@ -792,15 +852,24 @@ int main(int argc, char **argv)
     char title[16];
     /* boot.c: show when ghostfs left the choice to it (several titles: apollo),
      * with run.py --select, or for a save tool the core has (apollo-one) */
-    int pick = sel_run((cx->flags & CTX_FLAG_SELECT) || str_eq(g_mode, "apollo") || f_profile_has(PF_SAVE_TOOL), title);
+    /* and (now) with one title or none, when no title was asked for: one, empty, settings */
+    int pick = sel_run((cx->flags & CTX_FLAG_SELECT) || str_eq(g_mode, "apollo") || f_profile_has(PF_SAVE_TOOL) || settings,
+                       title);
 
-    int want = str_eq(g_mode, "multi") ? 2 : str_eq(g_mode, "ps4") ? 1 : str_eq(g_mode, "skip") || str_eq(g_mode, "badcrc") ? -1 : 0;
+    int want = str_eq(g_mode, "multi") || str_eq(g_mode, "settings") ? 2 : str_eq(g_mode, "ps4") ? 1
+             : str_eq(g_mode, "skip") || str_eq(g_mode, "badcrc") ? -1 : str_eq(g_mode, "empty") ? SEL_EXIT_LOADER : 0;
     say("selector_host: %s chose %d (%.16s)", g_mode, pick, pick >= 0 ? title : "-");
     check(pick == want, "the expected title was chosen");
     if (str_eq(g_mode, "multi"))
         check(str_eq(title, "CUSA00003"), "its ID is returned");
     if (str_eq(g_mode, "ps4"))
         check(str_eq(title, "CUSA00001"), "its ID is returned");
+    if (str_eq(g_mode, "settings")) {
+        check(str_eq(title, "CUSA00042"), "the title installed over the network was chosen");
+        check(g_net_installed && g_pages == 0, "the network installer ran, installed, and gave its memory back");
+        check(g_conf_creates == 1 && g_conf_writes == 1, "GLDRCONF made once, written once (the log switch)");
+        check((cx->flags & (1ull << 24)) != 0, "the log switch applied to this boot (CTX_FLAG_NO_USB_LOG)");
+    }
     if (apollo) {
         check(str_eq(title, "APOL00004"), "its ID is returned");
         check(g_picks == 1 && str_eq(g_picked, "APOL00004") && g_picked_index == 0, "the save tool mounted once, by its place");
@@ -812,12 +881,13 @@ int main(int argc, char **argv)
     } else {
         check(g_user_chosen == 0 && g_picks == 0 && g_scans == 0, "no user, mount or scan for other titles");
     }
-    int shown = want >= 0;
+    int shown = want >= 0 || want == SEL_EXIT_LOADER;
     if (shown) {
         check(g_vo_open == 1 && g_vo_closed == 1, "VideoOut opened once and closed");
         check(g_vo_rate == 1, "flip rate 30 Hz");
         check(g_registered && g_flips > 2, "frames were flipped");
-        check(g_png_decodes >= 1, "PNGs decoded through libScePngDec");
+        if (!str_eq(g_mode, "empty"))
+            check(g_png_decodes >= 1, "PNGs decoded through libScePngDec");
         for (int i = 0; i < g_nshots; i++)
             check(g_shot_done[i], g_shot_name[i]);
     } else {

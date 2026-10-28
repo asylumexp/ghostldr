@@ -1,7 +1,8 @@
-# The web manager: saves and installed titles from a browser
+# The web manager: install games, and manage saves, from a browser
 
 `ghostldr/lua/manager.lua` is a small web server that runs inside SWRR, started through Luac0re's loader like the installer. A browser on the same network can then:
 
+- **install a game** into SWRR's saved data from its folder or a `.zip`, on a computer or a phone, with no Python ([Install a game](#install-a-game));
 - see the installed titles and their save containers;
 - **download a save** to the computer, as a `.tar` file;
 - **restore a save** from such a file, into the title's existing save container or a new one;
@@ -10,6 +11,51 @@
 - stop the manager, which hands Luac0re's loader back.
 
 It needs nothing but Luac0re: no jailbreak, no payloads.
+
+## Install a game
+
+A game goes into SWRR's saved data (no USB drive) from a browser: the page reads the game's files on the computer or phone and the console stores them. Nothing else is needed: no Python, no app, no jailbreak.
+
+### Start the installer
+
+Either of these serves the same page:
+
+- **From ghostldr's game selector:** Settings (□) → Network → **Install over network**. The TV shows the address and a token, and the install's progress. Circle stops it (hold it during an install). This needs ghostldr booted (two files with `nc`, or `ghostldr.lua` alone once its bundle is cached), but nothing installed: with no games the selector shows only Settings.
+- **Without the selector, from Luac0re's loader:** send `manager.lua` like any script, from a computer or a payload sender app:
+
+  ```bash
+  nc 192.168.1.123 9026 < manager.lua
+  ```
+
+  The PS5 shows the address and the token in a notification. Open `http://<address>:8090/install` (the manager's page has an **Install a game** button too).
+
+### Install
+
+1. On a computer or phone on the same network, open the address the TV shows (`http://192.168.1.123:8090/`).
+2. **Choose the game:**
+   - **Choose folder…** (a computer): the game's `app0` folder, the one with `eboot.bin` and `sce_sys`. A folder above it works too; dragging the folder onto the page does the same.
+   - **Choose .zip…** (a phone, or a computer): a `.zip` of that folder. Stored or normally compressed (deflate), up to any size (zip64). The page unpacks it in the browser as it sends; a zip made without compression is lighter on a phone.
+   - Left out: files outside the game's folder, and macOS/Windows clutter (`.DS_Store`, `._*`, `__MACOSX`, `Thumbs.db`).
+3. **Check** what the page read: the name, title ID and version from the game's `param.sfo`, the size, and the containers it will use. A game with no `param.sfo` (some homebrew) needs its title ID typed in.
+4. Type the **token** the TV shows (once per browser tab; `#token=XXXX-XXXX` at the end of the address does it too), then **Install**.
+
+The page shows the progress, the speed and the time left, and says when the game is installed. In the selector, the new game joins the row at once; with `manager.lua`, it is there at the next ghostldr boot.
+
+- **Speed:** about 22–25 MB/s on a PS5, the rate it writes saved data at (a 50 GB game takes about 35 minutes); about 40 MB/s was measured on a PS4 Pro. Busy Wi-Fi on either side sets a slower pace.
+- **Keep the page open** and the phone or computer awake until it says the game is installed.
+- **A dropped connection** (Wi-Fi, a sleeping phone): the page carries on where the console got to, by itself. Closed the page? Choose the same game again and Install: what is on the console already is kept (each finished container is tagged), and the rest is sent.
+- **Pause** stops after the current piece; Install again carries on.
+- **Not enough space:** the page checks before sending anything, says how much is missing, and changes nothing. Free space on the console, or remove a game.
+- **Already installed:** the same game (the same files) sends nothing. A different version replaces the old one's data; its progress (`<prefix>SAVE`) stays.
+- **Remove:** the list of installed games has a **Remove** button per game: its data goes, its saves stay.
+- **Several games** live side by side; installing one never deletes another ([ghostfs-catalogue.md](ghostfs-catalogue.md)).
+- **On a PS4:** homebrew and small titles. The page warns before a game's dump: a PS4 gives SWRR about 2.5 GiB of memory ([ps4.md](ps4.md)).
+
+### What it does, and the same from Python
+
+The page's JavaScript is a port of `gfs_pack.py` and `gfs_install.py`: the same layout (boot files first, a title's profile rules for Ghost of Tsushima), the same `index.bin` and layout id, the same steps (catalogue entry and index marked incomplete first, containers tagged, leftovers swept, index and catalogue completed last). An install from the page and one from `gfs_install.py` recognise each other: either can finish or check the other's. The Python tools stay for developers ([ghost-on-stock-ps5.md](ghost-on-stock-ps5.md)).
+
+The console side only stores bytes, through the [install requests](#the-install-requests) below. A data container comes in one or more requests; the console keeps it open between them, so a dropped connection loses nothing that arrived. On the console the bytes are received and written at the same time: by the native pump under `manager.lua`, by a second thread in the selector's server (`ghostldr/native/netinst/`).
 
 ## Start it
 
@@ -189,6 +235,26 @@ The page uses these; scripts can too. POST requests that change something need t
 | `POST /api/notify` | Shows the token on the PS5 again |
 | `POST /api/exit` | Stops the manager (no token needed) |
 
+### The install requests
+
+The install page uses these; both `manager.lua` and the selector's server (`ghostldr/native/netinst/netinst.c`) answer them. POSTs need the token. Container names are checked: `read` and `probe` take anything but SWRR's own save and a title's progress (`*SAVE`); the writes only the kinds named.
+
+| Request | What it does |
+|---|---|
+| `GET /install` (the selector's server: also `/`) | The page |
+| `GET /api/install/info` | Which server, SWRR's title ID, `ps5`/`ps4`, and the data container being written (`session`: `c`, `size`, `written`, `lid`) |
+| `GET /api/install/read?c=NAME&f=FILE&off=N&len=N` | Up to 4 MiB of a file; `X-Gfs-Status` is 0, the mount's error, or 4294967295 (no such file) |
+| `POST /api/install/auth` | Checks the token |
+| `POST /api/install/probe?c=A,B,...` | Up to 16 containers: whether each exists, and its `gfs.tag` (hex) |
+| `POST /api/install/free?bytes=N` | Whether N bytes fit (1 GiB probes `GFSFREE00`…, deleted again): `have` |
+| `POST /api/install/put?c=NAME&f=FILE&blocks=N` | The body (at most 4 MiB) becomes FILE in a new container of N blocks (deleted first), committed and checked: an index, `GFSCATALOG`, `<prefix>META` |
+| `POST /api/install/write?c=NAME&f=FILE` | The body replaces FILE in an existing container: the catalogue, a `gfs.tag` |
+| `POST /api/install/delete?c=NAME` | Deletes an index, a data container, `<prefix>META` or a `GFSFREEnn` |
+| `POST /api/install/data?c=NAME&blocks=N&size=S&off=O&lid=L` | Bytes O… of a data container's `data.bin`. O = 0 creates the container; it stays open between requests and is committed and checked when S bytes are there (`done`). Any other O must be what the console has (`written`), else 409 with it |
+| `POST /api/install/begin?title=&name=&total=`, `/end?title=&ok=1` | What is being installed, for the TV (the selector counts finished installs and refreshes its row) |
+
+Each reply is `{"ok": true, "rc": 0}` or the save call's error in `rc` (as an unsigned number) and `error`.
+
 For example, a backup from a script:
 
 ```bash
@@ -197,6 +263,7 @@ curl -o GHOSTSAVE.tar "http://192.168.1.123:8090/api/download?c=GHOSTSAVE"
 
 ## For developers
 
+- **The install page's tests:** `test_netinstall.py` runs the page's JavaScript in node (no browser) and holds it to `gfs_pack.py` and `gfs_install.py` byte for byte, reads zips made by Python, installs through `manager.lua` (`manager_fake.lua`'s live mode) and through the selector's server built for the computer (`tests/ext_native/netinst_host.c`), and drops connections in the middle of a container. `ghostldr/tools/netinstall_page.py` keeps the page's title profiles, its copy in `manager.lua` (with the pump) and `ghostldr/data/netinstall.html.gz` (what the selector serves) current; the tests fail when they aren't.
 - **Offline tests:** `python3 -m unittest discover -s ghostldr/tests` runs `manager.lua` end to end against a fake console (`ghostldr/tests/manager_fake.lua`: Luac0re's memory and call API, libkernel's file calls, SWRR's save service and the browser's connections). It needs a desktop Lua 5.3 or 5.4 (`brew install lua`); without one those tests are skipped.
 - **Test containers:** `manager.py --scratch GLDRT` treats containers named `GLDRT` followed by letters and digits as saves of a test "title". This lets you exercise restore, copy and delete on a console without touching any real save. The prefix can't be one a title, index or SWRR uses.
 - **Not there yet:**

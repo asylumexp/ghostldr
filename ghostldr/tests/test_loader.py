@@ -101,6 +101,22 @@ class LoaderTests(unittest.TestCase):
         # the executable's file is freed once its text is written; its names stay (budget.c reads them)
         self.assertIn("main module hb imports libSceVideoOut ", lines)
 
+    def test_openorbis_prx_with_tls(self) -> None:
+        """An OpenOrbis prx is linked -pie: its TLS accesses are local-exec,
+        with no TLS relocation.  Its thread-pointer loads read fs:[-8] like
+        the executable's (the title thread's block, which holds the
+        executable's TLS, where a PS4 puts them too), not SWRR's own TLS."""
+        app0 = self.root / "ootls"
+        (app0 / "sce_module").mkdir(parents=True)
+        tls_text = INTERP + b"\x31\xc0\xc3".ljust(0x20, b"\x90") + GD_FORM + TID_READ
+        (app0 / "sce_module/libtls.prx").write_bytes(module("libtls", tls_text, 0, 0x20, True, False))
+        (app0 / "sce_module/libc.prx").write_bytes(module("libc", INTERP + b"\x31\xc0\xc3" + TID_READ, 0, 0x20,
+                                                           False, False))
+        (app0 / "eboot.bin").write_bytes(module("hb", INTERP.ljust(0x40, b"\x90") + GD_FORM, 0x80, 0x90, True, True))
+        lines = self.run_host(app0, "libtls.prx", "libc.prx")
+        self.assertIn("libtls.prx: local-exec TLS, 2 sites: the executable's", lines)
+        self.assertFalse([ln for ln in lines if ln.startswith("libc.prx: local-exec TLS")], lines)
+
     def run_host_rc(self, app0: Path, *prx: str) -> tuple[int, list[str]]:
         import subprocess
         out = subprocess.run([str(self.exe), str(app0), *prx], capture_output=True, text=True, timeout=120)

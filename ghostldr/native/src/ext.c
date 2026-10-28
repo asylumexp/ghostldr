@@ -363,6 +363,14 @@ void ext_pad_state(s32 handle, u8 *data)
         g_exp->pad_state(handle, data);
 }
 
+/* the watchdog's Ghost 2.18 reads (crash.c, profile flag PF_DIAG): in the extension */
+void ext_title_watch(u64 eboot, u32 phase, u64 core_lo, u64 core_hi)
+{
+    if (g_exp && g_exp->size >= __builtin_offsetof(struct ext_exports, title_watch) + sizeof(void *) &&
+        g_exp->title_watch)
+        g_exp->title_watch(eboot, phase, core_lo, core_hi);
+}
+
 static int ext_selftest(void)
 {
     char nid[12];
@@ -389,6 +397,9 @@ static u64 g_base;
 static struct jit_block g_jb; /* that JIT block, when the code is in one */
 static bool g_in_jit;
 
+/* arena.c's (the console's); this stands in where the core is tested without it */
+__attribute__((weak)) u64 arena_buffer_top(u64 size) { return 0; }
+
 static int ext_place(void)
 {
     const struct ext_blob *h = g_hdr;
@@ -401,10 +412,14 @@ static int ext_place(void)
     bool want_jit = (g_ctx->flags & CTX_FLAG_EXT_JIT) != 0, jit = false;
     u64 base = want_jit ? 0 : arena_small_alloc_top(total, STUB_AREA_KEEP);
     if (!base) {
-        if (jit_block_create(&jb, total, 0) == 0)
+        /* a new JIT block (a 13.60 PS5 has about 768 KiB of new JIT memory
+         * in all); without one, the top of an emulator buffer (arena.c) */
+        if (!(g_ctx->flags & CTX_FLAG_EXT_BUFFER) && jit_block_create(&jb, total, 0) == 0)
             base = jb.rx, jit = true;
         else if (want_jit && (base = arena_small_alloc_top(total, STUB_AREA_KEEP)))
             logf("ext: no new JIT block; using the small RX area");
+        else
+            base = arena_buffer_top(total);
         if (!base) {
             logf("ext: no executable memory for %lx bytes", total);
             return -1;
@@ -477,6 +492,15 @@ int ext_save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), 
     return e && e->save_prescan ? e->save_prescan(user, progress, arg) : -1;
 }
 
+/* The planner's reclaim (bigexec.c) is the extension's: its code is placed
+ * first, in a new JIT block mapped at its home (later, that home could be
+ * where a dropped buffer was, which here is the arena's fresh object). */
+int (*g_reclaim)(struct bx_reclaim *r); /* ghost_api.reclaim: the extension's ext_early sets it */
+int ext_reclaim(struct bx_reclaim *r)
+{
+    return early("the JIT reclaim") && g_reclaim ? g_reclaim(r) : -1; /* -1, r->why empty: bigexec.c says why */
+}
+
 int ext_approot_pick(const char *title, int index, const char **root)
 {
     return g_early ? g_early->approot_pick(title, index, root) : -1;
@@ -491,8 +515,25 @@ int ext_library(const struct lib_title **list)
 /* "auto" found no game on a drive: the code's early JIT block goes back (the
  * next boot needs it) and the code is placed again with the title, as for
  * any installed title; the blob stays. */
+/* the extension's code goes: what the log and the failure screens hold of it too */
+static struct ghost_diag *diag(void) { return g_ghost_api.diag ? g_ghost_api.diag() : NULL; }
+
+static void ext_gone(void)
+{
+    struct ghost_diag *D = diag();
+    if (!D)
+        return;
+    while (__atomic_exchange_n(&D->lock, 1, __ATOMIC_ACQUIRE))
+        ;
+    D->show = NULL, D->sink = NULL;
+    if (D->f[1].fd >= 0) /* the drive's log file: no fd of ours stays on a mount the next boot may take down */
+        K.close(D->f[1].fd), D->f[1].fd = -1, D->copied = D->f[0].bytes;
+    __atomic_store_n(&D->lock, 0, __ATOMIC_RELEASE);
+}
+
 void ext_unplace(void)
 {
+    ext_gone();
     if (g_in_jit)
         jit_block_destroy(&g_jb);
     logf("ext: code unplaced%s; placed again for the title", g_in_jit ? " (its JIT block released)" : "");
@@ -507,6 +548,7 @@ void ext_unplace(void)
  * the blob with it. */
 void ext_abandon(void)
 {
+    ext_gone();
     if (g_in_jit)
         jit_block_destroy(&g_jb);
     logf("ext: released%s", g_in_jit ? " (and its JIT block)" : "");
@@ -514,6 +556,21 @@ void ext_abandon(void)
     g_base = 0;
     g_early = NULL;
     ext_release();
+}
+
+/* fail.c: a failure's message on the TV through the extension's screens,
+ * its code placed for that when it isn't (and given back afterwards); false
+ * when it can't be */
+bool ext_show(u32 kind, s64 code)
+{
+    struct ghost_diag *D = diag();
+    bool placed = g_base != 0;
+    if (!D || (!D->show && !early("a failure's message")) || !D->show)
+        return false;
+    D->show(kind, code);
+    if (!placed)
+        ext_unplace();
+    return true;
 }
 
 int ext_start(void)

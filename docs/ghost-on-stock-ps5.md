@@ -7,7 +7,7 @@ or into SWRR's own save containers over the network.
 
 ## What you need
 
-- **The PS5.** It needs a Luac0re save for its PSN account, imported from USB.
+- **The PS5,** on firmware 13.60 or later. It needs a Luac0re save for its PSN account, imported from USB.
 - **The game.** *Star Wars Racer Revenge*, USA (**CUSA03474**) or Europe (**CUSA03492**).
   - ghostldr uses fixed offsets in SWRR's 01.02 executable (the save-data import slot, the video handle, a bootstrap gadget). US and EU run the same executable, so the offsets hold for both.
   - Each region keeps its own saved data. Install the game data from the SWRR you will play in; an install made in one region doesn't appear in the other.
@@ -60,7 +60,9 @@ It copies the dump to `ghostldr/CUSA11456/app0` on the drive as it is (`--folder
 
 ### Or install it into SWRR's saved data
 
-With Luac0re's loader listening (step 1):
+**From a browser, with no Python:** ghostldr's game selector → Settings → Network → **Install over network**, or send `manager.lua` to Luac0re's loader; then open the address the TV shows on a computer or phone and choose the game's folder or a `.zip` of it ([manager.md](manager.md#install-a-game)). It lays the game out exactly as the scripts below do.
+
+**From the scripts** (developers), with Luac0re's loader listening (step 1):
 
 ```bash
 python3 ghostldr/host/gfs_pack.py
@@ -106,7 +108,7 @@ With Luac0re's loader listening (a fresh SWRR start after every Ghost session), 
 python3 ghostldr/host/run.py boot --snap
 ```
 
-`--app-root` defaults to `auto`: the games on a USB drive in the PS5, else the installed ones. `--app-root usb:/` only looks on the drive, `--app-root ghostfs` only at the installed games. From a release zip (prebuilt core, no LLVM), add `--no-build`; `python3 ghostldr.py boot` does that by itself.
+`--app-root` defaults to `auto`: the games on a USB drive in the PS5, else the installed ones. `--app-root usb:/` only looks on the drive, `--app-root ghostfs` only at the installed games. With a prebuilt core in `build/ghostldr` and no LLVM, add `--no-build`; `python3 ghostldr.py boot` does that by itself.
 
 - **Extension:** run.py serves `build/ghostldr/ext.bin` (the NID table and extra HLE code) on TCP 18195, and the core fetches it before touching the title. Without it, the boot stops there with `ext: ...` in the log. See [ghostldr/native/ext/README.md](../ghostldr/native/ext/README.md).
 - **Several titles:** add `--title CUSA11456`. Without it the only title boots; with several, the game selector shows them on the TV.

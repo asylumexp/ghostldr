@@ -12,7 +12,7 @@
  *
  *     approot_host FSROOT APP_ROOT [--title T] [--select] [--map PATH] [--other PATH2]
  *                  [--map-fail] [--no-fde] [--inited] [--drive IMAGE] [--pick T|-] [--pick-at N]
- *                  [--profiles FILE] [--ftp [--late|--unplug]]
+ *                  [--profiles FILE] [--ftp [--late|--unplug]] [--live SCENARIO]
  *
  * Prints what approot_init (and approot_pick) decided, the games it found
  * (library(), one "lib" line each), the profile picked, where saves go,
@@ -24,6 +24,28 @@
  * client logs in; --late plugs the drive in between the two, --unplug
  * pulls it out.  It prints whether the title's own Init and Term are kept
  * off the session (usb_session_open) and where a client starts.
+ *
+ * Every drive listed is mounted at the mount point approot.c asks for (one
+ * mount per drive and per mount point).  --live SCENARIO then runs the
+ * title's drive going away (usb_live.c) with real fds on FSROOT's files:
+ * the title's eboot.bin is opened and 2 bytes read, and
+ *   unplug  the drive is pulled out and plugged in again (a new id) 3.8 s
+ *           after a read on the fd failed (EIO): past the 3 s grace, so the
+ *           user is told;
+ *   wrong   a drive without the game comes first, the right one 4.5 s later;
+ *   closed  as unplug, but the fd is gone (EBADF): opened again at the
+ *           offset the title's calls left;
+ *   stale   as unplug, but the old mount point stays taken: the drive is
+ *           mounted at another, and the title's root and fds follow;
+ *   rest    the mount alone goes (the drive stays listed, with its id):
+ *           back at once, nothing said;
+ *   path    a file missing from a drive that answers (no wait);
+ *   watch   the drive check's thread brings it back (plugged in again 6.5 s
+ *           later), with no call failing, and notices the clock jumping 60 s
+ *           (rest mode).
+ * It prints whether the call is to be made again ("again"), the next 2
+ * bytes read on the same fd ("read-after"), the notifications ("notify")
+ * and the mounts.
  */
 #include "ghost_api.h"
 #include "usbstore.h"
@@ -42,6 +64,15 @@ void hfs_set_root(const char *root);
 long hfs_image_read(int fd, void *buf, unsigned long n, long off);
 int hfs_image_open(const char *path);
 long hfs_image_size(int fd);
+int hfs_real_open(const char *path, int flags, int mode);
+long hfs_real_lseek(int fd, long off, int whence);
+long hfs_real_read(int fd, void *buf, unsigned long n);
+int hfs_real_dup(int fd);
+int hfs_real_close(int fd);
+int *hfs_errno(void);
+int hfs_usleep(unsigned us);
+long hfs_now_s(void);
+int hfs_thread(void *(*fn)(void *), void *arg);
 
 int vfmt(char *buf, size_t size, const char *f, __builtin_va_list ap) { return vsnprintf(buf, size, f, ap); }
 int fmt(char *buf, size_t size, const char *f, ...)
@@ -123,17 +154,59 @@ static void f_saves(const char *title, const char *prefix) { say("saves %s %sSAV
 static void *f_page_alloc(size_t n) { return calloc(1, n ? n : 1); }
 static void f_page_free(void *p, size_t n) { free(p); }
 
-/* libSceUsbStorage, as approot.c finds it on the console */
+/* libSceUsbStorage, as approot.c finds it on the console: drives (listed in
+ * order) and their mounts in the sandbox */
 static const char *g_other;              /* a second drive, listed first, without the library */
-static int g_no_fde, g_inited, g_mounted_id;
+static int g_no_fde, g_inited;
 static int g_hidden;                     /* --late: the drive is not plugged in yet */
-static char g_mount_at[64];              /* the sandbox path the drive is mounted at */
-static const char *g_mount_src;          /* FSROOT-relative folder that is the mounted drive */
+struct fdrive {
+    u32 id;
+    const char *src; /* FSROOT-relative folder that is the drive */
+    volatile int listed;
+};
+static struct fdrive g_drv[4];
+static volatile int g_ndrv;
+struct fmount {
+    u32 id;
+    char mp[64];
+    const char *src;
+    int dead; /* its drive went and the mount point stays taken (--live stale) */
+};
+static struct fmount g_mnt[4];
+static volatile int g_nmnt;
+
+static struct fdrive *drive_of(u32 id)
+{
+    for (int i = 0; i < g_ndrv; i++)
+        if (g_drv[i].id == id)
+            return &g_drv[i];
+    return NULL;
+}
+static void drop_mount(int k)
+{
+    g_mnt[k] = g_mnt[--g_nmnt];
+}
+/* the drive is pulled out: no longer listed, its mounts gone (stale: they
+ * stay, dead, their mount points taken) */
+static void unplug_as(u32 id, int stale)
+{
+    struct fdrive *d = drive_of(id);
+    if (d)
+        d->listed = 0;
+    for (int k = g_nmnt - 1; k >= 0; k--)
+        if (g_mnt[k].id == id) {
+            if (stale)
+                g_mnt[k].dead = 1;
+            else
+                drop_mount(k);
+        }
+}
+static void unplug(u32 id) { unplug_as(id, 0); }
 static s32 us_init(void *p)
 {
     if (g_inited) {                      /* the real library: 0x80F40002, and the session is gone */
         g_inited = 0;
-        g_mounted_id = 0;
+        g_nmnt = 0;
         say("log: fake: second sceUsbStorageInit");
         return (s32)0x80F40002;
     }
@@ -145,10 +218,9 @@ static s32 us_list(u32 *ids, s32 *n)
     if (!g_inited)
         return (s32)0x80F40009;
     int k = 0;
-    if (g_other)
-        ids[k++] = 0x1000;
-    if (g_map && !g_hidden)
-        ids[k++] = 0x1001;
+    for (int i = 0; i < g_ndrv; i++)
+        if (g_drv[i].listed && !(g_hidden && g_drv[i].id == 0x1001))
+            ids[k++] = g_drv[i].id;
     *n = k;
     return 0;
 }
@@ -158,20 +230,44 @@ static s32 us_map2(u32 id, const char *dir, const char *mp)
         return (s32)0x80F40009;
     if (g_map_fail)
         return (s32)0x80F40014;
-    if (strcmp(dir, "/") != 0 || g_mounted_id)
-        return (s32)0x80F40003; /* the harness only mounts the root, once */
-    g_mounted_id = (int)id;
-    strlcpy(g_mount_at, mp, sizeof(g_mount_at));
-    g_mount_src = id == 0x1000 ? g_other : g_map;
+    struct fdrive *d = drive_of(id);
+    if (!d || !d->listed)
+        return (s32)0x80F40001;
+    if (strcmp(dir, "/") != 0)
+        return (s32)0x80F40003; /* the harness only mounts the root */
+    for (int k = 0; k < g_nmnt; k++)
+        if (g_mnt[k].id == id || strcmp(g_mnt[k].mp, mp) == 0)
+            return (s32)0x80F40003;
+    struct fmount *m = &g_mnt[g_nmnt];
+    m->dead = 0;
+    m->id = id;
+    strlcpy(m->mp, mp, sizeof(m->mp));
+    m->src = d->src;
+    g_nmnt++;
     say("log: fake: mounted %x at %s", id, mp);
     return 0;
 }
 static s32 us_unmap(u32 id, const char *dir)
 {
-    if (!g_mounted_id || (u32)g_mounted_id != id)
-        return (s32)0x80F40002;
-    say("log: fake: unmounted %x", id);
-    g_mounted_id = 0;
+    for (int k = 0; k < g_nmnt; k++)
+        if (g_mnt[k].id == id && !g_mnt[k].dead) {
+            drop_mount(k);
+            say("log: fake: unmounted %x", id);
+            return 0;
+        }
+    return (s32)0x80F40002;
+}
+static s32 us_info(u32 id, void *info)
+{
+    struct fdrive *d = drive_of(id);
+    if (!d || !d->listed)
+        return (s32)0x80F40001;
+    u8 *b = info;
+    *(u64 *)b = 64ull << 30;
+    *(u64 *)(b + 8) = 32ull << 30;
+    strlcpy((char *)b + 0x16, "Maker", 32);
+    strlcpy((char *)b + 0x120, "Drive", 32);
+    *(u32 *)(b + 0x330) = 0x80;
     return 0;
 }
 static void us_public_map(void) {} /* never called: its address places RequestMap2 */
@@ -208,14 +304,19 @@ static int f_module_handle(const char *mod, u32 *out)
     *out = 0x77;
     return 0;
 }
+static void *libkernel(const char *name);
 static void *f_dlsym(u32 h, const char *name)
 {
+    if (h == 0x55)
+        return libkernel(name);
     if (h != 0x77)
         return NULL;
     if (!strcmp(name, "sceUsbStorageInit"))
         return (void *)us_init;
     if (!strcmp(name, "sceUsbStorageGetDeviceList"))
         return (void *)us_list;
+    if (!strcmp(name, "sceUsbStorageGetDeviceInfo"))
+        return (void *)us_info;
     if (!strcmp(name, "sceUsbStorageRequestUnmap"))
         return (void *)us_unmap;
     if (!strcmp(name, "sceUsbStorageRequestMap"))
@@ -241,16 +342,86 @@ static void *f_host_real_in(const char *mod, const char *name)
     return NULL;
 }
 
-/* a path under the mount is the drive folder's */
+/* a path under a mount is its drive folder's */
 static const char *mnt(const char *path, char *buf, size_t size)
 {
-    size_t n = strlen(g_mount_at);
-    if (g_mounted_id && n && strncmp(path, g_mount_at, n) == 0 && (path[n] == '/' || path[n] == 0)) {
-        fmt(buf, size, "%s%s", g_mount_src, path + n);
-        return buf;
+    for (int k = 0; k < g_nmnt; k++) {
+        size_t n = strlen(g_mnt[k].mp);
+        if (g_mnt[k].dead)
+            continue;
+        if (strncmp(path, g_mnt[k].mp, n) == 0 && (path[n] == '/' || path[n] == 0)) {
+            fmt(buf, size, "%s%s", g_mnt[k].src, path + n);
+            return buf;
+        }
     }
     return path;
 }
+
+/* the mount points in use, in mount order ("none") */
+static const char *mounts(char *buf, size_t size)
+{
+    buf[0] = 0;
+    for (int k = 0; k < g_nmnt; k++)
+        fmt(buf + strlen(buf), size - strlen(buf), "%s%s", k ? " " : "", g_mnt[k].mp);
+    return g_nmnt ? buf : "none";
+}
+
+/* ---- libkernel for usb_live.c: real fds on FSROOT's files ---- */
+static int g_notify_n;
+static int k_open(const char *path, int flags, int mode)
+{
+    char b[512];
+    return hfs_real_open(mnt(path, b, sizeof(b)), flags, mode);
+}
+static s64 k_lseek(int fd, s64 off, int whence) { return hfs_real_lseek(fd, off, whence); }
+static int k_dup(int fd) { return hfs_real_dup(fd); }
+static int k_close(int fd) { return hfs_real_close(fd); }
+static volatile long g_skew; /* the wall clock's jump (rest mode) */
+static int k_gettimeofday(s64 *tv)
+{
+    tv[0] = hfs_now_s() + g_skew;
+    tv[1] = 0;
+    return 0;
+}
+static int k_notify(int dev, void *req, u64 size, int flags)
+{
+    g_notify_n++;
+    say("notify %s", (const char *)req + 0x2D);
+    return size == 0xC30 ? 0 : -1;
+}
+static void *libkernel(const char *name)
+{
+    if (!strcmp(name, "dup"))
+        return (void *)k_dup;
+    if (!strcmp(name, "lseek"))
+        return (void *)k_lseek;
+    if (!strcmp(name, "open"))
+        return (void *)k_open;
+    if (!strcmp(name, "close"))
+        return (void *)k_close;
+    if (!strcmp(name, "sceKernelGettimeofday"))
+        return (void *)k_gettimeofday;
+    if (!strcmp(name, "sceKernelSendNotificationRequest"))
+        return (void *)k_notify;
+    return NULL;
+}
+static int k_usleep(u32 us) { return hfs_usleep(us); }
+static int k_attr(void *a) { return 0; }
+static int k_attr_stack(void *a, size_t n) { return 0; }
+static int k_thread(void *thr, const void *attr, void *(*fn)(void *), void *arg, const char *name)
+{
+    return hfs_thread(fn, arg);
+}
+/* the overlay's banner (dlg_overlay.c): nothing drawable here */
+void ov_banner(const char *text, u32 seconds) {}
+/* the failure display's message (failure.c, rel-diag): as a notification */
+void diag_notice(const char *text, u32 seconds)
+{
+    g_notify_n++;
+    say("notify ghostldr: %s", text);
+}
+/* the FTP server's check after rest mode (ftp_sys.c) */
+void ftp_after_resume(void) { say("log: ftp: after rest mode"); }
 
 /* the console's files: a provider's (route B), else the host directory */
 #define HOST_FD 5000
@@ -327,7 +498,93 @@ extern const struct ext_early g_approot_early;
 bool usb_session_open(void);
 void usb_ftp_prepare(void);
 const char *usb_ftp_home(void);
-static void f_spin(volatile int *l) {}
+static void f_spin(volatile int *l)
+{
+    while (__atomic_exchange_n(l, 1, __ATOMIC_ACQUIRE))
+        hfs_usleep(100);
+}
+static void f_unspin(volatile int *l) { __atomic_store_n(l, 0, __ATOMIC_RELEASE); }
+
+/* usb_live.c */
+void usb_live_open(s32 fd, const char *path, int flags);
+void usb_live_moved(s32 fd, s64 n, bool to);
+bool usb_live_fd_failed(s32 fd, s32 e);
+bool usb_live_path_failed(const char *path, s32 e);
+void usb_live_start(void);
+bool usb_live_waiting(void);
+u32 usb_live_gen(void);
+
+/* --live: the drive comes back after a while (a thread) */
+static volatile u32 g_back_id;
+static volatile int g_back_ms, g_wrong_ms;
+static void *plug_later(void *arg)
+{
+    if (g_wrong_ms) { /* a drive without the game first */
+        hfs_usleep((unsigned)g_wrong_ms * 1000);
+        g_drv[g_ndrv] = (struct fdrive){0x1003, "/data/empty", 1};
+        g_ndrv++;
+        say("log: fake: a drive without the game plugged in (1003)");
+    }
+    hfs_usleep((unsigned)g_back_ms * 1000);
+    struct fdrive *d = drive_of(0x1001);
+    if (g_back_id != 0x1001) /* plugged in again: a new id */
+        g_drv[g_ndrv++] = (struct fdrive){g_back_id, d->src, 1};
+    else
+        d->listed = 1;
+    say("log: fake: the drive is back (%x)", g_back_id);
+    return arg;
+}
+
+static void live(const char *scenario, const char *root)
+{
+    char p[512], b[8] = {0}, m[256];
+    fmt(p, sizeof(p), "%s/eboot.bin", root);
+    int hole = k_open(p, 0, 0); /* a free number below the title's fd: reopening fills it and gives it back */
+    int fd = k_open(p, 0, 0);
+    k_close(hole);
+    usb_live_open(fd, p, 0);
+    long got = hfs_real_read(fd, b, 2);
+    usb_live_moved(fd, got, false); /* as hle_file.c does */
+    say("opened fd %d (%ld bytes read)", fd, got);
+    int again = -1;
+    if (!strcmp(scenario, "unplug") || !strcmp(scenario, "wrong") || !strcmp(scenario, "closed") ||
+        !strcmp(scenario, "stale")) {
+        unplug_as(0x1001, !strcmp(scenario, "stale"));
+        if (!strcmp(scenario, "closed")) /* the system closed the fd: its offset is only known from the calls */
+            hfs_real_close(fd);
+        g_wrong_ms = !strcmp(scenario, "wrong") ? 100 : 0;
+        g_back_id = 0x1002, g_back_ms = g_wrong_ms ? 4500 : 3800; /* past the 3 s before anything is said */
+        hfs_thread(plug_later, NULL);
+        again = usb_live_fd_failed(fd, !strcmp(scenario, "closed") ? 9 : 5);
+    } else if (!strcmp(scenario, "rest")) {
+        for (int k = g_nmnt - 1; k >= 0; k--) /* the mount alone */
+            if (g_mnt[k].id == 0x1001)
+                drop_mount(k);
+        again = usb_live_fd_failed(fd, 5);
+    } else if (!strcmp(scenario, "path")) {
+        fmt(p, sizeof(p), "%s/missing.bin", root);
+        again = usb_live_path_failed(p, 2);
+        say("path-other %d", usb_live_path_failed("/data/x", 2));
+    } else if (!strcmp(scenario, "watch")) {
+        usb_live_start();
+        hfs_usleep(300000);
+        g_skew = 60; /* rest mode */
+        unplug(0x1001);
+        g_back_id = 0x1002, g_back_ms = 6500;
+        hfs_thread(plug_later, NULL);
+        for (int t = 0; t < 150 && usb_live_gen() == 0; t++)
+            hfs_usleep(100000);
+        say("waiting %d", usb_live_waiting());
+    }
+    say("again %d", again);
+    say("gen %u", usb_live_gen());
+    memset(b, 0, sizeof(b));
+    got = hfs_real_read(fd, b, 2);
+    say("read-after %ld %.2s", got, b);
+    say("notifications %d", g_notify_n);
+    say("live-mount %s", mounts(m, sizeof(m)));
+    say("live-root %s", (const char *)g_ctx_v.app_root);
+}
 
 int main(int argc, char **argv)
 {
@@ -337,7 +594,8 @@ int main(int argc, char **argv)
     }
     hfs_set_root(argv[1]);
     const char *root = argv[2], *pick = NULL, *profiles = NULL;
-    int ftp = 0, late = 0, unplug = 0, pick_at = -1;
+    int ftp = 0, late = 0, pulled = 0, pick_at = -1;
+    const char *scenario = NULL;
     u64 flags = 0;
     for (int i = 3; i < argc; i++) {
         const char *o = argv[i];
@@ -357,7 +615,9 @@ int main(int argc, char **argv)
         else if (!strcmp(o, "--late"))
             late = g_hidden = 1;
         else if (!strcmp(o, "--unplug"))
-            unplug = 1;
+            pulled = 1;
+        else if (!strcmp(o, "--live") && v)
+            scenario = v, i++;
         else if (!strcmp(o, "--map") && v)
             g_map = v, i++;
         else if (!strcmp(o, "--map-fail"))
@@ -375,7 +635,12 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (g_other)
+        g_drv[g_ndrv++] = (struct fdrive){0x1000, g_other, 1};
+    if (g_map)
+        g_drv[g_ndrv++] = (struct fdrive){0x1001, g_map, 1};
     g_ctx_v.size = sizeof(struct boot_ctx);
+    g_ctx_v.libkernel_handle = 0x55;
     g_ctx_v.app_root = (u64)root;
     g_ctx_v.flags = flags;
     g_api.version = GHOST_API_VERSION;
@@ -387,6 +652,12 @@ int main(int argc, char **argv)
     g_api.host_module_handle = f_module_handle;
     g_api.host_dlsym = f_dlsym;
     g_k.module_info = f_module_info;
+    g_k.usleep = k_usleep;
+    g_k.errno_fn = hfs_errno;
+    g_k.pthread_attr_init = k_attr;
+    g_k.pthread_attr_destroy = k_attr;
+    g_k.pthread_attr_setstacksize = k_attr_stack;
+    g_k.pthread_create = k_thread;
     make_eh();
     g_api.page_alloc = f_page_alloc;
     g_api.page_free = f_page_free;
@@ -401,7 +672,7 @@ int main(int argc, char **argv)
     g_api.appfs_register = f_register;
     g_api.gfs_use_saves = f_saves;
     g_api.spin_lock = f_spin;
-    g_api.spin_unlock = f_spin;
+    g_api.spin_unlock = f_unspin;
     G = &g_api;
     if (profiles) { /* a bundle file, read whole (a path on this machine, not under FSROOT) */
         static u8 bundle[1 << 16];
@@ -446,17 +717,20 @@ int main(int argc, char **argv)
         int s = v_stat(p, st);
         say("eboot %s %ld", s == 0 ? "found" : "missing", s == 0 ? *(s64 *)(st + 0x48) : -1L);
     }
-    say("mount %s", g_mounted_id ? g_mount_at : "none");
+    char mb[256];
+    say("mount %s", mounts(mb, sizeof(mb)));
     if (ftp) {
         usb_ftp_prepare();
-        say("prepared %s", g_mounted_id ? g_mount_at : "none");
+        say("prepared %s", mounts(mb, sizeof(mb)));
         if (late)
             g_hidden = 0;
-        if (unplug)
-            g_mounted_id = 0;
+        if (pulled)
+            g_nmnt = 0;
         say("home %s", usb_ftp_home());
-        say("mount-after %s", g_mounted_id ? g_mount_at : "none");
+        say("mount-after %s", mounts(mb, sizeof(mb)));
     }
+    if (scenario && rc == 0)
+        live(scenario, r);
     say("session %d", usb_session_open());
     say("session-flag %d", (g_ctx_v.flags & CTX_FLAG_USB_SESSION) != 0); /* what outlives ext_unplace */
     return 0;

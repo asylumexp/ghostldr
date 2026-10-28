@@ -58,6 +58,8 @@ const char *strrchr_c(const char *s, int c)
 }
 
 void *page_alloc(size_t size) { return calloc(1, size ? size : 1); }
+void free(void *p);
+void page_free(void *p, size_t size) { free(p); }
 
 /* ---- profile.c, as far as ghostfs uses it ---- */
 static const char *g_want;
@@ -226,8 +228,23 @@ int main(int argc, char **argv)
     const char *flag = getenv("SEL_FLAG"), *choice = getenv("SEL_CHOICE");
     if (flag && *flag == '1')
         g_ctx->flags |= CTX_FLAG_SELECT;
+    /* SEL_PRESENT=1: a selector came with the boot (sel_present: one title or none is shown too) */
+    const char *present = getenv("SEL_PRESENT"), *after = getenv("SEL_CATALOG_AFTER");
+    if (present && *present == '1')
+        g_ctx->size = sizeof(struct boot_ctx), g_ctx->sel_fd = 3, g_ctx->sel_size = 4096;
     int rc = gfs_init();
     if (rc == 1) { /* boot.c runs the selector here, then gfs_pick */
+        if (after && *after) { /* meanwhile a title was installed over the network: the catalogue changed */
+            for (u32 i = 0; i < g_nfiles; i++)
+                if (!strcmp(g_files_fake[i].dir, "GFSCATALOG")) {
+                    int fd = open(after, 0);
+                    long n = fd >= 0 ? read(fd, g_files_fake[i].data, 1 << 20) : -1;
+                    if (fd >= 0)
+                        close(fd);
+                    g_files_fake[i].size = n > 0 ? (u64)n : 0;
+                }
+            logf("a title was installed while the selector ran");
+        }
         logf("deferred to the game selector; it chose %s", choice && *choice ? choice : "nothing");
         rc = gfs_pick(choice && *choice ? choice : NULL);
     }
@@ -246,3 +263,6 @@ int main(int argc, char **argv)
     logf("read %ld: %s; save container %s", got, buf, gfs_save_name());
     return 0;
 }
+
+/* fail.c: the loader's notes for a failure's message (not looked at here) */
+void fail_note(u32 kind, const char *path) { (void)kind, (void)path; }

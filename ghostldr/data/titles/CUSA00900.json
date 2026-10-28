@@ -1,0 +1,26 @@
+{
+ "title": "CUSA00900",
+ "name": "Bloodborne",
+ "version": "01.09",
+ "status": "playable",
+ "notes": "Its code (44 MiB) runs in two of the emulator's JIT buffers (bigexec.c). Its memory config Master_ps4_GFXMIX (table 0x4736d40: 16 heaps per config, 0x80 bytes each, config 1) asks for 4478 MiB of direct memory in 16 heaps at boot, plus 116 MiB first and 162 MiB of flexible heaps (config 2); SWRR has about 4435 MiB free. Every heap is mapped whole when it is made, so lazy commit saves nothing: the second GPU-private heap (GFX_GraphicsPrivateB, 886 MiB) takes the shortfall. Plan-free, that heap is refused and the title carries on without it.",
+ "eboot": {"fingerprint": "543f03aa757c0ab8edb7db53668f0c436d42b43d"},
+ "pack": {"prefix": "G00900"},
+ "memory": {
+  "mode": "plan",
+  "runtime_reserve_mib": 32,
+  "video_reserve_mib": 100,
+  "plan": {
+   "title_fixed_mib": 4066,
+   "overcommit_mib": 0,
+   "tables": [
+    {"table": "0x4736de0", "role": "absorb", "what": "GFX_GraphicsPrivateB heap", "min_mib": 64,
+     "expect": ["0x37600000", "0xa00000", "0x600000", "0x0", "0xe00000", "0x0", "0x500000", "0x800000",
+                "0x900000", "0x12800000", "0x0", "0x500000"]},
+    {"table": "0x4736dd8", "role": "set", "what": "GFX_GraphicsPrivate heap", "knob": "gpu_heap"},
+    {"table": "0x4736dc0", "role": "set", "what": "MAIN heap", "knob": "cpu_heap"},
+    {"table": "0x4736e28", "role": "set", "what": "HAVOK heap", "knob": "pool1"}
+   ]
+  }
+ }
+}

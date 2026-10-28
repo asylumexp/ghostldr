@@ -9,6 +9,12 @@
 --   containers = {{name =, blocks =, mtime =, files = {[path] = data}, dirs = {path, ...}}},
 --   requests = {{data = raw request, stall = true (recv times out at the end),
 --                close_after = n (the peer goes away after n response bytes), chunk = n}}}
+-- live = true: no scripted requests; they come from stdin and the responses go
+-- to stdout as each connection closes (netinstall_node.js drives the install
+-- page's own code this way):
+--   in:  "REQ <n> <deliver>\n" + n bytes (deliver >= 0: only that many bytes
+--        arrive, then the connection fails, as a dropped Wi-Fi link does)
+--   out: "TOKEN <token>\n" before the first request, then "RESP <n>\n" + n bytes
 
 local manager_path, scenario_path, outdir = arg[1], arg[2], arg[3]
 MANAGER_TEST = true
@@ -382,8 +388,26 @@ function syscall.bind(fd, sa)
     return 0
 end
 function syscall.listen() return 0 end
+local live_started = false
+local function live_accept()
+    if not live_started then
+        live_started = true
+        local tok = "NONE-NONE"
+        for _, line in ipairs(R.logs) do tok = line:match(" token (%S+)$") or tok end
+        io.stdout:write("TOKEN " .. tok .. "\n")
+        io.stdout:flush()
+    end
+    local line = io.stdin:read("l")
+    if not line then return nil end
+    local n, deliver = line:match("^REQ (%d+) (%-?%d+)$")
+    local data = io.stdin:read(tonumber(n)) or ""
+    deliver = tonumber(deliver)
+    if deliver >= 0 then data = data:sub(1, deliver) end
+    return {i = 0, data = data, pos = 0, out = {}, sent = 0, stall = deliver >= 0, live = true}
+end
 function syscall.accept()
-    local c = table.remove(queue, 1)
+    local c
+    if SC.live then c = live_accept() else c = table.remove(queue, 1) end
     if not c then return -1 end
     if c.data:find("{{TOKEN}}", 1, true) or c.data:find("{{token}}", 1, true) then
         local tok = "NONE-NONE"
@@ -406,7 +430,16 @@ function syscall.recvfrom(fd, p, n, flags)
     return take
 end
 function syscall.close(fd)
-    if conns[fd] then conns[fd].closed = true end
+    local c = conns[fd]
+    if c then
+        c.closed = true
+        if c.live and not c.flushed then
+            c.flushed = true
+            local out = table.concat(c.out)
+            io.stdout:write("RESP " .. #out .. "\n" .. out)
+            io.stdout:flush()
+        end
+    end
     return 0
 end
 native("sendto", function(fd, p, n, flags)
@@ -465,10 +498,12 @@ local tf = H.obj{}
 for p, d in pairs(temp.files) do tf[p] = #d end
 R.temp_files = tf
 for i, c in pairs(conns) do
+    if c.live then goto continue end
     local f = assert(io.open(string.format("%s/resp_%03d.bin", outdir, c.i), "wb"))
     f:write(table.concat(c.out))
     f:close()
     c.closed = c.closed or false
+    ::continue::
 end
 local unclosed = 0
 for _, c in pairs(conns) do if not c.closed then unclosed = unclosed + 1 end end

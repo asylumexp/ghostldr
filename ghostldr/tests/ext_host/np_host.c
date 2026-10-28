@@ -455,7 +455,9 @@ static void request_tests(void)
     EQ(*(s32 *)res_buf, 1, "the user canceled");
     expect(res_buf[4] == 0 && *(u64 *)(res_buf + 8) == 0x5eed && all_zero(res_buf + 0x10, 0x20),
            "not authorized, the userdata echoed, the rest zeroed");
-    EQ(CALL(f_v, COMMERCE, "sceNpCommerceDialogClose")(), 0x80B8000C, "close after it finished: ALREADY_CLOSE");
+    /* the 12.50 libSceNpCommerce returns NOT_RUNNING for an initialized or a
+     * finished dialog; ALREADY_CLOSE (0x80B8000C) is never returned there */
+    EQ(CALL(f_v, COMMERCE, "sceNpCommerceDialogClose")(), 0x80B8000B, "close after it finished: NOT_RUNNING");
     EQ(CALL(f_v, COMMERCE, "sceNpCommerceDialogTerminate")(), 0, "terminate");
     EQ(CALL(f_v, COMMERCE, "sceNpCommerceDialogTerminate")(), 0x80B80003, "terminate twice: NOT_INITIALIZED");
 }

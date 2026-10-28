@@ -266,7 +266,7 @@ static void test_first_boot_create_write_commit(void)
     expect(!strcmp(mp, "/savedata0"), "the first mount is /savedata0");
     expect(fake_cont_exists(FAKE_USER0, "GTESTD001SAVE") && fake_cont_mounted(FAKE_USER0, "GTESTD001SAVE"),
            "the save is container GTESTD001SAVE, held mounted");
-    expect(fake_cont_blocks(FAKE_USER0, "GTESTD001SAVE") == 104, "its container has headroom: 100 + 4 blocks");
+    expect(fake_cont_blocks(FAKE_USER0, "GTESTD001SAVE") == 152, "its container has headroom: 100 + 48 + 4 blocks");
     expect(fake_last_mode() & MODE_DESTRUCT_OFF, "real read/write mounts ask for DESTRUCT_OFF");
     struct cat_header h;
     expect(cont_file("GTESTSAVE", "catalog.bin", &h, sizeof(h)) == sizeof(h) && h.count == 1 &&
@@ -494,7 +494,7 @@ static void test_delete_and_vanished(void)
      * leaves the next number taken: the next create adopts it */
     fake_cont_create(FAKE_USER0, "GTESTD003SAVE", 200);
     mount_ok(FAKE_USER0, "SAVE9", 100, MODE_CREATE | MODE_RDWR, mp, 1, "create over an orphan container");
-    expect(fake_log_has("exists without a catalogue entry") && fake_cont_blocks(FAKE_USER0, "GTESTD003SAVE") == 104,
+    expect(fake_log_has("exists without a catalogue entry") && fake_cont_blocks(FAKE_USER0, "GTESTD003SAVE") == 152,
            "the orphan was deleted and made again at the new size");
     umount(mp);
 
@@ -520,7 +520,7 @@ static void test_crash_and_quota(void)
     mount_ok(FAKE_USER0, "QUOTA", 96, MODE_CREATE | MODE_RDWR, mp, 1, "a 96-block save");
     char cname[32];
     fmt(cname, sizeof(cname), "GTESTD%03uSAVE", g_vm[0].id);
-    expect(fake_cont_blocks(FAKE_USER0, cname) == 100, "its container: 96 + 4");
+    expect(fake_cont_blocks(FAKE_USER0, cname) == 148, "its container: 96 + 48 + 4");
     static u8 big[32768 * 47];
     memset(big, 0x42, sizeof(big));
     EXPECT_RC(t_write_file("/savedata0/a.bin", big, sizeof(big)), 0, "47 blocks");
@@ -529,7 +529,8 @@ static void test_crash_and_quota(void)
     struct sd_mount_info mi;
     sd_get_mount_info(mp, &mi);
     expect(mi.free_blocks == 0, "GetMountInfo: no free blocks");
-    EXPECT_RC(t_write_file("/savedata0/d.bin", big, 32768 * 3), W_ENOSPC, "past the container: ENOSPC");
+    EXPECT_RC(t_write_file("/savedata0/d.bin", big, sizeof(big)), 0, "47 more: the container's room for its filesystem");
+    EXPECT_RC(t_write_file("/savedata0/e.bin", big, sizeof(big)), W_ENOSPC, "past the container: ENOSPC");
     t_write_file("/savedata0/d.bin", "", 0);
     EXPECT_RC(umount(mp), 0, "a save filled to its size still commits (headroom)");
 
@@ -539,6 +540,24 @@ static void test_crash_and_quota(void)
     expect(r.required_blocks > 0 && r.required_blocks < 32768, "with the blocks it needs");
     fake_set_storage_cap(0);
     expect(fake_reserved() == 0, "the refused create gave its slot back");
+
+    /* a save an older build made (its container 96 + 4 blocks, full of the
+     * title's progress): mounted as it is, never made again or resized */
+    mount_ok(FAKE_USER0, "OLDSIZE", 96, MODE_CREATE | MODE_RDWR, mp, 1, "a save to stand for an older one");
+    fmt(cname, sizeof(cname), "GTESTD%03uSAVE", g_vm[0].id);
+    umount(mp);
+    fake_cont_delete(FAKE_USER0, cname);
+    fake_cont_create(FAKE_USER0, cname, 100);
+    char host[512];
+    fake_cont_dir(FAKE_USER0, cname, host, sizeof(host));
+    strlcat(host, "/progress.bin", sizeof(host));
+    fake_write_host(host, big, sizeof(big));
+    mount_ok(FAKE_USER0, "OLDSIZE", 0, MODE_RDWR, mp, 0, "the older save");
+    s64 psize = 0;
+    expect(fake_cont_blocks(FAKE_USER0, cname) == 100 && t_stat("/savedata0/progress.bin", &psize) == 0 &&
+               psize == (s64)sizeof(big),
+           "an existing container keeps its size and the title's files");
+    EXPECT_RC(umount(mp), 0, "and unmounts as before");
 }
 
 static void test_slots(void)
@@ -756,6 +775,51 @@ static void test_memory(void)
     g.slot = 5, d[0].buf = back;
     EXPECT_RC(sd_get_memory2(&g), 0, "Get2 slot 5");
     expect(!memcmp(back, buf, 0x1000), "its data");
+    expect(fake_cont_blocks(FAKE_USER0, "GTESTM05SAVE") == 384 + 32 + 4 + 48 + 64,
+           "GTESTM05SAVE has room for the filesystem: the memory, an icon, and 48 + 1/16 (at least 64) blocks more");
+
+    /* an M container an older ghostldr made too small (an 8 MiB memory did
+     * not fit its 266 blocks on a PS4), where the memory never got any
+     * contents: made again at the right size */
+    crash_and_restart();
+    fake_cont_create(FAKE_USER0, "GTESTM07SAVE", 100);
+    char old[512];
+    fake_cont_dir(FAKE_USER0, "GTESTM07SAVE", old, sizeof(old));
+    strlcat(old, "/sdmemory_7.bin", sizeof(old));
+    expect(fake_write_host(old, "", 0) == 0, "an old 100-block GTESTM07SAVE with an empty sdmemory_7.bin");
+    s.slot = 7, s.memory_size = 8u << 20;
+    EXPECT_RC(sd_setup_memory2(&s, &res), 0, "Setup2 slot 7, 8 MiB, where the old empty container cannot hold it");
+    expect(res.existed == 0 && fake_cont_blocks(FAKE_USER0, "GTESTM07SAVE") == 256 + 36 + 48 + 64,
+           "GTESTM07SAVE made again with 404 blocks");
+    static u8 m6[0x1000];
+    fill(m6, sizeof(m6), 6);
+    st.slot = 7, st.data = d, st.data_num = 1, st.param = NULL;
+    d[0].buf = m6, d[0].buf_size = 0x1000, d[0].offset = (8 << 20) - 0x1000;
+    EXPECT_RC(sd_set_memory2(&st), 0, "Set2 at the end of the 8 MiB");
+
+    /* the same with contents: never deleted, never moved; the setup is
+     * refused and the memory stays as it was */
+    crash_and_restart();
+    fake_cont_create(FAKE_USER0, "GTESTM06SAVE", 100);
+    fake_cont_dir(FAKE_USER0, "GTESTM06SAVE", old, sizeof(old));
+    strlcat(old, "/sdmemory_6.bin", sizeof(old));
+    expect(fake_write_host(old, m6, 0x1000) == 0, "an old 100-block GTESTM06SAVE holding 4 KiB");
+    s.slot = 6;
+    EXPECT_RC(sd_setup_memory2(&s, &res), W_NO_SPACE_FS, "Setup2 slot 6, 8 MiB: NO_SPACE_FS, not moved");
+    expect(fake_cont_blocks(FAKE_USER0, "GTESTM06SAVE") == 100 && cont_file("GTESTM06SAVE", "sdmemory_6.bin", back,
+                                                                           0x2000) == 0x1000 &&
+               !memcmp(back, m6, 0x1000),
+           "GTESTM06SAVE and its 4 KiB untouched");
+
+    /* slot 0 holds 0x87800 bytes in GTESTSAVE: set up bigger than GTESTSAVE
+     * can hold, it is refused and stays where it is, with what it holds */
+    crash_and_restart();
+    s.slot = 0, s.memory_size = 9u << 20;
+    EXPECT_RC(sd_setup_memory2(&s, &res), W_NO_SPACE_FS, "Setup2 slot 0 again, 9 MiB: NO_SPACE_FS");
+    expect(!fake_cont_exists(FAKE_USER0, "GTESTM00SAVE") &&
+               cont_file("GTESTSAVE", "sdmemory_0.bin", back, sizeof(back)) == 0x87800 && !memcmp(back, buf, 0x10000),
+           "slot 0 untouched in GTESTSAVE");
+    g.slot = st.slot = 0;
 
     /* the SDK 1.x calls: slot 0 */
     crash_and_restart();
@@ -854,6 +918,13 @@ static void test_data_root(void)
     for (u32 i = 0; i < n && i < 8; i++)
         listed |= strstr(names[i], "000") != NULL;
     expect(rc == 0 && !listed, "no save directory of the title's");
+    /* the selector's save scan lets go of it: its extension may be gone before the title mounts it again */
+    savedata_data_release();
+    expect(!fake_cont_mounted(FAKE_USER0, "GTESTD000SAVE") && fake_reserved() == 0,
+           "let go after the save scan: unmounted, its mount slot given back");
+    mp = savedata_data_root();
+    expect(mp && fake_cont_mounted(FAKE_USER0, "GTESTD000SAVE") && fake_reserved() == 1,
+           "the next use mounts it again");
 }
 
 /* a title run for another user (game selector): its own saves stay with the user running SWRR */

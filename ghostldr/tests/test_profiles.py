@@ -28,6 +28,8 @@ import orbis_elf as oe  # noqa: E402
 import profiles  # noqa: E402
 
 GHOST_FP = "3afb932d5171d24cc9f3d536dedfaf6900000000"
+BLOODBORNE_FP = "543f03aa757c0ab8edb7db53668f0c436d42b43d"
+BLOODBORNE_SRC = ROOT / "build/bloodborne/app0"     # a CUSA00900 1.09 dump, when there is one
 
 
 def ghost_lines() -> list[str]:
@@ -204,6 +206,23 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(profiles.detect_title(src), "BREW00042")
             self.assertEqual(profiles.app_params(profiles.load("BREW00042"), src), [3, 42, 0, 0, 0])
 
+    def test_bloodborne_plan_matches_its_executable(self) -> None:
+        """The plan's tables hold what the 1.09 executable has there: config 1
+        (Master_ps4_GFXMIX) of the heap table at 0x4736d40."""
+        if not (BLOODBORNE_SRC / "eboot.bin").exists():
+            self.skipTest("needs the CUSA00900 1.09 dump in build/bloodborne/app0")
+        prof = profiles.load("CUSA00900")
+        self.assertEqual(profiles.eboot_fingerprint(BLOODBORNE_SRC), prof["eboot"]["fingerprint"])
+        img = oe.parse(BLOODBORNE_SRC / "eboot.bin")
+        cfg1 = struct.unpack("<16Q", img.read_vaddr(0x4736dc0, 0x80))
+        self.assertEqual([v >> 20 for v in cfg1], [524, 276, 152, 2287, 886, 10, 6, 0, 14, 0, 5, 8, 9, 296, 0, 5])
+        for t in prof["memory"]["plan"]["tables"]:
+            off = int(t["table"], 16)
+            self.assertEqual((off - 0x4736dc0) % 8, 0, t["what"])
+            self.assertTrue(0x4736dc0 <= off < 0x4736e40, t["what"])
+            want = [int(v, 16) for v in t.get("expect", [])]
+            self.assertEqual(list(struct.unpack(f"<{len(want)}Q", img.read_vaddr(off, 8 * len(want)))), want)
+
     def test_dump_is_detected_by_its_fingerprint(self) -> None:
         src = profiles.DEFAULT_SRC
         if not (src / "eboot.bin").exists():
@@ -266,13 +285,13 @@ def host_cc() -> list[str] | None:
     return [cc]
 
 
-def build_host(name: str, sources: list[Path], out: Path) -> None:
+def build_host(name: str, sources: list[Path], out: Path, extra: list[str] | None = None) -> None:
     cc = host_cc()
     if not cc:
         raise unittest.SkipTest("no C compiler whose programs run on this machine")
     subprocess.run(cc + ["-std=gnu11", "-O1", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
-                         "-ffreestanding", "-fno-builtin", f"-I{NATIVE / 'include'}", *map(str, sources), "-o",
-                         str(out)], check=True)
+                         "-ffreestanding", "-fno-builtin", f"-I{NATIVE / 'include'}", *(extra or []),
+                         *map(str, sources), "-o", str(out)], check=True)
 
 
 class CoreProfileTests(unittest.TestCase):
@@ -293,7 +312,8 @@ class CoreProfileTests(unittest.TestCase):
         bound["eboot"] = {"fingerprint": "11" * 20}
         bound["exec"] = {"eboot.bin": [["0x0", "0x2c00000"], ["0x3000000", "0x3100000"]]}
         blobs = [profiles.compile_blob(profiles.load("CUSA11456")), profiles.compile_blob(rule_title),
-                 profiles.compile_blob(bound), profiles.compile_blob(profiles.load(None))]
+                 profiles.compile_blob(bound), profiles.compile_blob(profiles.load("CUSA00900")),
+                 profiles.compile_blob(profiles.load(None))]
         cls.bundle = Path(cls.tmp.name) / "bundle.bin"
         cls.bundle.write_bytes(b"".join(blobs) + bytes(8))
 
@@ -317,6 +337,26 @@ class CoreProfileTests(unittest.TestCase):
         self.assertIn("lazy site 0x896126 1, gate 0, flex gate 0", lines)     # no plan-free gates
         # host answers kept, but Neo mode: the plan is for memory mode 0 (Jak X answers 1)
         self.assertIn("neo 0, available direct ffffffff: 0 + 0 MiB", lines)
+
+    def test_bloodborne_plan_shrinks_its_second_gpu_heap(self) -> None:
+        """Bloodborne's config 1 asks for 4478 MiB of heaps; with Ghost's logged
+        4532 MiB free, GFX_GraphicsPrivateB absorbs the rest (4532 - 4066
+        fixed - 32 reserve - 100 video) and nothing else changes."""
+        lines = self.run_host("bb", BLOODBORNE_FP)
+        self.assertIn("title CUSA00900 has plan 2", lines)
+        self.assertIn("budget: 4532 MiB free in 6 holes; GFX_GraphicsPrivateB heap 886 -> 334 MiB; reporting 4400 "
+                      "MiB direct memory", lines)
+        self.assertIn("patch rc 0 reported 4400 MiB; config 1: 524 276 152 2287 334 10 6 0 14 0 5 8 9 296 0 5", lines)
+
+    def test_bloodborne_gpu_heap_knob_moves_memory_between_its_gpu_heaps(self) -> None:
+        lines = self.run_host("bb", BLOODBORNE_FP, env={"GHOSTLDR_TEST_GPU_HEAP": "2087"})
+        self.assertIn("budget: GFX_GraphicsPrivate heap 2287 -> 2087 MiB", lines)
+        self.assertIn("patch rc 0 reported 4400 MiB; config 1: 524 276 152 2087 534 10 6 0 14 0 5 8 9 296 0 5", lines)
+
+    def test_another_build_of_bloodborne_is_left_alone(self) -> None:
+        lines = self.run_host("bb", "00" * 20)
+        self.assertIn("title CUSA00900 has plan 0", lines)
+        self.assertIn("config 1: 524 276 152 2287 886 10 6 0 14 0 5 8 9 296 0 5", lines[-1])
 
     def test_free_walk_steps_over_a_failing_query(self) -> None:
         # find-next fails inside the 0x13e00000-0x50080000 hole: the walk must

@@ -1,6 +1,8 @@
 # The game selector
 
-When more than one title is installed, ghostldr shows a game picker before it loads anything, laid out after the consoles' home screens: the selected game's backdrop fills the screen, with a row of rounded game tiles over it, the focused one larger and ringed, its name, details and a Start button under it, and ghostldr's mark, the user and the clock at the top. You pick a game with the controller and it boots. Everything the picker used is freed before the game loads.
+Before it loads anything, ghostldr shows a game picker, laid out after the consoles' home screens: the selected game's backdrop fills the screen, with a row of rounded game tiles over it, the focused one larger and ringed, its name, details and a Start button under it, and ghostldr's mark, the user and the clock at the top. You pick a game with the controller and it boots. Everything the picker used is freed before the game loads.
+
+The row ends with a **Settings** tile (a gear; Square opens it from anywhere in the row): the drive check that `ghostldr.py check` did on a computer, the USB drives, the network installer, the log on the USB drive and what ghostldr, the console and SWRR are ([Settings](#settings)). The picker shows with one title too, and with none: then the row is the Settings tile alone, with what to do under it.
 
 On a PS4, where SWRR gets only 2.5 GiB of memory, every game's dump is greyed with a warning sign and asks before it boots; homebrew isn't ([On a PS4](#on-a-ps4)).
 
@@ -16,22 +18,25 @@ Each game shows its real name and art: from the game's own files when it has the
 | L1 / R1 | Jump 5 titles. |
 | Cross | Boot the selected game. On a PS4 a game's dump asks first. An incomplete install, or a folder on a USB drive that can't start, can't be booted: a message says why (rerun `gfs_install.py`; or what is wrong with the folder). |
 | Options or Triangle | Show the game's information: title ID, version, size, install status, container prefix; for a game on a USB drive, its folder there and any note. |
+| Square | Open Settings (as does Cross on the gear at the end of the row). |
+| In Settings | Up / Down move between the sections on the left; Right or Cross goes into the open one, where Up / Down move between its entries and the list scrolls; Cross changes a switch or starts an action; Left or Circle comes back out; Circle on the sections, or Square, closes Settings. |
+| In Install over network | Circle stops the installer and closes the card; while a browser is installing, hold it for a second (the install can go on later). |
 | Circle | Close the information panel. |
 | In the PS4 question | Left / Right (d-pad or left stick; Up / Down too) choose Yes or No, No first. Cross takes the one chosen, Circle is No. |
 | In a save tool's question (whose saves) | Up / Down (d-pad or left stick) move between the users. Cross opens the saves of the one chosen; on a user who isn't signed in it says why instead. Circle goes back to the list (not when the save tool is the only title, or after a scan was cancelled). |
 | While a save tool's saves are looked for | Hold Circle to cancel: the question comes back. |
 
-There is no way back to SWRR from the picker: to leave without booting, close SWRR from the PS button menu.
+To leave without booting: Settings › About › **Close ghostldr** (after a Yes, SWRR is back at Luac0re's loader, which takes ghostldr.lua again), or close SWRR from the PS button menu.
 
 ## When it appears
 
 `run.py boot` serves the selector (`build/ghostldr/selector.bin`) next to the extension, on TCP 18196. ghostfs decides whether it is needed (`gfs_init`, docs/ghostfs-catalogue.md):
 
-- **More than one complete title installed and no `--title`:** `gfs_init` mounts nothing and returns 1. `boot.c` closes SWRR's message dialog and releases SWRR's memory, then runs the selector. It mounts the chosen title with `gfs_pick` and goes on with the boot: the title's profile is bound and its memory planned only after the selector has freed everything.
-- **One complete title, or `--title T`:** that title boots as before. The core closes the selector's socket without loading the module. **Except a save tool** (its profile's `save_tool` feature, [below](#save-tools-apollo-save-tool)): then the selector shows that title alone, with the question whose saves to open already up.
+- **A selector came with the boot and no `--title`** (the release's two-file boot, `run.py boot`): the selector shows, whatever is installed. `gfs_init` mounts nothing and returns 1: with several titles as before, and now with one, or with none (`no GFSCATALOG, GFSINDEX or GHOSTIDX (...): nothing installed`, then the selector). `boot.c` closes SWRR's message dialog and releases SWRR's memory, then runs the selector. It mounts the chosen title with `gfs_pick` and goes on with the boot: the title's profile is bound and its memory planned only after the selector has freed everything. With none installed, the screen says what to do and has Settings (Install over network); Close ghostldr ends the boot (`SEL_EXIT_LOADER`, -20, which `ghost_boot` returns as it is).
+- **`--title T`:** that title boots as before. The core closes the selector's socket without loading the module. **Except a save tool** (its profile's `save_tool` feature, [below](#save-tools-apollo-save-tool)): then the selector shows that title alone, with the question whose saves to open already up.
 - **`run.py boot --select`:** the selector shows anyway, even with one title or `--title` (run.py then sends every title profile it knows, so the title picked gets its own, and ignores `--title`). Use it to check the selector on hardware.
-- **No selector** (`--no-selector`, a release without `selector.bin`, or the module fails): several titles stop the boot as before (`pick one with run.py boot --title TITLE`). With `--title`, or one title, that title boots.
-- **Games on a USB drive** (`--app-root auto`, the default, or `usb:/...`; [usb.md](usb.md)): when the extension finds more than one game and no `--title` asks for one, it sets `CTX_FLAG_LIBRARY` and the selector lists what it found (`ghost_api.library()`): every game in the extension's order, second copies of a game each with their folder, and folders that can't start, with the reason. The choice goes back by its place in that list (`approot_pick`), so either copy of a game can be started.
+- **No selector** (`--no-selector`, a release without `selector.bin`, or the module fails): several titles stop the boot as before (`pick one with run.py boot --title TITLE`). With `--title`, or one title, that title boots; with none, the boot stops (`nothing installed`).
+- **Games on a USB drive** (`--app-root auto`, the default, or `usb:/...`; [usb.md](usb.md)): when the extension finds more than one game and no `--title` asks for one, it sets `CTX_FLAG_LIBRARY` and the selector lists what it found (`ghost_api.library()`): every game in the extension's order, second copies of a game each with their folder, and folders that can't start, with the reason. The choice goes back by its place in that list (`approot_pick`), so either copy of a game can be started. One game on a drive is mounted by the extension and shown alone (with its folder), with the Settings tile. With games on more than one drive, each shows its drive: `USB drive 2: folder`.
 - **Outside ghostfs** (`--app-root /data/...`), only with `--select`.
 
 ```bash
@@ -47,7 +52,7 @@ The selector uses its built-in font by default; `--select-font auto` tries the c
 - **Under the focused tile:**
   - its name; a name too long for one line takes two, a little smaller, and then an ellipsis;
   - title ID, version, size and where it is: `Installed`, or `USB drive:` and its folder there;
-  - what to know about it, as coloured labels followed by a line of text: `Install incomplete` or `Can't start` (red, with the reason), `Second copy` (blue, with which copy `--title` boots), `May not run on PS4` (amber, a game's dump on a PS4);
+  - what to know about it, as coloured labels followed by a line of text: `Install incomplete` or `Can't start` (red, with the reason), `Second copy` (blue, with where the other copy is, such as `The same game is also in USB drive 1: ghostldr/CUSA11456`: either starts from the row), `May not run on PS4` (amber, a game's dump on a PS4);
   - a **Start** button, greyed out when the title can't start.
 - **The backdrop:** the focused game's, full screen, dimmed and shaded darker towards the top, the left (where the text is) and the bottom. It is decoded once the row stops moving and crossfades from the previous one.
 - **The top bar:** ghostldr's mark (a little ghost the selector draws) on the left; on the right the signed-in user's name (`sceUserServiceGetUserName`) beside a disc with their initial, and the clock in the system's 12/24-hour setting.
@@ -194,6 +199,75 @@ boot: saves of user 10000001
 
 (A 13.60 PS5 with the extension's stand-in scan, `ext/src/save_prescan.c`, which reports 24 titles of 250 ms; user IDs and the name replaced.)
 
+## Settings
+
+A sheet over the selector, in its look: the sections on the left, the open one's entries on the right. It is read again each time it opens (a drive plugged in meanwhile shows), and nothing in it writes to a drive or a save.
+
+- **Games:** every title the selector has, installed or on a drive, each with a coloured label and, under it, what is wrong and what to do, in plain words: `Ready`; `Install incomplete` (install it again: it goes on where it stopped); `Can't start` (the extension's reason for that folder, such as `its app0 folder has no eboot.bin (copied in full?)`, and to fix the folder on a computer); `Second copy` (which folder has the other); `May not run on PS4`. A heading counts them: `3 GAMES · 2 READY · 1 TO LOOK AT`.
+- **USB drives:** each drive the console has, read only, from `libSceUsbStorage`'s device list and each drive's `sceUsbStorageGetDeviceInfo`: its maker and model, its file system (exFAT, FAT32, or unknown: the features word's 0x80 and 0x40), its size and free space, the games found on it (by the mount point their folders are under: `/ghostldr_usb`, `/ghostldr_usb2`, ... in the device list's order) and the folders that can't start. A FAT32 drive says that a file of 4 GiB or more can't be on it and most PS4 games have one. Then what ghostldr looks for on a drive, where the log goes, and **Look again** (the drives read again). On a PS4 and in Jak X, where ghostldr doesn't read drives, it says so. The selector opens the USB storage session itself when the extension didn't (an app root given), as the extension would, and leaves it open for the title (`CTX_FLAG_USB_SESSION`).
+- **Network:** the console's address (ghostldr.lua's in the two-file boot, else `sceNetCtlGetInfo`), **Install over network**, and the ports ghostldr's features use: Luac0re's loader (9026; UltraC0re's 8888), the bundle port and ELF loader (9021, or 9022 when 9021 was taken; the ELF loader's own when it listens), FTP while a game runs (`CTX_FTP_PORT`, 1212 by default), the network installer (8090).
+- **Logs:** **Write logs to the USB drive**, On or Off (a switch, below: the extension's `CTX_FLAG_NO_USB_LOG`), and where the log goes (the extension's, once it has decided: [logs.md](logs.md)). On a PS4 and in Jak X, where drives aren't read, it says so.
+- **Advanced:** the switches that were `run.py` flags (below), and **Reset to defaults**.
+- **About:** ghostldr's version (`git describe` when the selector was built), the build (the bundle's build ID when the cached bundle, `GLDRCACHE/bundle.bin`, has this boot's selector; else how this boot came), the bundle cache (empty, this build's, another build's), the console and its firmware (the boot context's `fw`, from Luac0re's `FW_VERSION`), the host game (its own `/app0/sce_sys/param.sfo` where it can be read: name, region by title ID, version; else Luac0re's `TITLE_ID`, which ghostldr.lua leaves 48 bytes into the console address's buffer, `CTX_CONSOLE_IP_SLOT`), and **Close ghostldr** (a question, No first; Yes: `SEL_EXIT_LOADER`, and the TV says "Closed in Settings. Back to Luac0re's loader.").
+
+### Switches and where they are kept
+
+A user of a release has no `run.py`, so what its flags did that a user may need is a switch in Settings, each a boot-context flag with one line saying what On and Off do:
+
+| Switch | Where | Flag | Default | Was |
+|---|---|---|---|---|
+| Write logs to the USB drive | Logs | `CTX_FLAG_NO_USB_LOG` set when Off | On | the log's own setting |
+| Show the system's dialogs | Advanced | 0x400000 (dialogs answered at once) set when Off | On | `--dialog-auto` |
+| Plan memory automatically | Advanced | `CTX_FLAG_NO_AUTO_MEM` set when Off | On | `--no-auto-memory` |
+| Keep Remote Play on | Advanced | `CTX_FLAG_KEEP_REMOTE_PLAY` set when On | Off | `--keep-remote-play` |
+
+They are kept in a save container of ghostldr's own, `GLDRCONF/settings.txt` (96 blocks, made the first time a switch changes), which only the selector writes (`selector/src/conf.c`):
+
+```
+# ghostldr settings: the game selector's Settings writes this file
+remote_play=on
+flags_on=0x200
+flags_off=0x0
+```
+
+A key for each switch that isn't at its default, and the two masks they make. A change counts at once: the selector sets or clears the flag in this boot's context. The release's ghostldr.lua sets `flags_on` and clears `flags_off` in the flags it boots with, for the selector's call and again (read once more) for the game's, so a change made in the selector reaches the game picked right after. `run.py` doesn't read the file: a developer's flags stand, and Advanced says that boot started without the switches.
+
+**Safe mode.** A switch must not lock anyone out. ghostldr.lua writes `pending=1` before it uses the masks, and the selector clears it when it comes up. A boot that finds `pending=1` (the last one with the switches never reached the selector) goes to the selector without them, once: it writes `pending=safe`, the TV says "Settings > Advanced is left out of this boot", and so do a message in the selector and a note in Advanced. The game's call after the selector uses them again (the selector was reached). **Reset to defaults** puts every switch back (the log's too) and empties the masks.
+
+A new switch is one `case` in `conf_switch` (key, words, flag, whether On sets it, default): ghostldr.lua needs no change. Keep its flag below bit 32 if the selector's own call needs it (that call gets the low 32 bits only).
+
+The log says what happened:
+
+```
+ghostldr: settings: flags 4bc000000003002 -> 4bc000000003202
+selector: settings: GLDRCONF/settings.txt: 121 bytes, switches f, flags_on 200, flags_off 0 (this boot has them); pending: cleared
+selector: settings: GLDRCONF/settings.txt written: 0 (switches 7: flags_on 0, flags_off 0)
+selector: settings: reset to defaults: 0
+```
+
+### Install over network
+
+**Install over network** starts the network installer ([manager.md](manager.md)): a web server that installs a game into saved data from a browser on a phone or computer. It is part of the selector module (`native/netinst`, linked in when it is in the tree), so it runs in the emulator's JIT buffer like the rest of the selector and costs no new JIT memory; it uses its own memory and gives all of it back when it stops. A card shows:
+
+- the address to open (big), and the token the page asks for before it changes anything;
+- while a browser installs: the game's name and ID, a bar, how much of how much, the speed and the time left;
+- the installer's last message, and how many games it installed.
+
+Circle stops it (held for a second while a browser is installing; the install can go on later). The selector always stops it before it returns. When an install finishes, the selector reads the catalogue again and the new game joins the row (there is room for 8 more titles than were installed at the start), and choosing it boots it: `gfs_mount_title` reads the catalogue again when the title chosen isn't in the one it read at the start. On a boot from a USB drive's games the list is the drive's: a game installed then shows on a boot without games on the drive.
+
+The interface, in `netinst/netinst.h`: `netinst_start(api, &handle)` (on the boot thread; 0, or < 0 with the reason in the status), `netinst_status(handle, &status)` (a snapshot: state, address, token, title, bytes done of total, speed, installs finished, a message), `netinst_stop(&handle)`.
+
+The log says what happened:
+
+```
+selector: settings: opened (2 title(s); USB 1, 2 drive(s); logs to USB 1; network installer 1; 192.168.0.20)
+selector: settings: drive 0: id 1a2b3c4d, info 0, 'Example SSD', 3446890 of 3907018 MiB free, features 80, 1 game(s), 0 bad
+selector: settings: network installer started: 0
+selector: settings: network install finished (1 this session): Skyward Harbour
+selector: settings: catalogue again: 3 title(s) (had 2)
+selector: network installer stopped
+```
+
 ## Text
 
 - **Labels** (`INSTALLED`, the information panel's headings) are small capitals spaced a little apart; the big name is the regular face drawn twice a pixel apart, as Noto Sans has no bold here.
@@ -212,7 +286,7 @@ The selector is a second runtime module, next to the extension (`ghostldr/native
 4. `sel_main(&g_ghost_api, title)` runs on the boot thread, with the same core services the extension gets.
 5. When it returns, the core overwrites the image with zeros and continues the boot.
 
-The core side is about 1.5 KiB of text: `src/sel.c`, the deferral in `gfs_init` and `gfs_pick` (`ghostfs.c`), a few lines in `boot.c` (with a save tool's `title_pick` and `save_prescan`), and a guard in `arena_init`. The module itself is about 149 KiB: 82 KiB of code and data, and 67 KiB of font.
+The core side is about 1.5 KiB of text: `src/sel.c`, the deferral in `gfs_init` and `gfs_pick` (`ghostfs.c`), a few lines in `boot.c` (with a save tool's `title_pick` and `save_prescan`, and Close ghostldr's `SEL_EXIT_LOADER`), and a guard in `arena_init`. The module itself is about 197 KiB: 130 KiB of code and data (Settings is `setui.c` and `info.c`), and 67 KiB of font; the network installer adds about 48 KiB (24 KiB of it its page).
 
 ### Screen and controller
 
@@ -234,7 +308,7 @@ ghostldr's memory is tight: the title's memory plan is computed after the select
 
 | Block | Type | Size | Holds |
 |---|---|---|---|
-| heap | direct memory, write-back, CPU RW | 52 MiB for one title; plus 0.82 MiB per extra title; plus 8 MiB with the system font | the frame being drawn and two prepared backdrops (7.9 MiB each), each title's tile at two sizes (384 and 256 px), the glyph cache, the system font library's memory, and temporaries (`<prefix>META`'s first MiB, a backdrop's QOI and its pixels; or a title's index, a PNG file, its decoded image, PngDec's work memory) |
+| heap | direct memory, write-back, CPU RW | 52 MiB for one title; plus 0.82 MiB per extra title (8 more with the network installer); 1 MiB for Settings; plus 8 MiB with the system font | the frame being drawn and two prepared backdrops (7.9 MiB each), each title's tile at two sizes (384 and 256 px), the glyph cache, the system font library's memory, and temporaries (`<prefix>META`'s first MiB, a backdrop's QOI and its pixels; or a title's index, a PNG file, its decoded image, PngDec's work memory) |
 | video | direct memory type 3 (write-combined), CPU+GPU RW | 16 MiB | the two scan-out buffers |
 
 - **Placement:** both blocks go at the top of the largest free run of direct memory (`sceKernelAvailableDirectMemorySize`), away from the low hole and the top 32 MiB where the loader's own small blocks go (`mem.c`). Freeing them gives the run back in one piece, so no fragment is left between the run and anything allocated meanwhile.
@@ -243,7 +317,7 @@ ghostldr's memory is tight: the title's memory plan is computed after the select
   1. wait for pending flips;
   2. close VideoOut;
   3. close the font, renderer and library, and terminate the font memory;
-  4. unload `libSceFont`, `libSceFontFt` and `libScePngDec` if the selector loaded them (a module SWRR had already loaded stays);
+  4. unload `libSceFont`, `libSceFontFt` and `libScePngDec` if the selector loaded them (a module SWRR had already loaded stays; `libSceUsbStorage`, loaded for Settings when the extension hadn't, stays with its session for the title); stop the network installer if it ran;
   5. unmap and release both blocks;
   6. after the selector returns, the core clears its code.
 
@@ -281,9 +355,13 @@ SELECTOR_SHOTS=/tmp/shots python3 -m unittest ghostldr.tests.test_selector   # k
   /tmp/preview --font ghostldr/native/selector/font/notosans.glf --out /tmp/shots --scene tour \
      --meta CUSA11456=/tmp/ghost-meta.bin --user Player --verify
   ```
-- **`ghostldr/tests/selector/host_env.c`:** runs the core's real `sel.c` and the real `selector.bin` in an x86-64 process (Rosetta on Apple silicon) against a fake console. Its `ps4` mode sets `CTX_FLAG_PS4` over three titles (homebrew by its ID, a game, and homebrew by its `CONTENT_ID`) and answers the question No, Circle, then Yes. Its `apollo` mode has Apollo (with its real profile) beside a game and two users, the second not signed in: the question, the mount and the scan through fakes of the core's `title_pick` and `save_prescan`, a cancel and the rest, and `title_user` at the end; `apollo-one` has the save tool alone, not requested, as `boot.c` shows it. Its save data is built by the test in ghostfs's formats. Every run must give back every block, close VideoOut and every file, unload what it loaded, unmount every container and leave the image cleared. `SELECTOR_NO_X86=1` skips these runs.
+- **Settings in the preview:** `--scene settings` (every section with `--usb`'s two made-up drives, one exFAT and one FAT32; the log switch; Install over network with a made-up installer that installs a title, which joins the row; Close ghostldr: No), `empty` (nothing installed: the gear alone, then Settings), `one` (one title and the gear), `quit` (Close ghostldr: Yes). What Settings shows comes from `sel_info_load`, which the preview fills with made-up values.
+- **`ghostldr/tests/selector/host_env.c`:** runs the core's real `sel.c` and the real `selector.bin` in an x86-64 process (Rosetta on Apple silicon) against a fake console. Its `ps4` mode sets `CTX_FLAG_PS4` over three titles (homebrew by its ID, a game, and homebrew by its `CONTENT_ID`) and answers the question No, Circle, then Yes. Its `apollo` mode has Apollo (with its real profile) beside a game and two users, the second not signed in: the question, the mount and the scan through fakes of the core's `title_pick` and `save_prescan`, a cancel and the rest, and `title_user` at the end; `apollo-one` has the save tool alone, not requested, as `boot.c` shows it. Its save data is built by the test in ghostfs's formats. Its `one` mode shows one title with the Settings tile; `empty` has nothing installed (Settings opens, Close ghostldr returns `SEL_EXIT_LOADER`); `settings` runs a test build of the module with a fake network installer linked in (`tests/selector/netinst_fake`, built with `make SEL_NET_DIR=...`): it installs a title, the catalogue is read again, the new title is chosen, and the installer's memory goes back. Every run must give back every block, close VideoOut and every file, unload what it loaded, unmount every container and leave the image cleared. `SELECTOR_NO_X86=1` skips these runs.
 
 ## Limits
+
+- **A drive's file system** comes from `sceUsbStorageGetDeviceInfo`'s features word: 0x80 exFAT, 0x40 FAT32 (both measured, [usb.md](usb.md)); anything else shows as unknown.
+- **Games per drive** come from the extension's list: a drive it didn't look at says so.
 
 - **Cross is always "start".** It doesn't follow a Circle-to-confirm system setting.
 - **Loading art is synchronous:** each icon costs a save-container mount (a few, for an install without `<prefix>META`), so the row can stutter while icons first load. Backdrops wait until the row stops.

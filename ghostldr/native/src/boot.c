@@ -1,5 +1,5 @@
 /* Load the title's modules and executable and start its main thread. */
-#include "ghost.h"
+#include "ghost_api.h"
 
 void module_protect_relro(struct module *m);
 
@@ -23,6 +23,7 @@ static void *ghost_main_thread(void *unused)
     logf("calling title entry %p", entry);
     entry(&args, ghost_exit_handler);
     logf("title entry returned");
+    fail_title(FAIL_RETURNED, 0);
     return NULL;
 }
 
@@ -176,6 +177,8 @@ static int elfldr_select(struct el_select *s)
     gfs_unmount_all();
     ext_abandon();
     logf("elfldr: stopped (%d): the extension and its executable memory are given back", g_el_rc);
+    if (picked == SEL_EXIT_LOADER) /* Settings: "Close ghostldr": no second call */
+        return picked;
     return g_el_rc < 0 ? g_el_rc : CTX_ELFLDR_PICKED;
 }
 
@@ -227,6 +230,9 @@ int ghost_boot(void)
         return -7;
     int choose = 0; /* game selector: 1 when ghostfs or a library left the choice to it */
     bool library = false;
+    /* the installed titles or a USB drive's (not a dev setup's app root):
+     * the selector shows even one title, or none, with its Settings */
+    bool settings = !strcmp(root, "auto") || !strcmp(root, "ghostfs") || !strncmp(root, "usb:", 4);
     int rc = boot_root(&root, &choose, &library);
     if (rc != 0)
         return rc;
@@ -242,8 +248,15 @@ int ghost_boot(void)
         title[sizeof(title) - 1] = 0;
         picked = s->index, g_title_user = s->user;
         logf("boot: %s, picked in the game selector beside the ELF loader", picked >= 0 ? title : "no title");
-    } else /* a save tool (Apollo) asks whose saves even when it is the only title */
-        picked = sel_run(choose || (g_ctx->flags & CTX_FLAG_SELECT) || profile_has(PF_SAVE_TOOL), title);
+    } else /* a save tool (Apollo) asks whose saves even when it is the only title; with no
+            * --title the selector shows one title too, or none, with its Settings */
+        picked = sel_run(choose || (g_ctx->flags & CTX_FLAG_SELECT) || profile_has(PF_SAVE_TOOL) ||
+                             (settings && !profile_requested()),
+                         title);
+    if (picked == SEL_EXIT_LOADER) { /* Settings: "Close ghostldr" */
+        ext_abandon();
+        return picked;
+    }
     if (boot_title_pick(picked >= 0 ? title : NULL, picked) != 0) {
         if (library)
             ext_abandon();

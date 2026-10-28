@@ -1031,6 +1031,87 @@ void ov_ime_end(void)
     unlock();
 }
 
+/* ---- for failure.c (docs/failures.md): a whole page of ghostldr's own ----
+ * drawn into a linear A8R8G8B8 buffer it flips itself (after a crash or an
+ * exit, over any title), the title's VideoOut handle, the controller, and
+ * whether a drawn dialog is open (the title waits for the user, not stuck) */
+HIDDEN s32 ov_vo_handle(void) { return g_ov.nbuf ? g_ov.handle : -1; }
+HIDDEN u32 ov_buttons(void) { return read_pad(); }
+HIDDEN bool ov_open(void) { return __atomic_load_n(&g_ov.kind, __ATOMIC_ACQUIRE) != OV_NONE; }
+
+/* the lines of text that fit maxw, each drawn at x from y down (fg 0: only
+ * measured): the next y */
+static s32 page_text(s32 x, s32 y, s32 maxw, const char *t, u32 fg, u32 bg)
+{
+    while (*t) {
+        const char *e = t, *brk = NULL;
+        s32 w = 0;
+        while (*e && *e != '\n') {
+            const char *p = e;
+            s32 cw = glyph(utf8_cp(&p))->adv;
+            if (w + cw > maxw && e > t)
+                break;
+            if (*e == ' ')
+                brk = e;
+            w += cw, e = p;
+        }
+        if (*e && *e != '\n' && brk)
+            e = brk;
+        if (fg)
+            draw_str(x, y, t, (s32)(e - t), fg, bg);
+        y += DLGF_LINE;
+        t = *e ? e + 1 : e;
+    }
+    return y;
+}
+
+/* headline, body and foot (dimmed), in a panel sized to them */
+static s32 page_lines(s32 x, s32 y, s32 pw, const char *head, const char *body, const char *foot, bool draw)
+{
+    if (draw)
+        fill(x, y + DLGF_ASCENT + 14, 120, 4, C_BAR);
+    y = page_text(x, y + DLGF_ASCENT, pw, head, draw ? C_TEXT : 0, C_PANEL) + DLGF_LINE / 2;
+    y = page_text(x, y + DLGF_ASCENT, pw, body, draw ? C_TEXT : 0, C_PANEL);
+    if (foot)
+        y = page_text(x, y + DLGF_ASCENT + DLGF_LINE / 2, pw, foot, draw ? C_DIM : 0, C_PANEL);
+    return y;
+}
+
+static void page_draw(u32 *px, u32 w, u32 h, u32 pitch, u32 fmt, const char *head, const char *body,
+                      const char *foot)
+{
+    u32 sw = g_ov.w, sh = g_ov.h, sp = g_ov.pitch, sf = g_ov.fmt;
+    u32 *spx = g_px;
+    g_ov.w = w, g_ov.h = h, g_ov.pitch = pitch, g_ov.fmt = fmt, g_px = px;
+    fill(0, 0, (s32)w, (s32)h, 0xFF0E1116u);
+    s32 pw = (s32)w - 160 < 1400 ? (s32)w - 160 : 1400, x = ((s32)w - pw) / 2;
+    s32 ph = page_lines(x, 0, pw, head, body, foot, false) + PAD, y = ((s32)h - ph) / 2;
+    frame_rect(x - PAD, y - PAD, pw + 2 * PAD, ph + 2 * PAD, 3, C_BORDER, C_PANEL);
+    page_lines(x, y, pw, head, body, foot, true);
+    g_ov.w = sw, g_ov.h = sh, g_ov.pitch = sp, g_ov.fmt = sf, g_px = spx;
+}
+
+HIDDEN void ov_page(u32 *px, u32 w, u32 h, u32 pitch, const char *head, const char *body, const char *foot)
+{
+    lock();
+    page_draw(px, w, h, pitch, FMT_ARGB, head, body, foot);
+    unlock();
+}
+
+/* the page into the title's buffer on screen, when the CPU can draw there
+ * (its frames are linear): true when drawn */
+HIDDEN bool ov_page_shown(const char *head, const char *body, const char *foot)
+{
+    sync_shown();
+    lock();
+    s32 idx = g_ov.shown;
+    bool ok = g_ov.linear && fmt_ok(g_ov.fmt) && drawable(idx);
+    if (ok)
+        page_draw((u32 *)g_ov.addr[idx], g_ov.w, g_ov.h, g_ov.pitch, g_ov.fmt, head, body, foot);
+    unlock();
+    return ok;
+}
+
 static const struct ext_hle_ent k_hle[] = {
     {"libSceVideoOut", "sceVideoOutSubmitFlip", hle_sceVideoOutSubmitFlip, NULL},
     /* not a system library: the banner for the tests */

@@ -443,6 +443,33 @@ int main(int argc, char **argv)
              arc, (u64)off, size / MiB);
         return 0;
     }
+    if (strcmp(sc, "bb") == 0) {
+        /* Bloodborne 1.09: its heap table (eboot+0x4736d40, 16 heaps per
+         * memory config), config 1 Master_ps4_GFXMIX at +0x80, in MiB */
+        static const u32 cfg1[16] = {524, 276, 152, 2287, 886, 10, 6, 0, 14, 0, 5, 8, 9, 296, 0, 5};
+        static u8 text[0x4737000];
+        u64 *cell = (u64 *)(text + 0x4736dc0);
+        for (u32 i = 0; i < 16; i++)
+            cell[i] = (u64)cfg1[i] * MiB;
+        const char *gpu = getenv("GHOSTLDR_TEST_GPU_HEAP");
+        if (gpu)
+            g_ctx->reserved[4] = strtoul(gpu, NULL, 0); /* run.py --gpu-heap-mib */
+        profile_select("CUSA00900");
+        g_main = (struct module){.name = "eboot.bin", .is_main = true, .base = BASE, .image_size = sizeof(text),
+                                 .text_size = sizeof(text)};
+        if (have_fp)
+            memcpy(g_main.fingerprint, fp, 20);
+        g_modules = g_main_mod = &g_main;
+        profile_bind(have_fp ? fp : NULL);
+        logf("title %s has plan %u", profile_title(), profile_has(PF_PLAN));
+        int rc = budget_patch_text(&g_main, text);
+        char line[256];
+        int len = fmt(line, sizeof(line), "patch rc %d reported %lu MiB; config 1:", rc, g_reported_dmem / MiB);
+        for (u32 i = 0; i < 16; i++)
+            len += fmt(line + len, sizeof(line) - len, " %lu", cell[i] / MiB);
+        logf("%s", line);
+        return 0;
+    }
     if (strcmp(sc, "exec") == 0) { /* the code ranges bigexec.c would read */
         profile_select(argv[4]);
         make_text("", have_fp ? fp : NULL);

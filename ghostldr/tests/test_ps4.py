@@ -83,6 +83,29 @@ class ArenaTests(unittest.TestCase):
         self.assertIn("code region 0 +2050000-+284c000", out)
         self.assertEqual(offsets(out), {"libSceFios2.prx": 0x205c000, "libc.prx": 0x21ec000})  # 902a30000 on 13.60
 
+    def test_a_fresh_object_after_a_reclaim(self) -> None:
+        """bigexec.c's reclaim: no buffer left; the fresh object mapped where
+        EE was is the code region, at the same addresses, and the compiler
+        writes it at its own address (the PS4 path checks each write here)."""
+        for model in ("ps5", "ps4-header"):
+            out = self.run_host(model, "adopt")
+            self.assertIn("adopt 0, buffers left 0", out)
+            first = 0x4c000 if model == "ps5" else EE + 0x10000             # as without a reclaim
+            self.assertIn("code region 0 +4c000-+1450000", out)
+            self.assertNotIn("FAULT", out)
+            self.assertIn(f"module libSceFios2.prx at +{first:x} rx 1 write 0", out)
+            self.assertEqual(out.count("compiler bytes written"), 2, out)
+
+    def test_the_extension_in_a_buffer(self) -> None:
+        """ext.c without a new JIT block: the top of VU0 (the smaller buffers'
+        highest), which leaves the arena; the same place a second time."""
+        out = self.run_host("ps5", "exttop")
+        self.assertIn(f"ext at +{0x3050000 - 0xa8000:x}, again +{0x3050000 - 0xa8000:x}", out)     # VU0's top
+        self.assertEqual(re.findall(r"buffer \+(\w+)-\+(\w+)", out),
+                         [("48000", "2048000"), ("204c000", "284c000"), ("3054000", "4054000")])
+        self.assertIn("ext write 0", out)
+        self.assertIn("ext at +0, again +0", self.run_host("ps4-header", "exttop"))     # a PS4 keeps its JIT block
+
     def test_old_rule_faults_like_the_ps4(self) -> None:
         """v0.1.1's first module on the PS4 layout: the EE buffer's very start,
         which the compiler cannot write (the 12.02 crash at 914b20000)."""

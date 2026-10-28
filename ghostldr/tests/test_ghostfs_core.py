@@ -69,15 +69,20 @@ class GhostfsCoreTests(unittest.TestCase):
                              int(info["layout_id"], 16), info["total"], len(info["containers"]), flags))
         self.files[f"{gc.CATALOG}/{gc.CATALOG_FILE}"] = gc.build(cat)
 
-    def boot(self, want: str = "-", select: bool = False, choice: str = "") -> list[str]:
+    def boot(self, want: str = "-", select: bool = False, choice: str = "", present: bool = False,
+             after: bytes = b"") -> list[str]:
         """choice: what the game selector picks when the core asks it ("": no selector);
-        select: run.py --select."""
+        select: run.py --select; present: a selector came with the boot; after: the catalogue
+        as it is when the selector returns (a title installed over the network meanwhile)."""
         args = []
         for i, (name, data) in enumerate(self.files.items()):
             path = self.root / f"f{i}.bin"
             path.write_bytes(data)
             args.append(f"{name}={path}")
-        env = dict(os.environ, SEL_FLAG="1" if select else "0", SEL_CHOICE=choice)
+        after_path = self.root / "catalog-after.bin"
+        after_path.write_bytes(after)
+        env = dict(os.environ, SEL_FLAG="1" if select else "0", SEL_CHOICE=choice, SEL_PRESENT="1" if present else "0",
+                   SEL_CATALOG_AFTER=str(after_path) if after else "")
         out = subprocess.run([str(self.exe), want, "/app0/eboot.bin", *args], capture_output=True, text=True,
                              timeout=60, env=env)
         self.assertEqual(out.returncode, 0, out.stderr)
@@ -124,6 +129,37 @@ class GhostfsCoreTests(unittest.TestCase):
         self.assert_booted(lines, "CUSA11111")
         self.assert_booted(self.boot("CUSA22222"), "CUSA22222")     # --title: no selector
         self.assert_booted(self.boot("CUSA11111"), "CUSA11111")
+
+    def test_with_a_selector_one_title_or_none_is_shown(self) -> None:
+        """A selector came with the boot and no --title: one title is left to it too (Settings),
+        and so is an empty install, which the selector shows as such."""
+        lines = self.boot(present=True)                            # nothing installed
+        self.assertTrue([ln for ln in lines if ln.endswith("nothing installed")], lines)
+        self.assertIn("deferred to the game selector; it chose nothing", lines)
+        self.assertTrue([ln for ln in lines if ln.startswith("init -1")], lines)
+        lines = self.boot()                                        # no selector: as before
+        self.assertNotIn("deferred to the game selector; it chose nothing", lines)
+        self.install("CUSA22222")
+        self.catalogue(("CUSA22222", 0, None))
+        lines = self.boot(present=True, choice="CUSA22222")
+        self.assertIn("deferred to the game selector; it chose CUSA22222", lines)
+        self.assert_booted(lines, "CUSA22222")
+        lines = self.boot("CUSA22222", present=True)               # --title: no selector
+        self.assertNotIn("deferred", " ".join(lines))
+        self.assert_booted(lines, "CUSA22222")
+
+    def test_a_title_installed_while_the_selector_runs(self) -> None:
+        """The catalogue is read again when the selector picks a title it doesn't hold (yet)."""
+        self.install("CUSA11111")
+        self.install("CUSA22222")
+        self.catalogue(("CUSA11111", 0, None))
+        before = self.files[f"{gc.CATALOG}/{gc.CATALOG_FILE}"]
+        self.catalogue(("CUSA11111", 0, None), ("CUSA22222", 0, None))
+        after = self.files[f"{gc.CATALOG}/{gc.CATALOG_FILE}"]
+        self.files[f"{gc.CATALOG}/{gc.CATALOG_FILE}"] = before
+        lines = self.boot(present=True, choice="CUSA22222", after=after)
+        self.assertIn("a title was installed while the selector ran", lines)
+        self.assert_booted(lines, "CUSA22222")
 
     def test_select_shows_the_selector_anyway(self) -> None:
         self.install("CUSA11111")

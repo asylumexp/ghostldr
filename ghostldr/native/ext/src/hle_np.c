@@ -1215,10 +1215,8 @@ static s32 hle_sceNpCommerceDialogClose(void)
 {
     spin_lock(&g_np_lock);
     s32 st = g_cd_status;
-    s32 rc = st == CD_NONE ? CD_NOT_INITIALIZED
-             : st == CD_INITIALIZED ? CD_NOT_RUNNING
-             : st == CD_FINISHED ? CD_ALREADY_CLOSE
-             : 0;
+    /* as the 12.50 library: NOT_RUNNING unless it is running */
+    s32 rc = st == CD_NONE ? CD_NOT_INITIALIZED : st != CD_RUNNING ? CD_NOT_RUNNING : 0;
     if (rc == 0)
         g_cd_status = CD_FINISHED;
     spin_unlock(&g_np_lock);

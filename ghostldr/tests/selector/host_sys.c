@@ -30,6 +30,9 @@ void sys_protect(void *addr, unsigned long size, int writable)
 }
 
 int sys_open(const char *path) { return open(path, O_RDONLY); }
+int sys_open_w(const char *path) { return open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644); }
+long sys_write(int fd, const void *buf, unsigned long n) { return write(fd, buf, n); }
+int sys_mkdir(const char *path) { return mkdir(path, 0755); }
 long sys_read(int fd, void *buf, unsigned long n) { return read(fd, buf, n); }
 long sys_pread(int fd, void *buf, unsigned long n, long off) { return pread(fd, buf, n, off); }
 int sys_close(int fd) { return close(fd); }

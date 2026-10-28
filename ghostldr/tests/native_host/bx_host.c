@@ -10,6 +10,8 @@
  *       segment bytes
  *   bx_host cover CASES   one case per line: "R lo hi ... F lo hi ... O size
  *       ... K keep" (hex), one answer per line
+ *   bx_host fresh CASES   the same lines (O and K ignored): bx_fresh's
+ *       objects, one answer per line
  */
 #include "bxplan.h"
 
@@ -164,7 +166,7 @@ static int runs(int argc, char **argv)
 }
 
 /* "R lo hi ... F lo hi ... O size ... K keep" */
-static int cover(const char *path)
+static int cover(const char *path, bool fresh)
 {
     char line[2048];
     void *in = fopen(path, "r");
@@ -193,13 +195,17 @@ static int cover(const char *path)
                 keep = v;
         }
         struct bx_layout l;
-        int rc = bx_cover(r, nr / 2, f, nf / 2, obj, no, keep, &l);
+        u64 size[BX_MAX_VIEWS];
+        int rc = fresh ? bx_fresh(r, nr / 2, f, nf / 2, size, &l) : bx_cover(r, nr / 2, f, nf / 2, obj, no, keep, &l);
         if (rc) {
             printf("none\n");
             continue;
         }
         for (u32 v = 0; v < l.nviews; v++)
-            printf("%u %s ", l.view[v].obj, sx(l.view[v].off));
+            if (fresh)
+                printf("%u %s %lx ", l.view[v].obj, sx(l.view[v].off), size[v]);
+            else
+                printf("%u %s ", l.view[v].obj, sx(l.view[v].off));
         printf("used %lx\n", l.used);
     }
     return in ? 0 : 2;
@@ -212,7 +218,9 @@ int main(int argc, char **argv)
     if (argc > 7 && !strcmp(argv[1], "runs"))
         return runs(argc - 2, argv + 2);
     if (argc > 2 && !strcmp(argv[1], "cover"))
-        return cover(argv[2]);
-    printf("usage: bx_host plan FILE... | runs SEG VADDR TEXT EH GOTLO GOTHI [POINT...] | cover CASES\n");
+        return cover(argv[2], false);
+    if (argc > 2 && !strcmp(argv[1], "fresh"))
+        return cover(argv[2], true);
+    printf("usage: bx_host plan FILE... | runs SEG VADDR TEXT EH GOTLO GOTHI [POINT...] | cover CASES | fresh CASES\n");
     return 2;
 }

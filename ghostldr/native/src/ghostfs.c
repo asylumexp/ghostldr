@@ -114,14 +114,16 @@ static void unlock(volatile int *l) { __atomic_store_n(l, 0, __ATOMIC_RELEASE); 
 
 /* ---- save containers ---- */
 
+static bool sd_ready(void);
+
 /* user < 0: the initial user.  required_blocks (may be NULL) gets what a
  * NO_SPACE_FS (0x809F000A) result says the create needs. */
 int gfs_mount_user(s32 user, const char *dirname, int mode, u64 blocks, char mount_point[16], u64 *required_blocks)
 {
     u8 params[128], result[64];
     char dir[32];
-    if (!sd_mount)
-        return (int)0x809F000B; /* SCE_SAVE_DATA_ERROR_INTERNAL: no save service (not ghostfs) */
+    if (!sd_ready()) /* set up here too: on a USB boot the selector reads GLDRCACHE (Settings) and installs titles */
+        return (int)0x809F000B; /* SCE_SAVE_DATA_ERROR_INTERNAL: no save service */
     memset(params, 0, sizeof(params));
     memset(result, 0, sizeof(result));
     memset(dir, 0, sizeof(dir));
@@ -563,17 +565,26 @@ COLD const struct gfs_cat_entry *gfs_title_at(u32 i)
 COLD int gfs_mount_title(const char *title)
 {
     const struct gfs_cat_entry *e = NULL;
-    for (u32 i = 0; i < gfs_titles() && !e; i++)
-        if (strncmp(gfs_title_at(i)->title, title, 16) == 0)
-            e = gfs_title_at(i);
+    for (int pass = 0; pass < 2 && (!e || (e->flags & GFS_CAT_INCOMPLETE)); pass++) {
+        if (pass) { /* installed since it was read: the selector's network install (docs/selector.md) */
+            page_free((void *)g_cat, 0);
+            g_cat = NULL, g_cat_n = 0, g_cat_read = false, e = NULL;
+        }
+        for (u32 i = 0; i < gfs_titles() && !e; i++)
+            if (strncmp(gfs_title_at(i)->title, title, 16) == 0)
+                e = gfs_title_at(i);
+    }
     if (!e || (e->flags & GFS_CAT_INCOMPLETE)) {
         logf("ghostfs: %s is %s", title, e ? "not completely installed: rerun gfs_install.py" : "not installed");
+        fail_note(e ? FAIL_INSTALL_INCOMPLETE : FAIL_NOT_INSTALLED, title);
         return -1;
     }
     char index[33], prefix[17];
     strlcpy(index, e->index, sizeof(index));
     strlcpy(prefix, e->prefix, sizeof(prefix));
     int rc = load_index(index, title, prefix);
+    if (rc)
+        fail_note(FAIL_INSTALL_DAMAGED, title);
     if (rc != 0 && rc != -1)
         logf("ghostfs: %s: no index %s (%x): reinstall it, or gfs_install.py --remove %s", title, index, rc, title);
     return rc;
@@ -587,14 +598,20 @@ COLD int gfs_init(void)
     if (!sd_ready())
         return -1;
     const char *want = profile_requested();
+    /* a selector came with the boot and no title was asked for: it shows one
+     * title, or none (what to do, and its Settings), too */
+    bool sel = !want && sel_present();
     u32 n = gfs_titles(), ready = 0;
     if (!n) {
         int rc = load_index("GFSINDEX", want, NULL);
         if (rc > 0 || rc < -1)
             rc = load_index("GHOSTIDX", want, NULL);     /* installs before 2026-10-21 */
-        if (rc > 0 || rc < -1)
+        if (rc > 0 || rc < -1) {
             logf("ghostfs: no GFSCATALOG, GFSINDEX or GHOSTIDX (%x): nothing installed", rc);
-        return rc ? -1 : 0;
+            if (!sel) /* the selector shows "nothing installed" itself */
+                fail_note(FAIL_NOTHING_INSTALLED, "");
+        }
+        return rc ? (sel ? 1 : -1) : 0;
     }
     char list[400];
     int len = 0;
@@ -610,7 +627,7 @@ COLD int gfs_init(void)
     logf("ghostfs: installed: %s", list);
     /* game selector: several titles and none asked for, or run.py --select;
      * boot.c runs it once SWRR's memory is free, then calls gfs_pick */
-    if (ready && ((g_ctx->flags & CTX_FLAG_SELECT) || (!want && ready > 1)))
+    if (sel || (ready && ((g_ctx->flags & CTX_FLAG_SELECT) || (!want && ready > 1))))
         return 1;
     return gfs_pick(NULL);
 }
@@ -628,6 +645,7 @@ COLD int gfs_pick(const char *title)
             ready++, only = gfs_title_at(i);
     if (!title && ready != 1) {
         logf("ghostfs: %s: pick one with run.py boot --title TITLE", ready ? "several titles" : "none is complete");
+        fail_note(ready ? FAIL_BOOT : FAIL_INSTALL_INCOMPLETE, "");
         return -1;
     }
     char t[17];

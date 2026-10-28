@@ -1,4 +1,0 @@
-#!/bin/sh
-# ghostldr desktop app (Debian package): /opt/ghostldr with the system's Python 3.11+.
-# The tools run from a copy in ~/.local/share/ghostldr/workspace (see app/README.md).
-exec /usr/bin/python3 /opt/ghostldr/app/launch.py --workspace "$@"

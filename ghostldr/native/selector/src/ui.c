@@ -17,6 +17,10 @@
  * the platform then runs the save scan, whose progress shows as a bar with
  * the time left when it is long (ui_scan_*).
  *
+ * The row ends with a Settings tile (a gear; Square from anywhere in the
+ * row): setui.c draws that screen.  With no title installed the row is that
+ * tile alone, and the text under it says what to do.
+ *
  * Frames are drawn only when something changes, and then only the rows that
  * changed (S->changed: the top bar, the row and the text under it, or
  * everything).
@@ -95,6 +99,9 @@ u32 title_tint(const char *id, const char *name)
 
 /* c with its alpha times a/255 */
 static u32 fade(u32 c, u32 a) { return ((c >> 24) * a / 255) << 24 | (c & 0xFFFFFFu); }
+
+/* the Settings tile: the last in the row (the only one with no titles) */
+static int on_gear(const struct sel *S) { return S->sel >= S->ntitles; }
 
 static int ps4_marked(const struct sel *S, const struct title *t)
 {
@@ -333,7 +340,7 @@ int ui_init(struct sel *S, struct title *titles, int n, int initial)
 {
     S->titles = titles;
     S->ntitles = n;
-    S->sel = clampi(initial, 0, n - 1);
+    S->sel = clampi(initial, 0, n > 0 ? n - 1 : 0);
     S->pos = (float)S->sel;
     S->bg_title = -2;
     S->bg_cur = 0;
@@ -344,18 +351,41 @@ int ui_init(struct sel *S, struct title *titles, int n, int initial)
         if (!all[i]->px)
             return -1;
     }
-    for (int i = 0; i < n; i++) {
-        struct title *t = &titles[i];
-        t->tint = title_tint(t->id, t->name);
-        t->icon = (surface){sel_alloc(S, (u64)TILE_BIG * TILE_BIG * 4), TILE_BIG, TILE_BIG, TILE_BIG, 0, 0};
-        t->icon_small = (surface){sel_alloc(S, (u64)TILE_SMALL * TILE_SMALL * 4), TILE_SMALL, TILE_SMALL, TILE_SMALL,
-                                  0, 0};
-        if (!t->icon.px || !t->icon_small.px)
+    for (int i = 0; i < n; i++)
+        if (ui_title_alloc(S, &titles[i]) != 0)
             return -1;
-    }
+    S->rows = sel_alloc(S, sizeof(struct srow) * SET_MAX_ROWS);
+    if (!S->rows)
+        return -1;
     prepare(S, -1, &S->bg[0]);
     S->changed = CH_ALL;
     return 0;
+}
+
+/* a title's tiles (both sizes) and its colour */
+int ui_title_alloc(struct sel *S, struct title *t)
+{
+    t->tint = title_tint(t->id, t->name);
+    t->icon = (surface){sel_alloc(S, (u64)TILE_BIG * TILE_BIG * 4), TILE_BIG, TILE_BIG, TILE_BIG, 0, 0};
+    t->icon_small = (surface){sel_alloc(S, (u64)TILE_SMALL * TILE_SMALL * 4), TILE_SMALL, TILE_SMALL, TILE_SMALL, 0, 0};
+    return t->icon.px && t->icon_small.px ? 0 : -1;
+}
+
+/* the titles again (an install finished): the selection stays on its title,
+ * or on the Settings tile it was on */
+void ui_set_titles(struct sel *S, struct title *titles, int n)
+{
+    char id[16];
+    int gear = on_gear(S);
+    str_copy(id, gear ? "" : S->titles[S->sel].id, sizeof(id));
+    S->titles = titles, S->ntitles = n;
+    S->sel = n;
+    for (int i = 0; !gear && i < n; i++)
+        if (id[0] && str_same(titles[i].id, id))
+            S->sel = i;
+    S->pos = (float)S->sel, S->vel = 0;
+    S->bg_title = -2; /* the backdrop again */
+    S->changed |= CH_ALL;
 }
 
 void ui_set_clock(struct sel *S, int h, int m, int h24)
@@ -372,8 +402,16 @@ void ui_set_user(struct sel *S, const char *name)
     S->changed |= CH_TOP;
 }
 
-static void toast(struct sel *S, u64 now, const char *msg)
+void ui_toast(struct sel *S, u64 now, const char *msg);
+static void toast(struct sel *S, u64 now, const char *msg) { ui_toast(S, now, msg); }
+void ui_toast_ok(struct sel *S, u64 now, const char *msg)
 {
+    ui_toast(S, now, msg);
+    S->toast_ok = 1;
+}
+void ui_toast(struct sel *S, u64 now, const char *msg)
+{
+    S->toast_ok = 0;
     str_copy(S->toast, msg, sizeof(S->toast));
     if (S->toast[0] >= 'a' && S->toast[0] <= 'z')
         S->toast[0] = (char)(S->toast[0] - 32);
@@ -521,11 +559,16 @@ static void start(struct sel *S)
  * or say why it can't start */
 static void choose(struct sel *S, u64 now)
 {
+    if (on_gear(S)) {
+        S->panel_open = 0;
+        set_open(S, now);
+        return;
+    }
     struct title *t = &S->titles[S->sel];
     if (!(t->flags & TITLE_COMPLETE)) {
         toast(S, now, t->note[0] ? t->note : "This game's install is incomplete: run gfs_install.py again.");
     } else if (ps4_marked(S, t)) {
-        S->ask_open = 1, S->ask_yes = 0, S->ask_focus = 0;
+        S->ask_open = 1, S->ask_yes = 0, S->ask_focus = 0, S->ask_kind = ASK_PS4;
         S->panel_open = 0;
         S->toast_until_us = 0;
         sel_log(S, "PS4: asking before title %d (%s), a game's dump, boots", S->sel, t->id);
@@ -545,7 +588,7 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int stick_
     /* left / right with key repeat (d-pad or left stick), L1 / R1 jump; up /
      * down in the list of users */
     int users = S->users_open && !S->user_chosen;
-    int dir = users ? ((buttons & PAD_UP) || stick_y < 64 ? -1 : (buttons & PAD_DOWN) || stick_y > 192 ? 1 : 0)
+    int dir = users || (S->set_open && !S->ask_open) ? ((buttons & PAD_UP) || stick_y < 64 ? -1 : (buttons & PAD_DOWN) || stick_y > 192 ? 1 : 0)
                     : (buttons & PAD_LEFT) || stick_x < 64 ? -1 : (buttons & PAD_RIGHT) || stick_x > 192 ? 1 : 0;
     int step = 0;
     if (dir && dir != S->repeat_dir) {
@@ -597,13 +640,21 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int stick_
             S->ask_yes = yes, S->changed |= CH_ALL;
         if (pressed & (PAD_CROSS | PAD_CIRCLE)) {
             int go = (pressed & PAD_CROSS) && S->ask_yes;
-            sel_log(S, "PS4: %s for title %d (%s)%s", go ? "Yes" : "No", S->sel, S->titles[S->sel].id,
-                    go ? ": booting it" : "");
             S->ask_open = 0;
-            if (go)
-                start(S);
+            if (S->ask_kind == ASK_CLOSE) {
+                sel_log(S, "settings: Close ghostldr: %s", go ? "Yes: back to Luac0re's loader" : "No");
+                if (go)
+                    S->quit = 1, S->launching = 1;
+            } else {
+                sel_log(S, "PS4: %s for title %d (%s)%s", go ? "Yes" : "No", S->sel, S->titles[S->sel].id,
+                        go ? ": booting it" : "");
+                if (go)
+                    start(S);
+            }
             S->changed |= CH_ALL;
         }
+    } else if (S->set_open) {
+        set_step(S, now, dt, pressed, buttons, step);
     } else {
         if (!S->panel_open) {
             if (pressed & PAD_L1)
@@ -611,17 +662,20 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int stick_
             if (pressed & PAD_R1)
                 step = 5;
             if (step) {
-                int n = clampi(S->sel + step, 0, S->ntitles - 1);
+                int n = clampi(S->sel + step, 0, S->ntitles); /* the last: the Settings tile */
                 if (n != S->sel) {
+                    int gear = on_gear(S);
                     S->sel = n;
                     S->last_move_us = now;
-                    S->changed |= CH_ROW;
+                    S->changed |= gear != on_gear(S) ? CH_ALL : CH_ROW; /* the hints change too */
                 }
             }
         }
         if (pressed & PAD_CROSS)
             choose(S, now);
-        else if (pressed & (PAD_OPTIONS | PAD_TRIANGLE))
+        else if (pressed & PAD_SETTINGS)
+            S->panel_open = 0, set_open(S, now);
+        else if ((pressed & (PAD_OPTIONS | PAD_TRIANGLE)) && !on_gear(S))
             S->panel_open = !S->panel_open, S->toast_until_us = 0;
         else if ((pressed & PAD_CIRCLE) && S->panel_open)
             S->panel_open = 0;
@@ -659,9 +713,13 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int stick_
     if (S->launching) {
         S->launch = approach(S->launch, 1.0f, (float)dt / LAUNCH_US);
         if (S->launch >= 1.0f && boot)
-            *boot = S->sel;
+            *boot = S->quit ? UI_QUIT : S->sel;
         S->changed |= CH_ALL;
     }
+    float set_before = S->set_a;
+    S->set_a = approach(S->set_a, S->set_open ? 1.0f : 0.0f, (float)dt / PANEL_US);
+    if (S->set_a != set_before || set_busy(S))
+        S->changed |= CH_ALL;
     if (S->panel != panel_before || S->bg_fade != fade_before || S->ask != ask_before ||
         S->ask_focus != focus_before || S->toast_a != toast_before || S->users_a != users_before ||
         S->user_y != user_y_before || S->scan_a != scan_before)
@@ -672,8 +730,9 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int stick_
     if (S->user_chosen || S->scanning)
         return S->changed != 0;
     /* the selected game's backdrop once the row has settled */
-    if (S->bg_title != S->sel && S->pos == target && now - S->last_move_us >= BG_SETTLE && !S->launching)
-        ui_prepare_bg(S, S->sel);
+    int bg_want = on_gear(S) ? -1 : S->sel;
+    if (S->bg_title != bg_want && S->pos == target && now - S->last_move_us >= BG_SETTLE && !S->launching)
+        ui_prepare_bg(S, bg_want);
     /* a tile marked (or not) before its title's param.sfo said otherwise: again */
     for (int i = 0; i < S->ntitles; i++)
         if (S->titles[i].icon_state && S->titles[i].marked != ps4_marked(S, &S->titles[i]))
@@ -705,6 +764,16 @@ static void circle_glyph(surface *s, float cx, float cy, float r, u32 disc, u32 
     draw_disc(s, cx, cy, r * 0.46f, r * 0.17f, ink);
 }
 
+static void square_glyph(surface *s, float cx, float cy, float r, u32 disc, u32 ink)
+{
+    draw_disc(s, cx, cy, r, 0, disc);
+    float k = r * 0.38f, w = r * 0.15f;
+    draw_line(s, cx - k, cy - k, cx + k, cy - k, w, ink);
+    draw_line(s, cx + k, cy - k, cx + k, cy + k, w, ink);
+    draw_line(s, cx + k, cy + k, cx - k, cy + k, w, ink);
+    draw_line(s, cx - k, cy + k, cx - k, cy - k, w, ink);
+}
+
 /* "OPTIONS" on a pill, as the button is labelled on the controller */
 static int options_glyph(struct sel *S, surface *s, int x, int cy, u32 pill, u32 ink)
 {
@@ -728,9 +797,15 @@ static int hint(struct sel *S, surface *s, int x, int base, int button, const ch
     }
     if (button == PAD_CROSS)
         cross_glyph(s, (float)x - 28, cy, 16, fade(0xF0FFFFFFu, c >> 24), INK);
+    else if (button == PAD_SQUARE)
+        square_glyph(s, (float)x - 28, cy, 16, fade(0xF0FFFFFFu, c >> 24), INK);
     else
         circle_glyph(s, (float)x - 28, cy, 16, fade(0xF0FFFFFFu, c >> 24), INK);
     return x - 44;
+}
+int ui_hint(struct sel *S, surface *s, int x, int base, int button, const char *label, u32 c)
+{
+    return hint(S, s, x, base, button, label, c);
 }
 
 /* button hints, right-aligned at the bottom */
@@ -749,23 +824,33 @@ static void hints(struct sel *S, surface *s)
     } else if (S->ask > 0.5f) {
         x = hint(S, s, x, base, PAD_CIRCLE, "Back", SOFT) - 44;
         hint(S, s, x, base, PAD_CROSS, "Select", SOFT);
+    } else if (S->set_a > 0.5f) {
+        set_hints(S, s);
     } else if (S->panel > 0.5f) {
         u32 start_c = S->titles[S->sel].flags & TITLE_COMPLETE ? SOFT : 0x60FFFFFFu;
         x = hint(S, s, x, base, PAD_CIRCLE, "Back", SOFT) - 44;
         hint(S, s, x, base, PAD_CROSS, "Start", start_c);
+    } else if (on_gear(S)) {
+        hint(S, s, x, base, PAD_CROSS, "Settings", SOFT);
     } else {
+        x = hint(S, s, x, base, PAD_SQUARE, "Settings", SOFT) - 44;
         hint(S, s, x, base, PAD_OPTIONS, "Information", SOFT);
     }
 }
 
-static void fmt_size(char *out, int cap, u64 bytes)
+void ui_size(char *out, int cap, u64 bytes);
+static void fmt_size(char *out, int cap, u64 bytes) { ui_size(out, cap, bytes); }
+void ui_size(char *out, int cap, u64 bytes)
 {
     if (!bytes) {
         str_copy(out, "Unknown", cap);
         return;
     }
     u64 tenths = (bytes * 10 + (1ull << 29)) >> 30;
-    if (tenths < 10) {
+    if (tenths >= 10240) { /* a drive */
+        u64 t = (bytes * 10 + (1ull << 39)) >> 40;
+        sel_fmt(out, cap, "%u.%u TB", (u32)(t / 10), (u32)(t % 10));
+    } else if (tenths < 10) {
         u64 mb = (bytes + (1ull << 19)) >> 20;
         sel_fmt(out, cap, "%u MB", (u32)(mb ? mb : 1));
     } else {
@@ -839,10 +924,10 @@ static void top_bar(struct sel *S, surface *s)
 /* the row's label and where the selection is in it, above the tiles */
 static void row_label(struct sel *S, surface *s)
 {
-    const struct title *t = &S->titles[S->sel];
-    const char *label = t->where[0] ? "USB DRIVE" : t->prefix[0] ? "INSTALLED" : "GAMES";
+    const struct title *t = on_gear(S) ? 0 : &S->titles[S->sel];
+    const char *label = !t ? "SETTINGS" : t->where[0] ? "USB DRIVE" : t->prefix[0] ? "INSTALLED" : "GAMES";
     text_tracked(S, s, 19, FOCUS_X + 2, LABEL_Y, label, DIM, 3);
-    if (S->ntitles > 1) {
+    if (S->ntitles > 1 && t) {
         char pos[24];
         sel_fmt(pos, sizeof(pos), "%d / %d", S->sel + 1, S->ntitles);
         int w = text_width(S, 22, pos);
@@ -856,13 +941,12 @@ static void tiles(struct sel *S, surface *s)
     int focus = (int)(S->pos + 0.5f);
     for (int pass = 0; pass < 2; pass++)
         for (int i = first; i <= last; i++) {
-            if (i < 0 || i >= S->ntitles || (pass == 0) == (i == focus))
+            if (i < 0 || i > S->ntitles || (pass == 0) == (i == focus))
                 continue;
             int x, size;
             tile_geom(S->pos, i, &x, &size);
             if (x >= SCREEN_W || x + size <= -40)
                 continue;
-            struct title *t = &S->titles[i];
             float d = S->pos - (float)i;
             float wgt = clampf(1 - (d < 0 ? -d : d), 0, 1); /* 1 when focused */
             int r = RADIUS * size / TILE_BIG;
@@ -871,12 +955,23 @@ static void tiles(struct sel *S, surface *s)
             if (wgt > 0)
                 draw_halo(s, x - RING_GAP, ROW_Y - RING_GAP, size + 2 * RING_GAP, size + 2 * RING_GAP,
                           r + RING_GAP, 22, (int)(70 * wgt), 0xFFFFFF);
-            const surface *src = size == TILE_SMALL ? &t->icon_small : &t->icon;
             int bright = 256 - (int)(64 * (1 - wgt)); /* the others a little darker */
+            if (i == S->ntitles) { /* Settings: a gear on slate */
+                draw_rrect(s, x, ROW_Y, size, size, r, mix_rgb(0xFF39414Fu, 0xFF000000u, 256 - bright));
+                draw_vgradient(s, x, ROW_Y, size, size / 2, 0x18FFFFFFu, 0x00FFFFFFu);
+                ui_gear(s, (float)x + (float)size / 2, (float)ROW_Y + (float)size * 0.46f, (float)size * 0.2f,
+                        mix_rgb(0xFFF2F4F7u, 0xFF000000u, 256 - bright), mix_rgb(0xFF39414Fu, 0xFF000000u, 256 - bright));
+                if (size > TILE_SMALL + 40)
+                    ui_text_tracked(S, s, 19, x + (size - ui_text_tracked(S, 0, 19, 0, 0, "SETTINGS", 0, 3)) / 2,
+                                    ROW_Y + size * 82 / 100, "SETTINGS", fade(0xC8FFFFFFu, (u32)(wgt * 255)), 3);
+            } else {
+            struct title *t = &S->titles[i];
+            const surface *src = size == TILE_SMALL ? &t->icon_small : &t->icon;
             if (t->icon_state)
                 draw_scale(s, x, ROW_Y, size, size, src, 256, bright, 0);
             else
                 draw_rrect(s, x, ROW_Y, size, size, r, mix_rgb(t->tint, 0xFF000000u, 256 - bright));
+            }
             if (wgt > 0)
                 draw_rring(s, x - RING_GAP - RING_W, ROW_Y - RING_GAP - RING_W, size + 2 * (RING_GAP + RING_W),
                            size + 2 * (RING_GAP + RING_W), r + RING_GAP + RING_W, RING_W,
@@ -884,10 +979,44 @@ static void tiles(struct sel *S, surface *s)
         }
 }
 
+/* A second copy's note from the extension ("a second copy: --title boots
+ * the one in X", run.py's words; X with "USB N/" on drive N > 1): where the
+ * other copy is, as the selector names places ("USB drive 2: folder"; on
+ * drive 1 "USB drive 1: " when the title's own place names a drive).  0
+ * when the note isn't one. */
+int title_copy_of(const struct title *t, char *out, int cap)
+{
+    const char *k = "boots the one in ", *x = 0;
+    for (const char *c = t->note; *c && !x; c++) {
+        int i = 0;
+        while (k[i] && c[i] == k[i])
+            i++;
+        if (!k[i])
+            x = c + i;
+    }
+    if (!x || !(t->flags & TITLE_COPY))
+        return 0;
+    const char *w = t->where, *d = "USB drive ";
+    int named = 1;
+    for (int i = 0; d[i] && named; i++)
+        named = w[i] == d[i];
+    if (x[0] == 'U' && x[1] == 'S' && x[2] == 'B' && x[3] == ' ' && x[4] >= '1' && x[4] <= '9' && x[5] == '/')
+        sel_fmt(out, cap, "USB drive %c: %s", x[4], x + 6);
+    else
+        sel_fmt(out, cap, "%s%s", named ? "USB drive 1: " : "", x);
+    return 1;
+}
+
 /* a title's note (the extension's, docs/usb.md) as a sentence: capitalised,
- * without "a second copy: " where a chip already says so */
+ * without "a second copy: " where a chip already says so, and a second
+ * copy's said for users (no run.py flag) */
 static const char *note_text(const struct title *t, char *out, int cap)
 {
+    char other[112];
+    if (title_copy_of(t, other, sizeof(other))) {
+        sel_fmt(out, cap, "The same game is also in %s", other);
+        return out;
+    }
     const char *n = t->note;
     const char *copy = "a second copy: ";
     int k = 0;
@@ -942,24 +1071,49 @@ static int statuses(struct sel *S, surface *s, const struct title *t, int x, int
 }
 
 /* the start button: a light pill (greyed when the title can't start) */
-static void start_button(struct sel *S, surface *s, int x, int y, int ok, float k)
+static void start_button(struct sel *S, surface *s, int x, int y, int ok, float k, const char *label)
 {
-    int tw = text_width(S, 28, "Start"), pw = 32 + 32 + 16 + tw + 40;
+    int tw = text_width(S, 28, label), pw = 32 + 32 + 16 + tw + 40;
     float a = k * (ok ? 1.0f : 0.42f);
     draw_shadow(s, x + 6, y + 8, pw - 12, PILL_H - 8, (PILL_H - 8) / 2, 20, (int)(110 * k));
     draw_rrect(s, x, y, pw, PILL_H, PILL_H / 2, (u32)(a * 242) << 24 | 0xF4F6F8);
     u32 ink = (u32)(a * 255) << 24 | 0x15181D;
     cross_glyph(s, (float)x + 32 + 16, (float)y + PILL_H / 2.0f, 16, ink, (u32)(a * 255) << 24 | 0xF4F6F8);
-    draw_text(S, s, 28, x + 32 + 32 + 16, y + PILL_H / 2 + 10, "Start", ink, 0);
+    draw_text(S, s, 28, x + 32 + 32 + 16, y + PILL_H / 2 + 10, label, ink, 0);
 }
 
 /* the focused game's name, details, warnings and Start button */
+/* under the Settings tile: what is there, or with no games what to do */
+static void gear_details(struct sel *S, surface *s, int x, int y, int max_w, float vis, u32 a)
+{
+    if (S->ntitles) {
+        text_bold(S, s, NAME_PX, x, y, "Settings", (a << 24) | 0xFFFFFF, max_w);
+        text_shadowed(S, s, INFO_PX, x, y + 50, "Games and their problems  \xC2\xB7  USB drives  \xC2\xB7  Install over "
+                      "network  \xC2\xB7  Logs  \xC2\xB7  About", fade(SOFT, a), max_w);
+        start_button(S, s, x, y + 104, 1, vis, "Open");
+        return;
+    }
+    text_bold(S, s, NAME_PX, x, y, "No games yet", (a << 24) | 0xFFFFFF, max_w);
+    int ly = y + 50;
+    for (int i = 0; i < 2; i++) { /* no table of pointers: the module has no relocations */
+        const char *say = i ? "Or install one into saved data from a phone or computer: Settings \xE2\x80\xBA Network "
+                              "\xE2\x80\xBA Install over network."
+                            : "Copy a game\xE2\x80\x99s folder (the one with eboot.bin) to a USB drive formatted exFAT, "
+                              "plug it in and start ghostldr again.";
+        char lines[2][128];
+        int n = wrap_lines(S, INFO_PX, max_w < 1400 ? max_w : 1400, say, lines, 2);
+        for (int k = 0; k < n; k++, ly += 38)
+            text_shadowed(S, s, INFO_PX, x, ly, lines[k], fade(SOFT, a), max_w);
+        ly += 8;
+    }
+    start_button(S, s, x, ly + 4, 1, vis, "Settings");
+}
+
 static void details(struct sel *S, surface *s)
 {
     int focus = (int)(S->pos + 0.5f);
-    if (focus < 0 || focus >= S->ntitles)
+    if (focus < 0 || focus > S->ntitles)
         return;
-    const struct title *t = &S->titles[focus];
     float d = S->pos - (float)focus;
     float vis = clampf(1 - 2.2f * (d < 0 ? -d : d), 0, 1);
     u32 a = (u32)(vis * 255);
@@ -967,6 +1121,11 @@ static void details(struct sel *S, surface *s)
         return;
     int x = FOCUS_X + 4 + (int)((1 - vis) * 28), max_w = SCREEN_W - x - MARGIN, y = NAME_Y;
     int name_w = max_w < NAME_W ? max_w : NAME_W;
+    if (focus == S->ntitles) {
+        gear_details(S, s, x, y, name_w, vis, a);
+        return;
+    }
+    const struct title *t = &S->titles[focus];
 
     /* the name: one line, or two a little smaller */
     const char *name = display_name(S, t);
@@ -993,7 +1152,8 @@ static void details(struct sel *S, surface *s)
         n += sel_fmt(info + n, (int)sizeof(info) - n, "%s%s", n ? dot : "", size);
     }
     if (t->where[0])
-        sel_fmt(info + n, (int)sizeof(info) - n, "%sUSB drive: %s", n ? dot : "", t->where);
+        sel_fmt(info + n, (int)sizeof(info) - n, "%s%s%s", n ? dot : "", /* "USB drive 2: ..." from main.c as is */
+                t->where[0] == 'U' && t->where[1] == 'S' && t->where[2] == 'B' ? "" : "USB drive: ", t->where);
     else if (t->prefix[0])
         sel_fmt(info + n, (int)sizeof(info) - n, "%sInstalled", n ? dot : "");
     y += 50;
@@ -1002,7 +1162,7 @@ static void details(struct sel *S, surface *s)
     y += 24;
     if (statuses(S, s, t, x, y, max_w, a))
         y += CHIP_H;
-    start_button(S, s, x, y + 30, (t->flags & TITLE_COMPLETE) != 0, vis);
+    start_button(S, s, x, y + 30, (t->flags & TITLE_COMPLETE) != 0, vis, "Start");
 }
 
 static const char *art_label(u8 src)
@@ -1115,16 +1275,21 @@ static void ask_dialog(struct sel *S, surface *s, float k)
     draw_shadow(s, x, y + 14, ASK_W, ASK_H, 28, 60, (int)(170 * e));
     draw_rrect(s, x, y, ASK_W, ASK_H, 28, fade(0xF6202530u, a));
     draw_rring(s, x, y, ASK_W, ASK_H, 28, 1, fade(0x30FFFFFFu, a));
-    draw_warning(s, (float)SCREEN_W / 2, (float)y + 78, 68, fade(AMBER, a), fade(0xFF2A1E08u, a));
+    int close = S->ask_kind == ASK_CLOSE;
+    if (close)
+        ui_gear(s, (float)SCREEN_W / 2, (float)y + 80, 30, fade(0xFFF2F4F7u, a), fade(0xFF202530u, a));
+    else
+        draw_warning(s, (float)SCREEN_W / 2, (float)y + 78, 68, fade(AMBER, a), fade(0xFF2A1E08u, a));
 
-    const char *msg = "Game dumps largely will not work on PS4 due to RAM limitations";
+    const char *msg = close ? "Close ghostldr? SWRR goes back to Luac0re\xE2\x80\x99s loader without starting a game."
+                            : "Game dumps largely will not work on PS4 due to RAM limitations";
     char lines[2][128];
     int n = wrap_lines(S, 30, ASK_W - 120, msg, lines, 2), ty = y + 172;
     for (int i = 0; i < n; i++, ty += 42) {
         int w = text_width(S, 30, lines[i]);
         draw_text(S, s, 30, (SCREEN_W - w) / 2, ty, lines[i], fade(WHITE, a), ASK_W - 120);
     }
-    const char *q = "Continue anyways?";
+    const char *q = close ? "Send ghostldr.lua again to come back." : "Continue anyways?";
     int qw = text_width(S, 26, q);
     draw_text(S, s, 26, (SCREEN_W - qw) / 2, ty + 10, q, fade(DIM, a), 0);
 
@@ -1147,7 +1312,9 @@ static void ask_dialog(struct sel *S, surface *s, float k)
 }
 
 /* a save tool's cards: centred, under the dim ui_draw puts over the screen */
-static void card(surface *s, int x, int y, int w, int h, float e)
+void ui_card(surface *s, int x, int y, int w, int h, float e);
+static void card(surface *s, int x, int y, int w, int h, float e) { ui_card(s, x, y, w, h, e); }
+void ui_card(surface *s, int x, int y, int w, int h, float e)
 {
     u32 a = (u32)(e * 255);
     draw_shadow(s, x, y + 14, w, h, 28, 60, (int)(170 * e));
@@ -1282,7 +1449,13 @@ static void toast_card(struct sel *S, surface *s, float k)
     int x = (SCREEN_W - w) / 2, y = SCREEN_H - 210 + (int)((1 - e) * 16);
     draw_shadow(s, x, y + 6, w, h, h / 2, 26, (int)(140 * e));
     draw_rrect(s, x, y, w, h, h / 2, fade(0xF0262B33u, a));
-    draw_warning(s, (float)x + 44, (float)y + h / 2.0f, 30, fade(RED, a), fade(0xFF2A1E08u, a));
+    if (S->toast_ok) { /* a tick on green */
+        draw_disc(s, (float)x + 44, (float)y + h / 2.0f, 16, 0, fade(0xFF4FB86Cu, a));
+        draw_line(s, (float)x + 36, (float)y + h / 2.0f + 1, (float)x + 42, (float)y + h / 2.0f + 7, 3.2f, fade(WHITE, a));
+        draw_line(s, (float)x + 42, (float)y + h / 2.0f + 7, (float)x + 53, (float)y + h / 2.0f - 6, 3.2f, fade(WHITE, a));
+    } else {
+        draw_warning(s, (float)x + 44, (float)y + h / 2.0f, 30, fade(RED, a), fade(0xFF2A1E08u, a));
+    }
     draw_text(S, s, 25, x + 72, y + 42, S->toast, fade(WHITE, a), w - 72 - 32);
 }
 
@@ -1292,7 +1465,7 @@ void ui_draw(struct sel *S)
     /* the rows to redraw: everything, or the top bar and / or the row */
     int y0 = 0, y1 = SCREEN_H;
     if (S->drawn_once && !(S->changed & CH_ALL) && S->panel == 0 && S->ask == 0 && S->toast_a == 0 &&
-        S->users_a == 0 && S->scan_a == 0) {
+        S->users_a == 0 && S->scan_a == 0 && S->set_a == 0) {
         y0 = SCREEN_H, y1 = 0;
         if (S->changed & CH_TOP)
             y0 = 0, y1 = TOP_BAND;
@@ -1329,6 +1502,8 @@ void ui_draw(struct sel *S)
         if (S->scan_a > 0)
             scan_card(S, s, S->scan_a);
     }
+    if (S->set_a > 0)
+        set_draw(S, s);
     if (S->toast_a > 0)
         toast_card(S, s, S->toast_a);
     if (S->ask > 0)
@@ -1341,4 +1516,38 @@ void ui_draw(struct sel *S)
     S->damage_y0 = y0, S->damage_y1 = y1;
     S->drawn_once = 1;
     S->changed = 0;
+}
+
+/* ---- shared with setui.c ---- */
+int ui_chip(struct sel *S, surface *s, int x, int y, u32 fg, int sign, const char *text, u32 a)
+{
+    return chip(S, s, x, y, fg, sign, text, a);
+}
+void ui_text_shadowed(struct sel *S, surface *s, int px, int x, int y, const char *str, u32 c, int max_w)
+{
+    text_shadowed(S, s, px, x, y, str, c, max_w);
+}
+void ui_text_bold(struct sel *S, surface *s, int px, int x, int y, const char *str, u32 c, int max_w)
+{
+    text_bold(S, s, px, x, y, str, c, max_w);
+}
+int ui_text_tracked(struct sel *S, surface *s, int px, int x, int y, const char *str, u32 c, int track)
+{
+    return text_tracked(S, s, px, x, y, str, c, track);
+}
+int ui_wrap(struct sel *S, int px, int w, const char *str, char lines[][128], int max)
+{
+    return wrap_lines(S, px, w, str, lines, max);
+}
+
+/* a gear: eight teeth round a disc, with a hole (Settings) */
+void ui_gear(surface *s, float cx, float cy, float r, u32 c, u32 hole)
+{
+    static const float dir[8][2] = {{1, 0}, {0.7071f, 0.7071f}, {0, 1}, {-0.7071f, 0.7071f},
+                                    {-1, 0}, {-0.7071f, -0.7071f}, {0, -1}, {0.7071f, -0.7071f}};
+    for (int i = 0; i < 8; i++)
+        draw_line(s, cx + dir[i][0] * r * 0.7f, cy + dir[i][1] * r * 0.7f, cx + dir[i][0] * r * 1.18f,
+                  cy + dir[i][1] * r * 1.18f, r * 0.34f, c);
+    draw_disc(s, cx, cy, r * 0.86f, 0, c);
+    draw_disc(s, cx, cy, r * 0.36f, 0, hole);
 }

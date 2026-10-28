@@ -12,8 +12,64 @@
  *    never closed; EINTR is retried; anything else costs only that line.
  *
  * log_fd is read for each line, so ghostldr.lua can take the connection back
- * (log_fd -1) once the core has returned. */
-#include "ghost.h"
+ * (log_fd -1) once the core has returned.
+ *
+ * Files (docs/logs.md): every line also goes to /temp0/ghostldr.log, from the
+ * first one on (one write per line: a crash loses none).  Once the extension's
+ * code is placed it takes the lines instead (struct ghost_diag's sink,
+ * ext/src/logfile.c): /temp0 and this boot's file on a USB drive, each with a
+ * size cap and rotation.  The state is struct ghost_diag (ghost_api.h), in
+ * flexible memory mapped at the first line, so the core image stays small. */
+#include "ghost_api.h"
+
+#define O_APPEND 0x8
+
+static struct ghost_diag *g_diag;
+static int g_diag_tried;
+
+struct ghost_diag *log_diag(void)
+{
+    if (g_diag || g_diag_tried || !K.map_flex)
+        return g_diag;
+    g_diag_tried = 1;
+    void *p = NULL;
+    if (K.map_flex(&p, 0x4000, PROT_READ | PROT_WRITE, 0) != 0 || !p)
+        return NULL;
+    struct ghost_diag *D = p;
+    memset(D, 0, sizeof(*D));
+    D->size = sizeof(*D);
+    D->f[0].fd = D->f[1].fd = -1;
+    int fd = K.open ? K.open(LOG_TEMP, O_WRONLY | O_CREAT | O_APPEND, 0666) : -1;
+    off_t end = fd >= 0 && K.lseek ? K.lseek(fd, 0, 2) : 0;
+    if (end > (off_t)(LOG_TEMP_CAP / 2)) { /* earlier boots' lines: room for this one's */
+        K.close(fd);
+        fd = K.open(LOG_TEMP, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0666);
+        end = 0;
+    }
+    if (fd >= 0) {
+        D->f[0].fd = fd;
+        D->f[0].bytes = D->start = D->copied = end > 0 ? (u64)end : 0;
+    }
+    return g_diag = D;
+}
+
+/* a thread that crashed holding the lock (a nested report) waits a while, then writes anyway */
+static void to_files(const char *line, size_t n)
+{
+    struct ghost_diag *D = log_diag();
+    if (!D)
+        return;
+    u32 spins = 0;
+    while (__atomic_exchange_n(&D->lock, 1, __ATOMIC_ACQUIRE) && ++spins < 2000000)
+        ;
+    struct ghost_log_file *f = &D->f[0];
+    if (D->sink)
+        D->sink(line, n);
+    else if (f->fd >= 0 && f->bytes < LOG_TEMP_CAP && K.write(f->fd, line, n) == (ssize_t)n)
+        f->bytes += n;
+    if (spins < 2000000)
+        __atomic_store_n(&D->lock, 0, __ATOMIC_RELEASE);
+}
 
 static void emit(const char *line, size_t n)
 {
@@ -32,6 +88,7 @@ static void emit(const char *line, size_t n)
             K.close((int)fd);
         break;
     }
+    to_files(line, n);
     if (K.debug_out)
         K.debug_out(0, line);
 }

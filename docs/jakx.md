@@ -2,7 +2,7 @@
 
 ghostldr can use *Jak X: Combat Racing* instead of SWRR as its host: the EU PS2 classic (CUSA07992, update 1.04) with [UltraC0re](https://github.com/matem6/UltraC0re) (matem6's Jak X port of Luac0re) in place of Luac0re. The core, the extension, the selector and the title's files are the same. The bootstrap notices UltraC0re and tells the core, which then uses Jak X's offsets and UltraC0re's way into the compiler.
 
-**Status (a 13.60 PS5):** Ghost of Tsushima v2.18 plays in Jak X, from ghostfs, in its PS4 Pro mode: menus, movies, New Game (the prologue into Komoda beach) and Continue from a save, with the controller. The longest session so far is about 25 minutes.
+**Status: experimental** (a 13.60 PS5). SWRR is the supported host. Ghost of Tsushima v2.18 plays in Jak X, from ghostfs, in its PS4 Pro mode: menus, movies, New Game (the prologue into Komoda beach) and Continue from a save, with the controller. The longest session so far is about 25 minutes.
 
 ## What you need
 
@@ -76,4 +76,4 @@ It renders at 4K (3840×2160 display buffers).
 - **Long play sessions:** memory can't run out while Ghost's GPU heap stays under its 1680 MiB (it sat at 1585 throughout), but nobody has played for hours yet. Other regions of the island might need more.
 - **Your SWRR progress:** Jak X's `GHOSTSAVE` starts empty. Moving a save from SWRR's `GHOSTSAVE` across hasn't been tried.
 - **The dev path (`--app-root /data/...`):** it needs no unjail in Jak X, since kstuff mounts `/data` into the sandbox. Unjailing breaks system library loading there.
-- **The selector and the desktop app** haven't been tried with Jak X.
+- **The selector** hasn't been tried with Jak X.

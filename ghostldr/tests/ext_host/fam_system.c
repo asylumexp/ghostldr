@@ -486,6 +486,23 @@ static void download(void)
            "DownloadDataFormat empties download0 only");
 }
 
+/* /data: a store game has none, as on a retail console (homebrew keeps the
+ * title's own: savedata_host.c's test_data_root) */
+static void data_paths(void)
+{
+    static struct module game;
+    char buf[512];
+    const u8 sony[20] = {0x54, 0x3f, 0x03, 0xaa, 0x75, 0x7c, 0x0a, 0xb8, 0xed, 0xb7,
+                         0xdb, 0x53, 0x66, 0x8f, 0x0c, 0x43, 0x6d, 0x42, 0xb4, 0x3d};
+    memcpy(game.fingerprint, sony, 20);
+    g_main_mod = &game;
+    expect(strcmp(remap_path("/data/cache.bin", buf, sizeof(buf)), "/ghostldr-no-data/cache.bin") == 0,
+           "a store game's /data/x is a path that isn't there (ENOENT), not a directory of its own");
+    expect(strcmp(remap_path("/data", buf, sizeof(buf)), "/ghostldr-no-data") == 0, "nor /data itself");
+    expect(!exists("/temp0/ghostldr/CUSA00900/data"), "nothing is made for it");
+    g_main_mod = NULL;
+}
+
 static void events(void)
 {
     u8 *ev = fs_map(0x4000);
@@ -637,7 +654,11 @@ static void misc(void)
                FN(s32(*)(const void *), GI, "sceNpGameIntentInitialize")(NULL) == 0,
            "NpGameIntent Initialize: ALREADY_INITIALIZED is success");
     expect(FN(s32(*)(void), GI, "sceNpGameIntentLaunchApp")() == (s32)0x80553800, "NpGameIntent LaunchApp is refused");
-    expect(ext_hle_lookup(GI, "jEIXUAr9XE8", NULL) == 0, "ReceiveIntent passes to the host");
+    u8 intent[0x40];
+    memset(intent, 0xAA, sizeof(intent));
+    *(u64 *)intent = sizeof(intent), *(s32 *)(intent + 8) = -1;
+    expect(FN(s32(*)(void *), GI, "sceNpGameIntentReceiveIntent")(intent) == (s32)0x80553806 && intent[0xC] == 0,
+           "ReceiveIntent: INTENT_NOT_FOUND from the np-online family, never SWRR's intents");
     expect(ext_hle_lookup(SS, "Vo5V8KAwCmk", NULL) == 0, "HideSplashScreen passes to the host");
 }
 
@@ -691,6 +712,8 @@ int main(int argc, char **argv)
         download();
     else if (strcmp(mode, "events") == 0)
         events();
+    else if (strcmp(mode, "data") == 0)
+        data_paths();
     else if (strcmp(mode, "users") == 0)
         users();
     else if (strcmp(mode, "picked") == 0)

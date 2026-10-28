@@ -102,6 +102,15 @@ struct plat {
     int prev_damage_y0, prev_damage_y1;
     /* the system font (sysfont.c), when it opened */
     struct sysfont *sf;
+    /* Settings (info.c) */
+    void *net;            /* the network installer (netinst/, linked in), while it runs: stopped before sel_main returns */
+    int reload_ok;        /* an install can add titles: the heap has room for NET_EXTRA more */
+    int ntitle_cap;       /* titles' tiles the heap was sized for */
+    int tiles_used;       /* tiles allocated so far (the row's titles, and those an install added) */
+    u32 mod_usb;          /* libSceUsbStorage, when this module loaded it (kept loaded: the session stays) */
+    u32 conf_on;          /* Settings > Advanced: the switches' states (conf.c) */
+    int conf_safe;        /* ghostldr.lua left them out of this boot (safe mode) */
+    int conf_live;        /* this boot's flags have the switches' masks: 1, 0, or -1 none to apply */
     /* time and system settings */
     u64 (*proc_time)(void);
     s32 (*gettimeofday)(void *tv, void *tz);
@@ -120,11 +129,22 @@ void cat_pick_name(struct cat_title *c);
 int cat_load(struct sel *S, struct plat *P, int n);
 s64 cat_file(struct sel *S, struct plat *P, int title, int which, void *buf, u64 cap);
 s64 cat_meta_read(struct plat *P, int title, u64 off, void *buf, u64 cap);
+int cat_installed(struct sel *S, struct plat *P, struct sel_inst *out, int max); /* GFSCATALOG's titles */
 void cat_meta_names(struct plat *P, int title, const u8 *head, u64 n);
 
 /* png.c */
 int png_init(struct plat *P);
 int png_decode_to(struct sel *S, struct plat *P, const u8 *data, u64 n, surface *out);
+
+/* info.c: what Settings shows, and its calls into the core */
+#define NET_EXTRA 8 /* titles an install over the network may add while the selector runs */
+void info_title_where(struct plat *P, const char *path, u32 len, char *out, int cap);
+void info_netinst_stop(struct plat *P);
+/* conf.c: Settings > Advanced's switches in GLDRCONF/settings.txt */
+#define CONF_MAX 2048
+int conf_switch(int i, struct sel_switch *w);
+void conf_load(struct plat *P);
+int info_has_netinst(void);
 
 /* sysfont.c */
 int sysfont_open(struct sel *S, struct plat *P, u64 mem_bytes);

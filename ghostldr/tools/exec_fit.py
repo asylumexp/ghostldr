@@ -20,10 +20,16 @@ the rules the core uses:
                               prologues, PLT, entry points, margins); the rest
                               of its segments are direct memory, and the
                               other modules use the largest buffer left.
-  won't fit                   neither.  When fresh JIT objects sized to the
-                              code would fit once the emulator's buffers are
-                              reclaimed (not done yet), it
-                              says "would fit after reclaim".
+  needs JIT reclaim           no set of whole buffers covers the code: the
+                              emulator's buffers are reclaimed (every
+                              reference dropped, ext/src/reclaim.c) and the
+                              code gets fresh JIT objects of its own size, one
+                              per code run; the other modules get one more,
+                              where the EE buffer was.  Up to 65 MiB of JIT
+                              memory in all (the console's cap, measured on a
+                              13.60 PS5), less the core's 256 KiB object and
+                              the extension's block.
+  won't fit                   not even then.
 
 The plan itself (code_runs, cover) is a line-by-line twin of
 native/src/bxplan.c, so the verdict and the loader agree: change both
@@ -47,7 +53,7 @@ from gen_nids import boot_modules, module_candidates  # noqa: E402
 
 MiB = 1 << 20
 CHUNK, JOIN, PAD = 0x10000, 0x100000, 0x40000      # bxplan.h BX_*
-MAX_RUNS, MAX_OBJS, MAX_FORBID = 6, 5, 8
+MAX_RUNS, MAX_OBJS, MAX_VIEWS, MAX_FORBID = 6, 5, 6, 8
 TEXT_MAX = 512 * MiB
 TMP_RUNS = 32
 JIT_BUF_HEADER = 0x4000                             # ghost.h: never written in a buffer's first 16 KiB
@@ -56,14 +62,33 @@ JIT_BUF_HEADER = 0x4000                             # ghost.h: never written in 
 BUFFERS = [(0x900a1c000, 32 * MiB), (0x902a20000, 8 * MiB), (0x903224000, 8 * MiB), (0x903a28000, 16 * MiB)]
 NAMES = {0x900a1c000: "EE", 0x902a20000: "IOP", 0x903224000: "VU0", 0x903a28000: "VU1"}
 
-FITS, MULTI, NO_FIT = "fits the EE buffer", "needs multi-buffer placement", "won't fit"
-# Not implemented, only reported: with the emulator's four buffers reclaimed
-# (every descriptor and view of them dropped), fresh JIT
-# objects of any 16 KiB multiple fit in the 65 MiB cap less the core's
-# 256 KiB object.  The extension's code takes a block of its own (320 KiB
-# today).
-RECLAIM_BUDGET = 65 * MiB - 256 * 1024
-EXT_JIT = 320 * 1024
+FITS, MULTI, RECLAIM, NO_FIT = ("fits the EE buffer", "needs multi-buffer placement", "needs JIT reclaim",
+                                "won't fit")
+# With the emulator's four buffers reclaimed (every reference to them
+# dropped), fresh JIT objects of any 16 KiB multiple fit in the console's
+# 65 MiB cap (measured on 13.60) less the core's 256 KiB object and the
+# extension's code, which takes a block of its own first (its image size:
+# ext_jit()).  The other modules get an object of at least 1 MiB, at most
+# the EE buffer's 32 MiB (bigexec.c reclaim, ext/src/reclaim.c).
+JIT_CAP = 65 * MiB
+CORE_JIT = 256 * 1024
+RECLAIM_BUDGET = JIT_CAP - CORE_JIT
+ARENA_MIN = MiB
+ROOM = 8 * MiB                                      # ghost_api.h BX_RECLAIM_ROOM: prx loaded at run time
+EXT_BIN = Path(__file__).resolve().parents[2] / "build/ghostldr/ext.bin"
+
+
+def ext_jit(path: Path = EXT_BIN) -> int:
+    """The extension's JIT block: its image size (struct ext_blob
+    image_memsz), from the build when there is one, else the most it can be
+    (it is made from the 768 KiB a 13.60 PS5 has free beside the buffers)."""
+    try:
+        b = path.read_bytes()[:0x40]
+        if struct.unpack_from("<Q", b, 0)[0] == 0x5458455244484C47:   # EXT_BLOB_MAGIC
+            return align_up(struct.unpack_from("<I", b, 40)[0], 0x4000)
+    except OSError:
+        pass
+    return 768 * 1024
 
 
 def align_up(x: int, a: int) -> int:
@@ -341,6 +366,21 @@ def cover(runs: list, forbid: list, obj: list[int], keep: int) -> dict | None:
     return best
 
 
+def fresh(runs: list, forbid: list) -> dict | None:
+    """bx_fresh: one fresh object per run, its own size at its own offset;
+    None when a run overlaps a data segment."""
+    if not runs or len(runs) > MAX_VIEWS or len(forbid) > MAX_FORBID:
+        return None
+    sizes, views = [], []
+    for k, (lo, hi) in enumerate(runs):
+        lo, hi = align_down(lo, 0x4000), align_up(hi, 0x4000)
+        if any(flo < hi and fhi > lo for flo, fhi in forbid):
+            return None
+        sizes.append(hi - lo)
+        views.append((k, lo))
+    return {"views": views, "sizes": sizes, "used": sum(sizes)}
+
+
 # ---- a module as the core sees it (elf.c) ----
 
 class Module:
@@ -407,9 +447,11 @@ def arena_place(mods: list[Module], region: tuple[int, int]) -> tuple[bool, int,
     return ok, at, placed
 
 
-def fit(app0: Path, exec_ranges: dict[str, list] | None = None) -> dict:
+def fit(app0: Path, exec_ranges: dict[str, list] | None = None, force: bool = False, ext: int | None = None) -> dict:
     """The verdict for an extracted app0 (eboot.bin, sce_module/); exec_ranges:
-    a profile's code ranges per module file (on its own build only)."""
+    a profile's code ranges per module file (on its own build only); force:
+    a reclaim even when the buffers hold it (run.py --reclaim); ext: the
+    extension's JIT block (default: ext_jit())."""
     app0 = Path(app0)
     boot = boot_modules(app0)
     mods = [Module(f) for f in boot] + [Module(app0 / "eboot.bin")]
@@ -422,10 +464,12 @@ def fit(app0: Path, exec_ranges: dict[str, list] | None = None) -> dict:
                 pass
     ee = max(BUFFERS, key=lambda b: b[1])
     ok, nxt, placed = arena_place(mods, ee)
+    ok = ok and not force
     out = {
         "modules": [{"file": m.name, "text": m.text_size, "image": m.image_size, "data": m.data_bytes()} for m in mods],
         "on_demand": [{"file": m.name, "image": m.image_size} for m in later],
         "on_demand_bytes": sum(align_up(m.image_size, 0x10000) for m in later),
+        "jit_budget": RECLAIM_BUDGET - (ext_jit() if ext is None else ext),
     }
     if ok:
         out.update(verdict=FITS, arena=NAMES[ee[0]], placed=[{"file": n, "base": b} for n, b in placed],
@@ -446,11 +490,8 @@ def fit(app0: Path, exec_ranges: dict[str, list] | None = None) -> dict:
     out.update(big=big.name, runs=runs, keep=keep, code_from="profile" if ranges else "evidence",
                evidence={"fdes": st.fdes, "fde_bytes": st.fde_bytes, "prologues": st.prologues, "plt": st.plt,
                          "eh_frame_hdr": st.eh})
-    # what fresh objects sized to the code would need, after a reclaim
-    out["reclaim_need"] = sum(align_up(b - a, 0x4000) for a, b in runs) + keep + EXT_JIT if runs else None
-    if not lay:
-        out.update(verdict=NO_FIT)
-        return out
+    if not lay or force:
+        return _reclaim(out, big, rest, runs, keep, mods)
     used = {j for j, _ in lay["views"]}
     left = [b for j, b in enumerate(bufs) if j not in used]
     region = max(sorted(left), key=lambda b: b[1])            # arena.c: the largest, lowest address on ties
@@ -460,9 +501,59 @@ def fit(app0: Path, exec_ranges: dict[str, list] | None = None) -> dict:
         covered += max(0, min(off + bufs[j][1], big.text_size) - max(off, 0))
     out.update(verdict=MULTI if ok else NO_FIT,
                views=[{"buffer": NAMES[bufs[j][0]], "size": bufs[j][1], "offset": off} for j, off in lay["views"]],
-               direct=big.text_size - covered + big.data_bytes(), arena=NAMES[region[0]],
-               placed=[{"file": n, "base": b} for n, b in placed], headroom=max(0, region[0] + region[1] - nxt),
-               system_flex=sum(m.data_bytes() for m in rest))
+               arena=NAMES[region[0]],
+               placed=[{"file": n, "base": b} for n, b in placed], headroom=max(0, region[0] + region[1] - nxt))
+    _data(out, big, rest, big.text_size - covered)
+    return out
+
+
+FLEX_MAX = 128 * MiB                                # bigexec.c BX_FLEX_MAX: system flexible memory punched in all
+
+
+def _data(out: dict, big: Module, rest: list, ro: int) -> None:
+    """bigexec.c bx_place: the big module's data segments from system flexible
+    memory while the punched total stays within FLEX_MAX (the other modules'
+    data first), else direct memory; its text outside the objects is direct."""
+    flex = sum(m.data_bytes() for m in rest)
+    direct = ro
+    for lo, hi in big.forbid():
+        if flex + hi - lo <= FLEX_MAX:
+            flex += hi - lo
+        else:
+            direct += hi - lo
+    out.update(direct=direct, system_flex=flex)
+
+
+def _reclaim(out: dict, big: Module, rest: list, runs: list, keep: int, mods: list) -> dict:
+    """bigexec.c's reclaim: fresh objects for the code, one for the rest"""
+    lay = fresh(runs, big.forbid()) if runs else None
+    amin = max(align_up(keep + JIT_BUF_HEADER, 0x4000), ARENA_MIN)
+    ee = max(BUFFERS, key=lambda b: b[1])
+    out["reclaim_need"] = lay["used"] + amin if lay else None
+    if not lay or lay["used"] + amin > out["jit_budget"]:
+        out.update(verdict=NO_FIT)
+        return out
+    # reclaim.c's shares: room for prx loaded at run time, then the code objects
+    # grow over the text after them (up to the next object, the text's end or
+    # a data segment), then the rest goes to the other modules too
+    left = out["jit_budget"] - lay["used"]
+    spare = left - min(amin + ROOM, ee[1], left)
+    offs = [off for _, off in lay["views"]] + [big.text_size]
+    for k, off in enumerate(offs[:-1]):
+        end = min([offs[k + 1]] + [flo for flo, _ in big.forbid() if off <= flo < offs[k + 1]])
+        g = align_down(min(max(0, align_down(end - off, 0x4000) - lay["sizes"][k]), spare), 0x4000)
+        lay["sizes"][k] += g
+        lay["used"] += g
+        spare -= g
+    arena = align_down(min(out["jit_budget"] - lay["used"], ee[1]), 0x4000)
+    ok, nxt, placed = arena_place(rest, (ee[0], arena))
+    covered = sum(max(0, min(off + size, big.text_size) - max(off, 0)) for (_, off), size in zip(lay["views"],
+                                                                                                 lay["sizes"]))
+    out.update(verdict=RECLAIM if ok else NO_FIT,
+               fresh=[{"offset": off, "size": size} for (_, off), size in zip(lay["views"], lay["sizes"])],
+               code_jit=lay["used"], arena_jit=arena, arena="fresh",
+               placed=[{"file": n, "base": b} for n, b in placed], headroom=max(0, ee[0] + arena - nxt))
+    _data(out, big, rest, big.text_size - covered)
     return out
 
 
@@ -473,13 +564,17 @@ def summary(r: dict) -> str:
     if r["verdict"] == MULTI:
         v = " + ".join(f"{x['buffer']} {x['size'] // MiB}" for x in r["views"])
         return f"{MULTI} ({r['big']}: {v} MiB buffers over its code, {r['direct'] / MiB:.1f} MiB in direct memory)"
+    budget = r.get("jit_budget", RECLAIM_BUDGET - ext_jit()) / MiB
+    if r["verdict"] == RECLAIM:
+        code = sum(b - a for a, b in r["runs"])
+        return (f"{RECLAIM} ({r['big']}: {code / MiB:.1f} MiB of code in {len(r['fresh'])} fresh JIT "
+                f"object{'s' if len(r['fresh']) != 1 else ''} of {r['code_jit'] / MiB:.1f} MiB, "
+                f"{r['direct'] / MiB:.1f} MiB in direct memory; "
+                f"{(r['code_jit'] + r['arena_jit']) / MiB:.2f} of {budget:.2f} MiB of JIT memory)")
     code = sum(b - a for a, b in r.get("runs", []))
-    need = r.get("reclaim_need")
-    if need and need <= RECLAIM_BUDGET:
-        return (f"{NO_FIT} with buffer views; would fit after reclaim ({r['big']}: {code / MiB:.1f} MiB of code, "
-                f"{need / MiB:.1f} of {RECLAIM_BUDGET / MiB:.2f} MiB of JIT memory with the other modules)")
-    return (f"{NO_FIT} ({r.get('big', 'eboot.bin')}: {code / MiB:.1f} MiB of code; even with the emulator's buffers "
-            f"reclaimed there are {RECLAIM_BUDGET / MiB:.2f} MiB of JIT memory)")
+    return (f"{NO_FIT} ({r.get('big', 'eboot.bin')}: {code / MiB:.1f} MiB of code and the other modules need "
+            f"{(r.get('reclaim_need') or 0) / MiB:.1f} MiB of JIT memory; the console has {budget:.2f} MiB even with "
+            f"the emulator's buffers reclaimed)")
 
 
 def lines(r: dict) -> list[str]:
@@ -496,13 +591,16 @@ def lines(r: dict) -> list[str]:
                    ", ".join(f"+{a:x}-+{b:x}" for a, b in r["runs"]))
     for v in r.get("views", []):
         out.append(f"  {v['buffer']} ({v['size'] // MiB} MiB) at +{v['offset']:x}-+{v['offset'] + v['size']:x}")
+    for v in r.get("fresh", []):
+        out.append(f"  a fresh JIT object ({v['size'] / MiB:.2f} MiB) at +{v['offset']:x}-+{v['offset'] + v['size']:x}")
     if "direct" in r:
-        out.append(f"  direct memory for the rest of {r['big']} (read-only data and data): {r['direct'] / MiB:.1f} MiB,"
-                   " out of the title's budget")
+        out.append(f"  direct memory for the rest of {r['big']} (its text outside the JIT objects, data past the system "
+                   f"flexible memory used): {r['direct'] / MiB:.1f} MiB, out of the title's budget")
     if "arena" in r:
-        who = "the other modules" if "views" in r else "the modules"
-        out.append(f"  {who} in the {r['arena']} buffer; their data segments from system flexible memory: "
-                   f"{r['system_flex'] / MiB:.1f} MiB")
+        who = "the other modules" if "views" in r or "fresh" in r else "the modules"
+        where = (f"a fresh {r['arena_jit'] / MiB:.1f} MiB JIT object where the EE buffer was" if "fresh" in r
+                 else f"the {r['arena']} buffer")
+        out.append(f"  {who} in {where}; data segments from system flexible memory: {r['system_flex'] / MiB:.1f} MiB")
         need = r["on_demand_bytes"]
         out.append(f"  room left there for prx loaded at run time: {r['headroom'] / MiB:.1f} MiB"
                    + (f" (sce_module files loaded on demand: {need / MiB:.1f} MiB"
@@ -539,8 +637,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("app0", type=Path)
     ap.add_argument("--title", help="its title ID (default: from the dump), for the profile's code ranges")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--reclaim", action="store_true", help="as run.py --reclaim: fresh JIT objects even when the "
+                    "emulator's buffers hold the code")
     args = ap.parse_args(argv)
-    r = fit(args.app0, profile_exec(args.app0, args.title))
+    r = fit(args.app0, profile_exec(args.app0, args.title), force=args.reclaim)
     print(json.dumps(r, indent=1) if args.json else "\n".join(lines(r)))
     return 0 if r["verdict"] != NO_FIT else 1
 

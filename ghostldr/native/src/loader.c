@@ -3,7 +3,7 @@
  * Code (the executable PT_LOAD, including its rodata) lives in a JIT block
  * created by the ps2emu compiler process and mapped RX at the module base;
  * everything else is flexible memory mapped RW at its fixed offset. */
-#include "ghost.h"
+#include "ghost_api.h"
 
 #define COLD GHOST_COLD /* boot-time code: small beats fast */
 
@@ -25,11 +25,22 @@ struct module *g_modules;
 static u32 g_next_tls_id = 0x1000;
 static u32 g_next_handle = 0x7000;
 
+/* a SELF whose segments are still encrypted or compressed (not a decrypted dump) */
+COLD static bool self_encrypted(const u8 *f, u64 size)
+{
+    u16 n = size >= 0x20 && *(const u32 *)f == 0x1D3D154F ? *(const u16 *)(f + 0x18) : 0;
+    for (u32 i = 0; i < n && 0x20 + (u64)(i + 1) * 0x20 <= size; i++)
+        if ((*(const u64 *)(f + 0x20 + i * 0x20) & 0x80A) > 0x800)
+            return true;
+    return false;
+}
+
 COLD struct module *module_open(const char *path, bool is_main)
 {
     int fd = vfs_open(path, O_RDONLY, 0);
     if (fd < 0) {
         logf("open %s failed %x", path, fd);
+        fail_note((u32)fd == 0x80020002u ? FAIL_FILE_MISSING : FAIL_FILE_READ, path);
         return NULL;
     }
     off_t size = (off_t)vfs_lseek(fd, 0, 2);
@@ -55,6 +66,7 @@ COLD struct module *module_open(const char *path, bool is_main)
         ssize_t n = vfs_read(fd, buf + got, (size_t)(size - got) > 0x1000000 ? 0x1000000 : (size_t)(size - got));
         if (n <= 0) {
             logf("read %s failed at %lx: %lx", path, got, n);
+            fail_note(FAIL_FILE_READ, path);
             vfs_close(fd);
             page_free(buf, (size_t)size);
             return NULL;
@@ -72,6 +84,7 @@ COLD struct module *module_open(const char *path, bool is_main)
     }
     m->is_main = is_main;
     if (module_parse(m, buf, (u64)size) != 0) {
+        fail_note(self_encrypted(buf, (u64)size) ? FAIL_ENCRYPTED : FAIL_FILE_BAD, path);
         page_free(buf, (size_t)size);
         return NULL;
     }
@@ -361,6 +374,21 @@ COLD static s64 patch_tls_listed(const char *name, u8 *code, u64 size, u32 *bad)
     return n;
 }
 
+/* A prx with thread-local variables but no TLS relocation at all (an
+ * OpenOrbis one: linked -pie, so lld made every access local-exec, as in an
+ * executable): its code reaches them from the thread pointer at the
+ * executable's offsets, which on a PS4 is the executable's own TLS (musl's
+ * __musl_current_locale, in both, is the same variable then). */
+COLD static bool tls_local_exec_prx(const struct module *m)
+{
+    if (m->is_main || !m->tls_memsz || m->tls_offset)
+        return false;
+    for (u64 i = 0; i < m->nrela; i++)
+        if ((u32)m->rela[i].info == R_X86_64_DTPMOD64)
+            return false;
+    return true;
+}
+
 int module_finish(struct module *m)
 {
     build_exports(m);
@@ -392,6 +420,11 @@ int module_write_text(struct module *m)
             logf("%s: patched %u TLS sites (%u other fs: loads left as they are)%s", m->name, k, other,
                  nr ? " in its code runs" : "");
         }
+    } else if (tls_local_exec_prx(m)) {
+        /* read the title thread's block, as the executable's code does, not
+         * SWRR's own TLS (the 8 bytes below its thread pointer are ghostldr's) */
+        u32 other = 0, k = patch_tls(buf, m->text_size, &other);
+        logf("%s: local-exec TLS, %u sites: the executable's", m->name, k);
     }
     if (m->is_main && m->file) {
         /* everything that needed the file (relocation, exports, TLS image,
@@ -413,6 +446,7 @@ int module_write_text(struct module *m)
     }
     if (m->is_main) {
         if (budget_patch_text(m, buf) != 0) { /* the title cannot fit: stop before it starts */
+            fail_note(FAIL_MEMORY, m->name);
             page_free(buf, m->text_size);
             return -1;
         }

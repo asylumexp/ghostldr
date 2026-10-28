@@ -1,7 +1,0 @@
-#!/bin/sh
-# ghostldr AppImage: the app with the Python inside the image (python-build-standalone).
-# The tools run from a copy in ~/.local/share/ghostldr/workspace (see app/README.md).
-here="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
-unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONPYCACHEPREFIX
-export PYTHONNOUSERSITE=1
-exec "$here/usr/lib/ghostldr/python/bin/python3" "$here/usr/lib/ghostldr/ghostldr-app/app/launch.py" --workspace "$@"

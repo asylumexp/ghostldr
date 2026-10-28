@@ -4,7 +4,11 @@ before an install (tools/exec_fit.py), offline.
 - bxplan.c with elf.c in a host process (native_host/bx_host.c) and
   exec_fit.py, its Python twin, on the same inputs: Ghost's and Bloodborne's
   modules when build/ghost/app0 and build/bloodborne/app0 are there, made-up
-  code maps and covers, and random covers;
+  code maps and covers, and random covers and fresh layouts;
+- bigexec.c against a fake console (native_host/bigexec_host.c), with
+  whole buffers and with fresh objects after a reclaim;
+- the extension's reclaim (ext/src/reclaim.c) against a fake console's JIT
+  cap and references (native_host/reclaim_host.c);
 - the verdicts for made-up titles of each kind, a profile's "exec" ranges,
   import_report.py's section, gfs_pack.py's line and gfs_install.py's
   refusal.
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import random
 import re
 import struct
@@ -310,6 +315,42 @@ class PlannerTests(unittest.TestCase):
             self.assertTrue(all(o % 0x4000 == 0 for o, _ in spans))
 
 
+    def test_fresh_layouts_agree(self) -> None:
+        """bx_fresh and exec_fit.fresh: one object per run, its own size at its offset."""
+        rnd = random.Random(1028)
+        cases, lines = [], []
+        for _ in range(200):
+            pos, runs = 0, []
+            for _ in range(rnd.randint(1, 6)):
+                pos += rnd.randint(16, 400) * 0x10000
+                end = pos + rnd.randint(1, 512) * 0x10000
+                runs.append((pos, end))
+                pos = end
+            forbid = []
+            if rnd.random() < 0.5:
+                lo = pos + rnd.randint(-64, 64) * 0x4000      # sometimes over the last run
+                forbid.append((lo, lo + rnd.randint(1, 64) * 0x4000))
+            cases.append((runs, forbid))
+            lines.append(" ".join(["R", *(f"{v:x}" for r in runs for v in r), "F",
+                                   *(f"{v:x}" for r in forbid for v in r), "O", "K", "0"]))
+        path = Path(self.tmp.name) / "fresh.txt"
+        path.write_text("\n".join(lines) + "\n")
+        out = self.host("fresh", str(path)).splitlines()
+        self.assertEqual(len(out), len(cases))
+        nones = 0
+        for line, (runs, forbid) in zip(out, cases):
+            lay = ef.fresh(runs, forbid)
+            py = "none" if lay is None else \
+                " ".join(f"{j} {o:x} {z:x}" for (j, o), z in zip(lay["views"], lay["sizes"])) + f" used {lay['used']:x}"
+            self.assertEqual(line.strip(), py, (runs, forbid))
+            if lay is None:
+                nones += 1
+                continue
+            self.assertEqual([(o, o + z) for (_, o), z in zip(lay["views"], lay["sizes"])], runs)
+        self.assertGreater(nones, 10)
+        self.assertLess(nones, 150)
+
+
 PAD_ = ef.PAD
 
 
@@ -329,9 +370,10 @@ class FakeConsoleTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.tmp.cleanup()
 
-    def boot(self, app0: Path) -> str:
+    def boot(self, app0: Path, **env: str) -> str:
         files = [str(f) for f in gen_nids.boot_modules(app0)] + [str(app0 / "eboot.bin")]
-        p = subprocess.run([str(self.exe), *files], capture_output=True, text=True, timeout=300)
+        p = subprocess.run([str(self.exe), *files], capture_output=True, text=True, timeout=300,
+                           env={**os.environ, **env})
         self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr)
         self.assertNotIn("FAULT", p.stdout)
         return p.stdout
@@ -348,15 +390,51 @@ class FakeConsoleTests(unittest.TestCase):
         self.assertIn("executable +0 1, +286e000 1, +50dbfff 0", out)                  # crash.c's test
         self.assertIn("object EE at +0, out of the arena", out)
         self.assertIn("object VU1 at +2000000, out of the arena", out)
-        self.assertIn("bytes wrong 0; direct 39760 KiB; compiler aliases left open 0", out)
+        # its data from system flexible memory, as the arena's modules' (6112 KiB), the rest of its text direct
+        self.assertIn("bytes wrong 0; direct 33648 KiB, flexible 6112 KiB; compiler aliases left open 0", out)
+        out = self.boot(BLOODBORNE, FLEX="0")                            # system flexible memory refused: direct
+        self.assertIn("bytes wrong 0; direct 39760 KiB, flexible 0 KiB;", out)
+
+    @unittest.skipUnless((BLOODBORNE / "eboot.bin").exists(), "no Bloodborne in build/bloodborne/app0")
+    def test_bloodborne_reclaimed(self) -> None:
+        """run.py --reclaim: its 44 MiB of code in one fresh object, the buffers left alone by the core"""
+        out = self.boot(BLOODBORNE, RECLAIM="1")
+        self.assertIn("log: bigexec: eboot.bin (text 50dc000): reclaim asked for", out)
+        self.assertIn("op reclaim 1 objects, 2c10000 of code, arena at least 274000; free 18000 + buffers 4000000", out)
+        self.assertEqual(re.findall(r"op drop (\w+)", out), ["EE", "IOP", "VU0", "VU1"])
+        # 64 MiB + 96 KiB - 44.06 MiB of code: 2.45 + 8 MiB for the others, the rest grows the code object
+        self.assertIn("op grown to 35a4000 of code", out)
+        self.assertIn("op adopt a74000 bytes", out)
+        self.assertIn("prepare 0, 0 alias calls, 0 RW aliases", out)
+        self.assertIn("arena now 900a20000-901490000", out)               # where EE was: libc and Fios2 as before
+        self.assertIn("op view fresh at +0\n", out)
+        self.assertIn("log: bigexec: eboot.bin: +35a4000-+50dc000 not executable (direct memory)", out)
+        self.assertIn("(text 50dc000 in 1 JIT objects, 53 MiB); direct memory 27872 KiB read-only + 0 KiB data, 6112 KiB "
+                      "data flexible", out)                                     # views: 33648 read-only
+        self.assertIn("executable +0 1, +286e000 1, +50dbfff 0", out)
+        self.assertIn("bytes wrong 0;", out)
+        r = ef.fit(BLOODBORNE, force=True, ext=672 * 1024)               # the twin: the same objects
+        self.assertEqual(r["verdict"], ef.RECLAIM)
+        self.assertEqual(r["fresh"], [{"offset": 0, "size": 0x35a4000}])
+        self.assertEqual(r["arena_jit"], 0xa74000)
+        self.assertEqual([p["base"] for p in r["placed"]], [0x900a20000, 0x900ba0000])
 
     @unittest.skipUnless((GHOST / "eboot.bin").exists(), "no Ghost of Tsushima in build/ghost/app0")
     def test_ghost_touches_nothing(self) -> None:
         self.assertIn("prepare 0, 0 alias calls, 0 RW aliases", self.boot(GHOST))
+        out = self.boot(GHOST, RECLAIM="1")
+        self.assertIn("op reclaim 1 objects, 1040000 of code", out)
+        self.assertIn("arena now 900a20000-902a1c000", out)               # the rest, up to EE's 32 MiB
+        self.assertIn("bytes wrong 0;", out)
 
     def test_made_up_titles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            out = self.boot(big_title(Path(tmp) / "m", 40 * MiB, [(0x1000, 20 * MiB)]))
+            m = big_title(Path(tmp) / "m", 40 * MiB, [(0x1000, 20 * MiB)])
+            out = self.boot(m, PS4="1")                                 # a PS4: no views, a reclaim by itself
+            self.assertIn("op reclaim 1 objects", out)
+            self.assertIn("prepare 0, 0 alias calls", out)
+            self.assertIn("bytes wrong 0;", out)
+            out = self.boot(m)
             # VU0's base descriptor comes first: 8 MiB, so it is looked at (and is not IOP)
             self.assertEqual(re.findall(r"op rw alias of (\w+)", out), ["VU0", "IOP", "VU1"])
             self.assertIn("op view VU1 at +0\nop view IOP at +1000000", out)
@@ -364,8 +442,109 @@ class FakeConsoleTests(unittest.TestCase):
             self.assertIn("bytes wrong 0;", out)
             self.assertIn("compiler aliases left open 0", out)
             out = self.boot(big_title(Path(tmp) / "n", 72 * MiB, [(0x1000, 66 * MiB)]))
-            self.assertIn("it cannot be loaded", out)
+            self.assertIn("op reclaim 1 objects, 4250000 of code, arena at least 100000; free 18000 + buffers 4000000",
+                          out)
             self.assertIn("prepare -1, 0 alias calls", out)
+            self.assertIn("why: eboot.bin won't fit", out)
+            self.assertNotIn("op drop", out)
+            # two 29 MiB runs: whole buffers can't take both and keep one for the arena; fresh objects can
+            out = self.boot(big_title(Path(tmp) / "p", 72 * MiB, [(0x1000, 29 * MiB), (36 * MiB, 29 * MiB)]))
+            self.assertIn("log: bigexec: eboot.bin: no cover by 4 buffers (64 MiB)", out)
+            self.assertIn("op reclaim 2 objects, 3ad0000 of code", out)              # 29.3 + 29.5 MiB
+            self.assertIn("op view fresh at +0\nop view fresh at +23c0000", out)
+            self.assertIn("prepare 0, 0 alias calls", out)
+            self.assertIn("write 0", out)
+            self.assertIn("bytes wrong 0;", out)
+            # the same with the extension's block still to come (no JIT memory free beside the buffers)
+            out = self.boot(big_title(Path(tmp) / "q", 72 * MiB, [(0x1000, 31 * MiB), (36 * MiB, 32 * MiB)]),
+                            FREE_KIB="0")
+            self.assertIn("why: eboot.bin won't fit", out)
+
+
+class ReclaimTests(unittest.TestCase):
+    """The extension's reclaim (ext/src/reclaim.c) against a fake 13.60 PS5's
+    JIT cap and references (native_host/reclaim_host.c)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.exe = Path(cls.tmp.name) / "reclaim_host"
+        build_host("reclaim_host", [HERE / "native_host/reclaim_host.c", NATIVE / "ext/src/reclaim.c"], cls.exe,
+                   [f"-I{NATIVE / 'ext/include'}"])
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp.cleanup()
+
+    def run_case(self, case: str, *kib: int) -> str:
+        p = subprocess.run([str(self.exe), case, *map(str, kib)], capture_output=True, text=True, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr)
+        self.assertNotIn("FAULT", p.stdout)
+        return p.stdout
+
+    def kept(self, out: str) -> None:
+        self.assertIn("kept IPU: alive, 2 compiler descriptors, 1 here", out)     # the core's object
+        self.assertIn("kept ext: alive, 1 compiler descriptors, 1 here", out)     # the extension's block
+        self.assertIn("kept shm: alive, 0 compiler descriptors, 1 here", out)     # not a JIT object
+
+    def test_bloodborne_sized(self) -> None:
+        out = self.run_case("plain", 45120, 2496)
+        self.assertIn("used 66464 KiB of 66560", out)                            # 768 KiB free, less the extension's
+        self.assertEqual(re.findall(r"dropped: (\d+) compiler descriptors, (\d+) here", out), [("3", "1")] * 4)
+        self.assertIn("rc 0\nfree before 96 KiB, after 65632 KiB, arena 20512 KiB", out)
+        self.assertEqual(re.findall(r"^buffer (\w+) (alive|gone)$", out, re.M),
+                         [(n, "gone") for n in ("EE", "IOP", "VU0", "VU1")])
+        self.kept(out)
+        self.assertIn("code object 0: 45120 KiB, RX alias here ok, compiler RW map ok", out)
+        self.assertIn("arena: 20512 KiB where EE was, compiler writes it elsewhere: ok", out)
+        self.assertIn("used now 66560 KiB; free 0 KiB", out)                     # all of it, nothing leaked
+
+    def test_code_objects_grow_over_read_only_data(self) -> None:
+        """What is left after the other modules' amin + 8 MiB grows the code
+        objects in order, each up to its limit; the rest is the arena's."""
+        out = self.run_case("plain", "45120:82800", 2496)                       # Bloodborne: up to its text's end
+        self.assertIn("code object 0: 54944 KiB, RX alias here ok, compiler RW map ok", out)
+        self.assertIn("arena: 10688 KiB where EE was", out)                     # 2496 + 8192
+        out = self.run_case("plain", "20000:20480", "20000:40000", 2496)
+        self.assertIn("code object 0: 20480 KiB", out)                          # its limit
+        self.assertIn("code object 1: 34464 KiB", out)                          # what was left
+        self.assertIn("arena: 10688 KiB where EE was", out)
+        self.assertIn("used now 66560 KiB; free 0 KiB", out)
+
+    def test_several_objects_and_other_descriptor_numbers(self) -> None:
+        out = self.run_case("ps4", 20000, 20000, 2496)
+        self.assertIn("code object 1: 20000 KiB, RX alias here ok", out)
+        self.assertIn("arena: 25632 KiB where EE was", out)                     # the rest: under EE's 32 MiB
+        self.kept(out)
+
+    def test_too_big_drops_nothing(self) -> None:
+        out = self.run_case("plain", 64000, 2496)
+        self.assertIn("why: eboot.bin won't fit: its code needs 64000 KiB of JIT memory and the other modules 2496 "
+                      "KiB; with the emulator's buffers reclaimed the console has 65632 KiB", out)
+        self.assertEqual(re.findall(r"^buffer (\w+) (alive|gone)$", out, re.M),
+                         [(n, "alive") for n in ("EE", "IOP", "VU0", "VU1")])
+        self.assertNotIn("dropped:", out)
+        self.assertIn("used now 66464 KiB; free 96 KiB", out)                    # the budget's test objects went back
+
+    def test_an_object_that_is_no_buffer_stays(self) -> None:
+        out = self.run_case("extra", 45120, 2496)
+        self.assertIn("kept extra: alive, 2 compiler descriptors, 1 here", out)   # same size as IOP and VU0
+        self.assertIn("rc 0", out)
+        self.kept(out)
+
+    def test_references_it_cannot_find_are_measured(self) -> None:
+        # a payload's view of VU1: its 16 MiB do not come back, and the arena gets less
+        out = self.run_case("payload", 45120, 2496)
+        self.assertIn("buffer VU1 alive", out)
+        self.assertIn("free before 96 KiB, after 49248 KiB, arena 4128 KiB", out)
+        out = self.run_case("payload", 48000, 2496)
+        self.assertIn("why: eboot.bin: only 49248 KiB of JIT memory came back, and it needs 50496 KiB; the PS2 "
+                      "emulator's buffers are gone: close SWRR and start it again", out)
+        # the compiler has no mapping where VU0's stamp would go: VU0's descriptors stay, the rest goes on
+        out = self.run_case("nostamp", 45120, 2496)
+        self.assertIn("took no stamp: its descriptors stay", out)
+        self.assertIn("buffer VU0 alive", out)
+        self.assertIn("rc 0", out)
 
 
 def title(root: Path, text: bytes, functions: list[tuple[int, int]] | None = None, hdr_at: int = 0) -> Path:
@@ -403,14 +582,24 @@ class FitTests(unittest.TestCase):
         none = big_title(self.root / "n", 72 * MiB, [(0x1000, 66 * MiB)])
         r = ef.fit(none)
         self.assertEqual(r["verdict"], ef.NO_FIT)
-        self.assertTrue(ef.summary(r).startswith("won't fit (eboot.bin: 66.3 MiB of code; even with"), ef.summary(r))
-        # only the packing fails: two 30 MiB runs take every buffer (32, then 16 + 8 + 8), none is left
-        # for the arena; fresh objects after a reclaim would hold them
-        packing = big_title(self.root / "p", 72 * MiB, [(0x1000, 29 * MiB), (36 * MiB, 29 * MiB)])
-        r = ef.fit(packing)
-        self.assertEqual(r["verdict"], ef.NO_FIT)
-        self.assertTrue(ef.summary(r).startswith("won't fit with buffer views; would fit after reclaim"),
+        self.assertTrue(ef.summary(r).startswith("won't fit (eboot.bin: 66.3 MiB of code and the other modules need"),
                         ef.summary(r))
+        self.assertIn("the console has 64.09 MiB even with the emulator's buffers reclaimed",
+                      ef.summary(ef.fit(none, ext=672 * 1024)))
+        # only the packing fails: two 30 MiB runs take every buffer (32, then 16 + 8 + 8), none is left
+        # for the arena; fresh objects after a reclaim hold them
+        packing = big_title(self.root / "p", 72 * MiB, [(0x1000, 29 * MiB), (36 * MiB, 29 * MiB)])
+        r = ef.fit(packing, ext=672 * 1024)
+        self.assertEqual(r["verdict"], ef.RECLAIM)
+        self.assertEqual(r["fresh"], [{"offset": 0, "size": 0x1d50000}, {"offset": 0x23c0000, "size": 0x1d80000}])
+        self.assertEqual(ef.summary(r), "needs JIT reclaim (eboot.bin: 58.8 MiB of code in 2 fresh JIT objects of "
+                                        "58.8 MiB, 13.2 MiB in direct memory; 64.09 of 64.09 MiB of JIT memory)")
+        self.assertIn("  a fresh JIT object (29.31 MiB) at +0-+1d50000", ef.lines(r))
+        # near the most code that fits: 64.09 MiB less the 1 MiB arena (a run is the code + 256 KiB)
+        edge = big_title(self.root / "e", 72 * MiB, [(0x1000, 63 * MiB - 0x30000 - 0x1000)])
+        r = ef.fit(edge, ext=672 * 1024)
+        self.assertEqual((r["verdict"], r["reclaim_need"]), (ef.RECLAIM, 64 * MiB + 0x10000))
+        self.assertEqual(ef.fit(edge, ext=768 * 1024)["verdict"], ef.NO_FIT)
         # a profile that says where the code is
         r = ef.fit(none, {"eboot.bin": [(0, 30 * MiB)]})
         self.assertEqual((r["verdict"], r["code_from"]), (ef.MULTI, "profile"))

@@ -27,6 +27,7 @@ struct rx_region {
     u64 start, end;
     u64 wlo, whi; /* the part written through the compiler: [start, end) on PS5 */
     s64 delta;    /* compiler address - address here (a JIT block backing it) */
+    bool fresh;   /* a fresh object after a reclaim (arena_adopt), not an emulator buffer */
 };
 
 static struct rx_region g_rx[8];
@@ -47,23 +48,23 @@ static int (*qmp)(void *, void **, void **, int *);
 COLD static bool probe(u64 addr, s64 delta)
 {
     u64 w = addr + (u64)delta, old[2], now[2];
-    logf("arena: PS4: probe %lx: compiler write() of it to the socket pair", w);
+    logf("arena: PS4: probe %lx: write", w);
     if (jit_peek(w, old, 16) != 0) {
-        logf("arena: PS4: probe %lx: the compiler cannot read it", w);
+        logf("arena: PS4: probe %lx: not readable", w);
         return false;
     }
     if (memcmp((const void *)addr, old, 16) != 0) {
-        logf("arena: PS4: probe %lx: the compiler has other bytes there than %lx here", w, addr);
+        logf("arena: PS4: probe %lx: other bytes than %lx", w, addr);
         return false;
     }
-    logf("arena: PS4: probe %lx: compiler clock_gettime() into it", w);
+    logf("arena: PS4: probe %lx: clock_gettime", w);
     if (jit_stamp(w) != 0) {
-        logf("arena: PS4: probe %lx: the compiler cannot write it", w);
+        logf("arena: PS4: probe %lx: not writable", w);
         return false;
     }
-    logf("arena: PS4: probe %lx: compiler write() again", w);
+    logf("arena: PS4: probe %lx: write again", w);
     bool ok = jit_peek(w, now, 16) == 0 && memcmp(now, old, 16) != 0 && memcmp((const void *)addr, now, 16) == 0;
-    logf("arena: PS4: probe %lx: compiler memcpy() of its bytes back", w);
+    logf("arena: PS4: probe %lx: memcpy back", w);
     jit_copy_to(w, old, 16);
     ok = ok && memcmp((const void *)addr, old, 16) == 0;
     logf("arena: PS4: probe %lx: %s", w, ok ? "written and seen here" : "the write does not show here");
@@ -120,10 +121,10 @@ static u64 usable(const struct rx_region *r, u64 *lo)
 /* PS4: the region with the most compiler-writable bytes past its header.
  * When the title's modules (published by then; none yet for the selector)
  * need more, the largest region's start is backed by a new JIT block. */
+static int chosen = -1;
+static bool final; /* chosen with the title's modules known (or a fresh object adopted) */
 COLD static int ps4_code_region(u64 *start, u64 *end)
 {
-    static int chosen = -1;
-    static bool final; /* chosen with the title's modules known */
     if (chosen < 0 || (!final && g_modules)) {
         u64 need = jv_code_need(g_modules), best_len = 0, lo;
         u32 best = 0, largest = 0;
@@ -184,7 +185,7 @@ int arena_init(void)
             continue;
         last_end = (u64)en;
         if (prot == (PROT_READ | PROT_EXEC) && (u64)en - (u64)st >= 0x10000) {
-            g_rx[g_nrx++] = (struct rx_region){(u64)st, (u64)en, (u64)st, (u64)en, 0};
+            g_rx[g_nrx++] = (struct rx_region){(u64)st, (u64)en, (u64)st, (u64)en, 0, false};
             logf("arena: RX %lx-%lx (%lu KiB)", (u64)st, (u64)en, ((u64)en - (u64)st) >> 10);
         }
     }
@@ -247,9 +248,50 @@ COLD u32 arena_buffers(u64 *start, u64 *end, u32 max)
 {
     u32 n = 0;
     for (u32 i = 0; i < g_nrx && n < max; i++)
-        if (!holds_core(&g_rx[i]) && g_rx[i].end - g_rx[i].start >= 0x100000)
+        if (!holds_core(&g_rx[i]) && !g_rx[i].fresh && g_rx[i].end - g_rx[i].start >= 0x100000)
             start[n] = g_rx[i].start, end[n++] = g_rx[i].end;
     return n;
+}
+
+/* The extension's code when no new JIT block takes it (ext.c; PS5): the
+ * top of the smallest emulator buffer that holds it (at the highest address
+ * on a tie: VU0 on 13.60), which then leaves the arena.  Its data pages are
+ * punched like the small area's.  Placed again (an app root that found no
+ * game), it goes to the same place.  0: none. */
+COLD u64 arena_buffer_top(u64 size)
+{
+    static u64 at, have;
+    size = ALIGN_UP(size, 0x4000);
+    if (at && size <= have)
+        return at;
+    int pick = -1;
+    if (is_ps4() || is_jakx() || arena_init() != 0)
+        return 0;
+    for (u32 i = 0; i < g_nrx; i++) {
+        u64 len = g_rx[i].end - g_rx[i].start;
+        if (!holds_core(&g_rx[i]) && len >= 0x100000 && len >= size + 2 * JIT_BUF_HEADER &&
+            (pick < 0 || len <= g_rx[pick].end - g_rx[pick].start))
+            pick = (int)i;
+    }
+    if (pick < 0)
+        return 0;
+    at = g_rx[pick].end - size, have = size;
+    logf("arena: the extension at %lx, not a new JIT block", at);
+    arena_drop(g_rx[pick].start);
+    return at;
+}
+
+/* A fresh JIT object (bigexec.c's reclaim) mapped read-execute here at
+ * [start, end), where the compiler writes it at start + delta: the code
+ * region from now on (the buffers are gone). */
+COLD int arena_adopt(u64 start, u64 end, s64 delta)
+{
+    if (g_nrx == ARRAY_SIZE(g_rx))
+        return -1;
+    chosen = (int)g_nrx, final = true; /* the code region on a PS4 too */
+    g_rx[g_nrx++] = (struct rx_region){start, end, start, end, delta, true};
+    logf("arena: RX %lx-%lx: fresh, written at %lx", start, end, start + (u64)delta);
+    return 0;
 }
 
 /* A buffer whose object now holds a module's code elsewhere: no module,
@@ -296,12 +338,17 @@ u64 arena_small_alloc_top(u64 size, u64 keep)
     return g_small_end;
 }
 
-/* Where the compiler writes [dst, dst + size): dst itself on PS5; on a PS4
- * only inside what ps4_verify or a JIT block made writable, else 0. */
+/* Where the compiler writes [dst, dst + size): dst itself on PS5, but for
+ * a fresh object adopted after a reclaim; on a PS4 only inside what
+ * ps4_verify or a JIT block made writable, else 0. */
 u64 arena_wr(u64 dst, u64 size)
 {
-    if (!is_ps4())
+    if (!is_ps4()) {
+        for (u32 i = 0; i < g_nrx; i++)
+            if (dst >= g_rx[i].start && dst + size <= g_rx[i].end)
+                return dst + (u64)g_rx[i].delta;
         return dst;
+    }
     for (u32 i = 0; i < g_nrx; i++)
         if (dst >= g_rx[i].wlo && dst + size <= g_rx[i].whi && g_rx[i].whi)
             return dst + (u64)g_rx[i].delta;
@@ -314,7 +361,7 @@ u64 arena_wr(u64 dst, u64 size)
 int arena_write(u64 dst, const void *src, u64 size)
 {
     if (!is_ps4())
-        return jit_copy_to(dst, src, size);
+        return jit_copy_to(arena_wr(dst, size), src, size);
     u64 w = arena_wr(dst, size);
     if (!w)
         return -1;

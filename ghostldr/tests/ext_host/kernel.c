@@ -420,6 +420,12 @@ static void boot_tests(void)
     expect(mod("libSceNpToolkit2.prx")->start_state == MOD_DEFERRED, "boot: IsGame NpToolkit2 deferred");
     for (m = g_modules; m; m = m->next)
         module_finish(m);
+    /* a thread block asked for before the static block's size and alignment
+     * are set (an ELF loader thread once was): 16-aligned, in a pool */
+    g_tls_slot = 0;
+    tls_ensure_thread();
+    expect(g_tls_slot > 0x10000 && (g_tls_slot & 15) == 0, "TLS: a thread block before tls_setup: 16-aligned, not 0");
+    g_tls_slot = 0;
     tls_setup(g_main_mod);
     bool ok = true;
     for (m = g_modules; m; m = m->next)
@@ -522,6 +528,13 @@ static void load_start_tests(void)
     expect(dlsym(0x77, "ghostldrExtMissing", &a) == E_NOENT && !a, "dlsym: a no-host library's module is refused");
     g_ctx->dlsym = (u64)fake_host_dlsym_call;
     expect(dlsym(0x55, "ghostldrExtMissing", &a) == 0 && (u64)a == 0xD15D15, "dlsym: other host modules ask SWRR");
+    /* libkernel_sys is a virtual module (hle_fsvsh.c); what the extension
+     * lacks there is libkernel's own (PS4-Xplorer's
+     * sceKernelGetFsSandboxRandomWord), never a NULL */
+    s32 ks = lsm("libkernel_sys.sprx", 0, NULL, 0, NULL, &res);
+    a = NULL;
+    expect(ks >= 0x7F00 && dlsym(ks, "sceKernelGetFsSandboxRandomWord", &a) == 0 && (u64)a == 0xD15D15,
+           "dlsym: libkernel_sys's other functions are libkernel's");
     u64 saved = g_punched;
     g_punched = 128UL << 20;
     expect(lsm("/app0/sce_module/libSceLate.prx", 0, NULL, 0, NULL, &res) == E_NOMEM,
@@ -800,8 +813,12 @@ static void file_tests(void)
     expect(poll(id, &state) == 0 && state == 3 && delete(id, &rc) == 0 && rc == 0, "files: its id is complete");
     u32 polls = g_real_polls;
     expect(poll(42, &state) == 0 && state == 2 && g_real_polls == polls + 1, "files: other ids go to the kernel");
+    /* the fake gfs_getdents above uses the fd's position as its entry index
+     * (one entry, at 0): rewind, then *basep is the position before each read */
     s64 base = -1;
-    expect(getdirentries(fd, buf, 16, &base) == 16 && base == 7, "files: getdirentries");
+    expect(lseek(fd, 0, 0) == 0 && getdirentries(fd, buf, 16, &base) == 16 && base == 0 &&
+               strcmp(buf + 8, "a.bin") == 0 && getdirentries(fd, buf, 16, &base) == 0 && base == 1,
+           "files: getdirentries");
     expect(close(fd) == 0 && !gfs_owns(fd), "files: close");
     u32 reads = g_real_reads;
     expect(kread(5, buf, 2) == 2 && g_real_reads == reads + 1, "files: other fds go to the kernel");
@@ -880,3 +897,6 @@ int main(int argc, char **argv)
     expect(g_flex_maps == g_flex_unmaps, "flexible memory returned");
     return g_failed;
 }
+
+/* fail.c: the loader's notes for a failure's message (not looked at here) */
+void fail_note(u32 kind, const char *path) { (void)kind, (void)path; }

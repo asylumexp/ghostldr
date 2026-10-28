@@ -2,7 +2,7 @@
 """hbprobe's files next to its eboot.bin: hbprobe/data.txt ("line N" for N in
 0..3999) and, given a title ID, a minimal sce_sys/param.sfo.
 
-    python3 mkdata.py APP0 [TITLE_ID]
+    python3 mkdata.py APP0 [TITLE_ID] [--sfo-only] [--name TITLE]
 """
 
 import struct
@@ -24,14 +24,23 @@ def param_sfo(entries: dict) -> bytes:
 
 
 def main() -> None:
-    app0 = Path(sys.argv[1])
-    (app0 / "hbprobe").mkdir(parents=True, exist_ok=True)
-    (app0 / "hbprobe/data.txt").write_text("".join(f"line {n}\n" for n in range(4000)))
-    if len(sys.argv) > 2:
-        (app0 / "sce_sys").mkdir(exist_ok=True)
+    args = sys.argv[1:]
+    sfo_only = "--sfo-only" in args
+    name = "hbprobe (system malloc)"
+    if "--name" in args:
+        i = args.index("--name")
+        name = args[i + 1]
+        del args[i:i + 2]
+    args = [a for a in args if a != "--sfo-only"]
+    app0 = Path(args[0])
+    if not sfo_only:
+        (app0 / "hbprobe").mkdir(parents=True, exist_ok=True)
+        (app0 / "hbprobe/data.txt").write_text("".join(f"line {n}\n" for n in range(4000)))
+    if len(args) > 1:
+        (app0 / "sce_sys").mkdir(parents=True, exist_ok=True)
         (app0 / "sce_sys/param.sfo").write_bytes(param_sfo({
-            "APP_TYPE": 1, "APP_VER": "01.00", "CATEGORY": "gd", "TITLE": "hbprobe (system malloc)",
-            "TITLE_ID": sys.argv[2], "VERSION": "01.00"}))
+            "APP_TYPE": 1, "APP_VER": "01.00", "CATEGORY": "gd", "TITLE": name,
+            "TITLE_ID": args[1], "VERSION": "01.00"}))
 
 
 if __name__ == "__main__":

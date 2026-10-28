@@ -937,6 +937,7 @@ int save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void
         page_free(ask, MAXT);
     tlist_free(&t);
     known_drop();
+    savedata_data_release(); /* nothing stays: the title mounts its /data itself */
     return with;
 }
 

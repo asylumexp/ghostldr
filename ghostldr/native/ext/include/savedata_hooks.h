@@ -135,3 +135,6 @@ u64 save_tree_digest(const char *dir);
  * <prefix>D000SAVE container (made and mounted at the first call), or NULL
  * where there is none (no ghostfs title, no free mount point). */
 const char *savedata_data_root(void);
+/* Unmount it again (committed) if it is mounted: the selector's save scan,
+ * whose extension may be given back before the title starts. */
+void savedata_data_release(void);

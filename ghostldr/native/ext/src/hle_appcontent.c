@@ -329,10 +329,45 @@ static const char *remap_download0(const char *path, char *buf, size_t size)
 static volatile s32 g_data_real = -1; /* -1 unknown, 0 remapped, 1 real */
 static volatile bool g_data_made;
 
+/* A game from the store never sees a /data: a retail console's game sandbox
+ * has none, so its open fails ENOENT.  Some games try one anyway, for a file
+ * cache meant for development kits: Bloodborne opens /data/cache.bin
+ * (O_RDWR|O_CREAT|O_TRUNC) and, when that works, takes a path that stops it
+ * at once ("[Dantelion2 Panic] ... DLLightMutex.cpp(126) Mutex is not
+ * initialized").  So /data stays homebrew's: an executable with OpenOrbis's
+ * generic fingerprint (or none), or a content ID with homebrew's publisher
+ * code IV.  1 store game, 0 not, -1 not known yet (no executable loaded: a
+ * save tool's scan before the title, which keeps the remap). */
+int title_store_game(void) HIDDEN;
+int title_store_game(void)
+{
+    static volatile s32 known = -1;
+    if (known >= 0 || !g_main_mod)
+        return known;
+    static const u8 orbis[20] = "OPENORBIS-HOMEBREW";
+    const u8 *fp = g_main_mod->fingerprint;
+    bool zero = true;
+    for (u32 i = 0; i < 20; i++)
+        zero = zero && !fp[i];
+    const char *cid = title_param_str("CONTENT_ID");
+    bool brew = zero || !memcmp(fp, orbis, sizeof(orbis)) ||
+                (cid && (cid[0] | 0x20) == 'i' && (cid[1] | 0x20) == 'v');
+    known = brew ? 0 : 1;
+    if (known)
+        logf("ext: %s is a store game (%s): it has no /data, as on a retail console", title_ident(),
+             cid && cid[0] ? cid : "Sony fingerprint");
+    return known;
+}
+
 static const char *remap_data(const char *path, char *buf, size_t size)
 {
     if (path[5] != '/' && path[5] != 0)
         return NULL;
+    if (title_store_game() == 1) { /* a path in SWRR's read-only sandbox root that isn't there: ENOENT, also
+                                     where SWRR itself sees a /data (a dev console, GoldHEN) */
+        fmt(buf, size, "/ghostldr-no-data%s", path + 5);
+        return buf;
+    }
     if (g_data_real < 0 && kfs()) {
         u8 st[0x78];
         s32 rc = kf.stat("/data", st);

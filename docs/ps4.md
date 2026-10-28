@@ -2,7 +2,9 @@
 
 Luac0re runs on PS4s too, so ghostldr can be sent to SWRR on a PS4 the same way as on a PS5. Until now it had only run on PS5s (13.60 and 14.10). The first PS4 attempt (ghostldr v0.1.1, firmware 12.02) crashed SWRR while the title's code was being written. This page explains that crash and a second, earlier fault, says what changed, and how to run the diagnostic that answers the open questions. The second attempt, with those changes, stopped at their first check of the compiler: see [The second report](#the-second-report-the-boot-stopped-at-the-first-probe). The third (v0.6.0) got one check further, then the compiler process died: ghostldr had sent every system call through getpid's libkernel stub, which a PS4 refuses. See [The third report](#the-third-report-the-compiler-died-at-its-first-clock_gettime). The fourth (v0.6.1) passed every check, placed Ghost and ran it for about 3 seconds, until the PS4 refused Ghost's texture streaming pool: see [The fourth report](#the-fourth-report-ghost-ran-until-its-streaming-pool-was-refused). The fifth (v0.6.2) measured the PS4's limit: SWRR may allocate 2480 MiB more, about 1.6 GiB less than Ghost needs, and Ghost stopped at a black screen once that ran out: see [The fifth report](#the-fifth-report-a-black-screen-ghost-ran-out-of-the-ps4s-memory). The sixth (v0.6.3) showed that this is SWRR's whole budget on a PS4, 2.5 GiB, so Ghost can't run there: see [The sixth report](#the-sixth-report-swrrs-budget-on-a-ps4-is-25-gib). The seventh traced where that limit is set: a kernel sysctl, most likely written by SceSysCore for PS2 Classics; see [The seventh report](#the-seventh-report-where-the-25-gib-is-set). The eighth measured the same 2.5 GiB on a 9.60 PS4 and on a 12.50 PS4 Pro, and ruled out the compiler process, memory pools and the other direct memory devices as a way past it: see [The eighth report](#the-eighth-report-the-same-25-gib-on-960-1250-and-a-pro). The ninth found what enforces it: the kernel caps PS2 Classics at 2.5 GiB when they start, from their signed executable, and nothing a game can do changes it; see [The ninth report](#the-ninth-report-the-kernel-caps-ps2-classics-at-25-gib).
 
-**Status: experimental.** Everything below was worked out from the logs, Luac0re's source and SWRR's executable. On a 12.02 PS4, Ghost's code has run, but no title has reached its title screen yet. The PS5 path is meant to be unchanged; that needs checking on a PS5 too.
+**Status: homebrew and small titles.** They run on a PS4 from SWRR's saved data, through the game selector too: Apollo Save Tool runs this way on a 12.50 PS4 Pro (GoldHEN was loaded on it; ghostldr doesn't use it). Big games can't run on a PS4 and won't: the kernel caps a PS2 Classic such as SWRR at 2.5 GiB of memory when it starts, from its signed executable, and nothing a game can do from inside changes that (the ninth report, below). Ghost of Tsushima needs about 4 GiB. The selector marks a game's dump on a PS4 and asks before it boots one ([selector.md](selector.md#on-a-ps4)).
+
+The rest of this page is how that was found, report by report. It was worked out from the logs, Luac0re's source, SWRR's executable and, last, the kernel of a 12.50 PS4 Pro. The changes it describes left the PS5 path as it was (What is verified).
 
 ## What differs on a PS4
 
@@ -139,7 +141,7 @@ On the PS4: start SWRR and go to OPTIONS → HALL OF FAME until Luac0re's "Remot
 python3 ghostldr/host/run.py probe --diag --log build/ghostldr/ps4-diag.log
 ```
 
-- With a release zip, add `--no-build`.
+- From a checkout without LLVM but with a prebuilt core (`build/ghostldr`), add `--no-build`.
 - Add `--host <the PS4's address>` if the console isn't found by itself; `console.py --list` shows PS4s too.
 - The run listens for 90 s. The diagnostic itself takes a few seconds; it ends with `diag: done`, and Luac0re shows "core returned 0".
 
@@ -489,5 +491,4 @@ So a different PS2 Classic host doesn't help on a PS4. On a PS5, Jak X runs in P
 - That no other SWRR thread uses the released buffers on a PS4. None did in the 3 s Ghost ran.
 - That Luac0re's thread cancels work on a PS4.
 - That a new JIT block maps at a fixed address on a PS4. On a 13.60 PS5, read-only views of the emulator's own JIT objects map with MAP_FIXED anywhere, but this hasn't been checked for new blocks. The fallback needs one over the EE buffer.
-- Everything past Ghost's first second on a PS4: graphics on screen, audio, saves and input.
-- A 14.10 or 14.20 PS5 with these changes. Only a 13.60 PS5 was booted.
+- Everything past Ghost's first second on a PS4: graphics on screen, audio, saves and input. It can't get further: the 2.5 GiB cap above.

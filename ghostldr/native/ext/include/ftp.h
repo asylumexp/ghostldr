@@ -53,8 +53,9 @@ int fv_readdir(struct fv_dir *d, char *name, unsigned size); /* 1: a name, 0: th
 void fv_closedir(struct fv_dir *d);
 
 /* TCP over IPv4; addresses and ports in host order, address 0 is any.
- * fv_listen is called by ftp_start only (on the console, new sockets may
- * be made only then); fv_connect may answer -FV_ENOSYS at any time. */
+ * fv_listen is called by ftp_start, and by ftp_relisten after rest mode
+ * (on the console, new sockets come from the JIT compiler, while Luac0re's
+ * Lua is idle); fv_connect may answer -FV_ENOSYS at any time. */
 int fv_listen(unsigned addr, unsigned short port, int backlog);         /* a listening socket */
 int fv_accept(int fd, int timeout_ms, unsigned *addr, unsigned short *port); /* -1 ms: no limit, 0: no wait */
 int fv_connect(unsigned addr, unsigned short port);
