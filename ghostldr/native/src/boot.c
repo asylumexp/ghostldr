@@ -124,7 +124,7 @@ static struct el_select *select_block(void)
 
 static volatile int g_el_done, g_el_rc;
 
-static void *elfldr_thread(void *unused)
+__attribute__((force_align_arg_pointer)) static void *elfldr_thread(void *unused)
 {
     (void)unused;
     g_el_rc = ext_elfldr();
@@ -155,7 +155,11 @@ static int elfldr_select(struct el_select *s)
     s->res_lo = ALIGN_UP(lo, 0x10000), s->res_hi = s->res_lo + g_ctx->staging_size;
     u64 tid = 0;
     g_el_done = 0;
-    if (ghost_thread_create(&tid, NULL, elfldr_thread, NULL, "ghostldr-elfldr") != 0) {
+    /* a plain thread, as the Lua loader's is when the ELF loader runs alone:
+     * ghost_thread_create would give it a TLS block before the ELF loader
+     * sizes them (tls_static_reserve), and payload threads' blocks after it
+     * would come out of that pool at a bad address */
+    if (K.pthread_create(&tid, NULL, elfldr_thread, NULL, "ghostldr-elfldr") != 0) {
         logf("elfldr: no thread for the ELF loader beside the selector");
         ext_abandon();
         return -12;
