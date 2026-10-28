@@ -627,9 +627,9 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
  * 16384 PS4 diagnostic (diag.c), 32768 the host is Jak X under UltraC0re,
  * 262144 the app root is a library, 65536 no automatic memory plan, 131072
  * the automatic plan even over a manual one, 524288 forget the learned
- * memory plan (automem.c), 1048576 the USB storage session is open
- * (approot.c) or the ELF loader, 2097152 the extension came in a bundle,
- * 4194304 dialogs are never drawn (hle_dialog.h, run.py --dialog-auto);
+ * memory plan (automem.c), 1048576 the ELF loader, 2097152 the extension
+ * came in a bundle, 4194304 dialogs are never drawn (hle_dialog.h, run.py
+ * --dialog-auto), 8388608 the USB storage session is open (approot.c);
  * bits 32-47 hold the ELF loader's port, bits 48-63 the FTP server's
  * (CTX_FTP_PORT) */
 #define CTX_FLAG_NO_AUTO_MEM 65536      /* plan-free titles keep the plain budget (run.py --no-auto-memory) */
@@ -643,7 +643,7 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 #define CTX_FLAG_DIAG 16384            /* run the PS4 diagnostic instead of booting (run.py probe --diag) */
 #define CTX_FLAG_JAKX 32768            /* UltraC0re in Jak X, not Luac0re in SWRR (ghostldr.lua) */
 #define CTX_FLAG_LIBRARY 262144        /* set by the core: app_root is a folder of title folders (the selector reads it) */
-#define CTX_FLAG_USB_SESSION 1048576   /* set by the extension: it opened libSceUsbStorage's session (approot.c), kept when its code is placed again */
+#define CTX_FLAG_USB_SESSION 8388608   /* set by the extension: it opened libSceUsbStorage's session (approot.c), kept when its code is placed again */
 #define CTX_FTP_PORT(flags) ((u32)((flags) >> 48)) /* the FTP server's TCP port (run.py --ftp-port; 0: none) */
 #define CTX_FLAG_ELFLDR 1048576 /* no title: serve the ELF loader (run.py elfldr, docs/elfldr.md) */
 #define CTX_ELFLDR_PORT(flags) ((u32)((flags) >> 32) & 0xFFFF) /* its TCP port (run.py elfldr --port) */
