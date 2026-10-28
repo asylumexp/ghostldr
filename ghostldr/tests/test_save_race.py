@@ -258,6 +258,45 @@ class SaveRaceWrite(SaveRaceBase):
 
 
 @unittest.skipUnless(x86_64_cc(), "no way to build and run x86-64 code here")
+class SaveRaceCopy(SaveRaceBase):
+    """save_race_copy: the read-only copy of a save the service binds and then refuses."""
+
+    def run_copy(self, scenario: str) -> tuple[dict, list[str], dict]:
+        argv = [str(self.exe), str(self.root), scenario, TITLE, DIR, "/temp0/copy", "-", "-", "copy"]
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        lines = out.stdout.splitlines()
+        self.assertEqual([ln for ln in lines if ln.startswith("VIOLATION")], [], "\n".join(lines))
+        res = [ln for ln in lines if ln.startswith("RESULT ")]
+        self.assertEqual(len(res), 1, "\n".join(lines))
+        peak = [int(m.group(1)) for ln in lines if (m := re.search(r"fake: peak (\d+) descriptors", ln))]
+        r = dict(re.findall(r"(\w+)=(\S*)", res[0].split(" why=")[0]))
+        r["peak"] = peak[0] if peak else -1
+        return r, lines, tree(self.root / "temp0/copy")
+
+    def expect_full_copy(self, got: dict, lines: list[str]) -> None:
+        want = {k: v for k, v in TARGET.items() if k != "sce_sys/keystone"}  # no app may read the keystone
+        self.assertEqual({k: v for k, v in got.items() if v is not None}, want, "\n".join(lines))
+
+    def test_ps5_copies_every_readable_file(self) -> None:
+        r, lines, got = self.run_copy("ps5")
+        self.assertEqual(r["rc"], "0", "\n".join(lines))
+        self.expect_full_copy(got, lines)
+
+    def test_a_folder_caught_on_the_bare_mount_point_still_copies(self) -> None:
+        # a racer opens /savedataN while only the bare mount point is there (it stays empty), and the save's files
+        # show a moment later: the root must be listed through a descriptor opened after the pin
+        r, lines, got = self.run_copy("latebind")
+        self.assertEqual(r["rc"], "0", "\n".join(lines))
+        self.expect_full_copy(got, lines)
+
+    def test_a_race_holds_a_handful_of_descriptors(self) -> None:
+        # 3 racers x 2 slots x (one folder + one file), plus the save's files while they are pinned
+        r, lines, got = self.run_copy("ps5")
+        self.assertGreater(r["peak"], 0, "\n".join(lines))
+        self.assertLessEqual(r["peak"], 3 * 2 * 2 + len(TARGET) + 2, "\n".join(lines))
+
+
 class SaveToolWrites(SaveRaceBase):
     """A save tool's (Apollo's) VSH mount, hle_fsvsh.c: a writable copy, written into the save at the unmount."""
 

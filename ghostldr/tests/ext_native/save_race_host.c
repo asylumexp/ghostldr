@@ -268,6 +268,17 @@ int host_run(const char *tid, const char *dir, const char *src, const char *fp, 
     return 0;
 }
 
+/* the read-only copy through a refused mount (save_race_copy) into dst; prints what it returned */
+int host_copy(const char *tid, const char *dir, const char *dst)
+{
+    G = &g_api;
+    K.usleep = os_usleep;
+    K.getpid = h_getpid;
+    s32 rc = save_race_copy(-1, tid, dir, dst);
+    hlog("RESULT rc=%x why=", (u32)rc);
+    return 0;
+}
+
 /* ---- the game selector's save scan (prescan) ---- */
 int save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg);
 

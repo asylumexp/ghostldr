@@ -11,8 +11,13 @@
  * free /savedataN, waits (the window in which ShellCore checks it), then
  * refuses: SWRR's keystone is not the save's.  If a descriptor inside the
  * slot is open at that moment, the cleanup unmount fails and the save stays
- * bound ("held"); paths into it no longer resolve (the measured 0x80020018),
- * descriptors keep working.  Closing SWRR (os_exit) commits every read-write
+ * bound ("held"); here paths into it no longer resolve (0x80020018), which is
+ * stricter than the 13.60 PS5 (names keep resolving there; the 0x80020018
+ * once measured was descriptors leaking to EMFILE), so the save tools are
+ * tested for doing everything inside the window; descriptors keep working.
+ * The bare mount point shows first: a folder opened then stays empty (listed
+ * through its descriptor), and in the latebind scenario a file opened in that
+ * moment waits for the save, as the PS5's racers saw it.  Closing SWRR (os_exit) commits every read-write
  * bound save: its files replace the image's.  sce_sys is the system's: the
  * app can read param.sfo but not keystone, and can't write either.  SWRR
  * can't name anything relative to a descriptor: openat answers EPERM (and
@@ -43,6 +48,7 @@
 int host_run(const char *tid, const char *dir, const char *src, const char *fp, const char *backup, int check);
 int host_fsvsh(const char *fp, int change);
 int host_prescan(const char *saves, uint32_t user, uint32_t stop);
+int host_copy(const char *tid, const char *dir, const char *dst);
 
 #define O_DIRECTORY_ORBIS 0x20000
 #define NFD 4096
@@ -54,9 +60,10 @@ static int g_errno;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static struct {
-    int bound, held, rw, ro_fp;
+    int bound, held, rw, ro_fp, bare;
     char tid[16], dir[32];
 } g_slot[SLOTS];
+static int g_peak, g_open_now; /* descriptors open inside /savedataN slots: the most at once */
 
 static struct {
     int used, slot, dir;
@@ -151,6 +158,8 @@ static int track(int fd, int slot, int dir, const char *host)
         return -1;
     }
     g_fd[fd].used = 1, g_fd[fd].slot = slot, g_fd[fd].dir = dir, g_fd[fd].dlen = g_fd[fd].doff = 0;
+    if (slot >= 0 && ++g_open_now > g_peak)
+        g_peak = g_open_now;
     free(g_fd[fd].dents), g_fd[fd].dents = NULL;
     snprintf(g_fd[fd].path, sizeof(g_fd[fd].path), "%s", host);
     return fd;
@@ -191,6 +200,13 @@ static int k_open(const char *p, int flags, int mode)
     char host[1100];
     int slot;
     int e = map(p, host, sizeof(host), &slot);
+    /* latebind: a file opened while only the bare mount point is there waits for the save (so the racer that
+     * caught the bare folder finds the save's files right after, while its folder stays empty) */
+    if (!e && slot >= 0 && is("latebind") && g_slot[slot].bare && !(flags & O_DIRECTORY_ORBIS)) {
+        for (int i = 0; i < 2000 && g_slot[slot].bare; i++)
+            usleep(500);
+        e = map(p, host, sizeof(host), &slot);
+    }
     if (e) {
         g_errno = e;
         return -1;
@@ -210,6 +226,8 @@ static int k_close(int fd)
     pthread_mutex_lock(&g_mu);
     if (fd >= 0 && fd < NFD && g_fd[fd].used) {
         g_fd[fd].used = 0;
+        if (g_fd[fd].slot >= 0)
+            g_open_now--;
         free(g_fd[fd].dents), g_fd[fd].dents = NULL;
     }
     pthread_mutex_unlock(&g_mu);
@@ -342,9 +360,16 @@ static int k_getdents(int fd, uint8_t *buf, int n)
     if (fd < 0 || fd >= NFD || !g_fd[fd].used || !g_fd[fd].dir)
         return g_errno = EBADF, -1;
     if (!g_fd[fd].dents) {
-        DIR *d = opendir(g_fd[fd].path);
-        if (!d)
+        /* through the descriptor, not its path: a folder caught on the bare mount point keeps listing that
+         * (empty) folder after the save covers the path, as a vnode does */
+        int dfd = dup(fd);
+        DIR *d = dfd >= 0 ? fdopendir(dfd) : NULL;
+        if (!d) {
+            if (dfd >= 0)
+                close(dfd);
             return g_errno = errno, -1;
+        }
+        rewinddir(d);
         size_t cap = 65536, len = 0;
         char *out = calloc(1, cap);
         struct dirent *e;
@@ -426,8 +451,8 @@ static int bind(const char *tid, const char *dir, int rw)
      * moved in: it appears at /savedataN whole, as a mount does */
     snprintf(cmd, sizeof(cmd), "rm -rf '%s/mnt/%d' && mkdir -p '%s/mnt/%d'", g_root, n, g_root, n);
     run(cmd);
-    g_slot[n].bound = 1, g_slot[n].held = 0, g_slot[n].rw = rw, g_slot[n].ro_fp = 0;
-    usleep(20000);
+    g_slot[n].bound = 1, g_slot[n].held = 0, g_slot[n].rw = rw, g_slot[n].ro_fp = 0, g_slot[n].bare = 1;
+    usleep(is("latebind") ? 60000 : 20000);
     g_slot[n].bound = 0;
     /* the bare mount point stays as .emptyN: a descriptor caught on it keeps seeing it empty, as a covered
      * folder does */
@@ -440,6 +465,8 @@ static int bind(const char *tid, const char *dir, int rw)
     snprintf(g_slot[n].dir, sizeof(g_slot[n].dir), "%s", dir);
     __sync_synchronize();
     g_slot[n].bound = 1;
+    __sync_synchronize();
+    g_slot[n].bare = 0;
     return n;
 }
 
@@ -602,6 +629,8 @@ int main(int argc, char **argv)
     int check = argc > 8 && strcmp(argv[8], "check") == 0, noexit = argc > 8 && strcmp(argv[8], "noexit") == 0;
     if (argc > 8 && strcmp(argv[8], "prescan") == 0)
         host_prescan(argv[3], (uint32_t)strtoul(argv[4], NULL, 16), (uint32_t)atoi(argv[5]));
+    else if (argc > 8 && strcmp(argv[8], "copy") == 0)
+        host_copy(argv[3], argv[4], argv[5]);
     else if (argc > 8 && strncmp(argv[8], "fsvsh", 5) == 0)
         host_fsvsh(strcmp(argv[6], "-") ? argv[6] : NULL,
                    strcmp(argv[8], "fsvsh-learn") == 0      ? 2
@@ -613,6 +642,7 @@ int main(int argc, char **argv)
     for (int fd = 0; fd < NFD; fd++)
         if (g_fd[fd].used && g_fd[fd].slot >= 0)
             printf("VIOLATION descriptor %d left open in /savedata%d\n", fd, g_fd[fd].slot);
+    printf("fake: peak %d descriptors open at once in /savedataN\n", g_peak);
     /* the bare mount point (before the save covered it) must stay as it was: empty */
     for (int n = 1; n < SLOTS; n++) {
         char cmd[1300];

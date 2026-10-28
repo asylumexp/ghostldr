@@ -16,11 +16,14 @@
  * /savedataN points.  The first racer that opens the save's root holds
  * its sce_sys/param.sfo (only the bound save has one, and while it is open
  * the save cannot be unbound) and opens every file below it at once, by
- * absolute path, while the save is still bound: once ShellCore has refused
- * it no name below it resolves any more (seen on 13.60: 48 descriptors, 0
- * files), and SWRR may not use dir-relative calls at all (openat: EPERM,
- * the other *at calls: ENOSYS), but descriptors opened before keep reading,
- * and getdents on a held directory works.  Then the save is copied through
+ * absolute path, while the save is bound.  (On the 13.60 PS5 the names keep
+ * resolving after the refusal for as long as something holds the save; an
+ * earlier reading that they stop was descriptors leaking to EMFILE.  Opening
+ * everything in the window costs nothing and covers a console that differs.)
+ * SWRR may not use dir-relative calls at all (openat: EPERM, the other *at
+ * calls: ENOSYS); getdents on a held directory works.  A directory caught
+ * first can be the bare mount point the save then covers, which stays empty:
+ * the root is listed through a descriptor opened by path after the pin.  Then the save is copied through
  * them into a directory, the copy made read-only, and they are closed.  The mount point it leaves behind is counted
  * against ghostldr's mount slots; RACE_MAX copies per SWRR session at most.
  */
@@ -89,6 +92,18 @@ static bool race_ready(void)
            R.unlink && R.rmdir && R.yield && R.mount_internal && R.umount && R.thread && R.join;
 }
 
+/* sceKernelGetProcessTime (us), or 0 if the host can't give it (the tests) */
+static u64 now_us(void)
+{
+    static u64 (*pt)(void);
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        pt = host_real("sceKernelGetProcessTime");
+    }
+    return pt ? pt() : 0;
+}
+
 static struct {
     volatile int go, stop;
     volatile int n;
@@ -97,6 +112,7 @@ static struct {
     bool dir[MAXFD];
     u32 free_mask;
     volatile u64 tries;
+    volatile u64 first_us; /* us when a racer first held something */
 } G_r;
 
 /* every file below the held directory dirfd (rel below /savedata<slot>), opened by absolute path */
@@ -164,9 +180,13 @@ bool save_race_keystone(u8 out[0x60])
     return true;
 }
 
-/* a directory descriptor caught on /savedata<slot>: if it is the bound
- * save's root, hold its param.sfo and open its files now */
-static void pin_save(int fd, u32 slot)
+/* a racer caught something on /savedata<slot> (a directory or the save's
+ * sce_sys/param.sfo): if the save's files show there, hold its param.sfo and
+ * open its files now.  The save's root is listed through a descriptor opened
+ * for that, by path, after the pin: a directory caught a moment before can be
+ * the bare mount point the save then covers, which stays empty (13.60 PS5:
+ * caught 21-103 ms after the request, listing only . and ..). */
+static void pin_save(u32 slot)
 {
     int no = 0;
     if (!g_pin || !__atomic_compare_exchange_n(&g_pinning, &no, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
@@ -178,38 +198,61 @@ static void pin_save(int fd, u32 slot)
         __atomic_store_n(&g_pinning, 0, __ATOMIC_RELEASE);
         return;
     }
-    pin_tree(fd, slot, "", 6);
+    fmt(p, sizeof(p), "/savedata%u", slot);
+    int root = R.open(p, O_RDONLY | O_DIRECTORY, 0);
+    if (root >= 0) {
+        pin_tree(root, slot, "", 6);
+        R.close(root);
+    }
     try_keystone(slot);
-    R.close(sfo); /* sce_sys/param.sfo itself was opened again below, if readable */
-    __atomic_store_n(&g_pinning, 2, __ATOMIC_RELEASE);
+    R.close(sfo); /* sce_sys/param.sfo itself was opened again by pin_tree, if readable */
+    __atomic_store_n(&g_pinning, g_npin > 0 ? 2 : 0, __ATOMIC_RELEASE); /* nothing pinned: let a later catch try */
 }
 
+/* Each racer keeps at most one directory and one file descriptor per slot it
+ * caught (the directory keeps the bare mount point, and then the save, from
+ * being unbound; the file is the save's own); everything else it opens is
+ * closed at once, so a race holds a handful of descriptors, not hundreds. */
 static void *racer(void *arg)
 {
     u64 id = (u64)arg, tries = 0;
+    int held[2][2] = {{-1, -1}, {-1, -1}}; /* [slot index][0 directory, 1 file] */
+    u32 slots[2] = {0, 0}, ns = 0;
+    for (u32 n = 0; n < 16 && ns < 2; n++)
+        if (G_r.free_mask & (1u << n))
+            slots[ns++] = n;
     while (!G_r.go && !G_r.stop)
         R.yield();
     while (!G_r.stop) {
-        for (u32 n = 0; n < 16 && !G_r.stop; n++) {
-            if (!(G_r.free_mask & (1u << n)))
-                continue;
+        for (u32 i = 0; i < ns && !G_r.stop; i++) {
+            u32 n = slots[i];
             char p[40];
             bool dir = ((tries + id) & 1) == 0;
             fmt(p, sizeof(p), dir ? "/savedata%u" : "/savedata%u/sce_sys/param.sfo", n);
             int fd = R.open(p, dir ? O_DIRECTORY : O_RDONLY, 0);
             tries++;
-            if (fd >= 0 && dir)
-                pin_save(fd, n);
             if (fd >= 0) {
-                int k = __atomic_fetch_add(&G_r.n, 1, __ATOMIC_ACQ_REL);
-                if (k < MAXFD)
-                    G_r.fd[k] = fd, G_r.slot[k] = (u8)n, G_r.dir[k] = dir;
+                if (!G_r.first_us)
+                    G_r.first_us = now_us();
+                if (__atomic_load_n(&g_pinning, __ATOMIC_ACQUIRE) != 2)
+                    pin_save(n);
+                if (held[i][dir ? 0 : 1] < 0)
+                    held[i][dir ? 0 : 1] = fd;
                 else
                     R.close(fd);
             }
             R.yield();
         }
     }
+    for (u32 i = 0; i < ns; i++)
+        for (u32 j = 0; j < 2; j++)
+            if (held[i][j] >= 0) {
+                int k = __atomic_fetch_add(&G_r.n, 1, __ATOMIC_ACQ_REL);
+                if (k < MAXFD)
+                    G_r.fd[k] = held[i][j], G_r.slot[k] = (u8)slots[i], G_r.dir[k] = j == 0;
+                else
+                    R.close(held[i][j]);
+            }
     __atomic_fetch_add(&G_r.tries, tries, __ATOMIC_RELAXED);
     return NULL;
 }
@@ -338,8 +381,16 @@ static void mkdirs(const char *path)
 static u32 g_races;
 static volatile int g_lock;
 
-s32 save_race_copy(s32 user, const char *tid, const char *dir, const char *dst)
+static bool rw_ready(void);
+static s32 fp_mount(s32 user, const char *t, const char *d, const char *fp, char mp[16]);
+
+/* fp: NULL, or the title's keystone fingerprint, which asks for the mount with
+ * sceSaveDataMount instead (the same refusal for another account's save, by
+ * another branch of the service) */
+static s32 race_copy(s32 user, const char *tid, const char *dir, const char *dst, const char *fp)
 {
+    if (fp && (!fp[0] || !rw_ready()))
+        fp = NULL;
     if (!race_ready()) {
         logf("save_race: libkernel or libSceSaveData lacks what it needs");
         return E_INVAL;
@@ -399,7 +450,9 @@ s32 save_race_copy(s32 user, const char *tid, const char *dir, const char *dst)
     memset(res, 0, sizeof(res));
     G_r.go = 1;
     K.usleep(2000);
-    s32 rc = R.mount_internal(&m, res, NULL);
+    u64 t0 = now_us();
+    s32 rc = fp ? fp_mount(user, t, d, fp, (char *)res) : R.mount_internal(&m, res, NULL);
+    u64 t1 = now_us();
     K.usleep(200000);
     G_r.stop = 1;
     for (u32 i = 0; i < started; i++)
@@ -459,10 +512,18 @@ s32 save_race_copy(s32 user, const char *tid, const char *dir, const char *dst)
          "refused; unmount -> %x%s",
          t, d, (u32)rc, rc == 0 ? "allowed" : "refused after binding", G_r.tries, nfd, files, bytes, dst, refused,
          (u32)um, left ? ": the mount point stays until SWRR restarts" : "");
+    logf("save_race: %s:%s: %s took %lu us; first descriptor %s%ld us after the request; %d files held",
+         t, d, fp ? "the fingerprint mount" : "MountInternal", (u64)(t1 - t0),
+         G_r.first_us ? "" : "never (", G_r.first_us ? (long)(G_r.first_us - t0) : 0L, g_npin);
     if (g_ks_rc != 1)
         logf("save_race: %s:%s: its sce_sys/keystone while bound: %s (%ld)", t, d,
              g_ks_rc == 0 ? "read" : "not readable", (long)g_ks_rc);
     return root != -1 ? 0 : rc ? rc : E_NOENT;
+}
+
+s32 save_race_copy(s32 user, const char *tid, const char *dir, const char *dst)
+{
+    return race_copy(user, tid, dir, dst, NULL);
 }
 
 
@@ -1558,7 +1619,18 @@ static s32 x_check(s32 user, const char *tid, const char *dir, const char *src, 
     return save_race_check(user, tid, dir, host_src(src, buf, sizeof(buf)), fp, r);
 }
 
+/* dst: a folder as the payload sees it (made, or emptied first); fp NULL or "" for MountInternal */
+static s32 x_copy(s32 user, const char *tid, const char *dir, const char *dst, const char *fp)
+{
+    char buf[320];
+    const char *h = dst && race_ready() ? remap_path(dst, buf, sizeof(buf)) : NULL;
+    if (!tid || !dir || !(h ? h : dst))
+        return E_INVAL;
+    return race_copy(user, tid, dir, h ? h : dst, fp);
+}
+
 static const struct ext_hle_ent k_hle[] = {
+    {"libGhostldr", "ghostldr_save_race_copy", x_copy, NULL},
     {"libGhostldr", "ghostldr_save_race_write", x_write, NULL},
     {"libGhostldr", "ghostldr_save_race_check", x_check, NULL},
 };
