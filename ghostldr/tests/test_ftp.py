@@ -143,6 +143,29 @@ class FtpTest(unittest.TestCase):
         self.assertEqual((self.root / "b.bin").read_bytes(), b"B" * 10)
         self.assertIn("listening on TCP", self.server.text())
 
+    def test_stop_and_start_again(self) -> None:
+        """ftp_stop (the game selector's server, before the extension's code goes): every client and transfer
+        ends, the port closes, and ftp_start serves on it again (the title's boot)."""
+        (self.root / "big.bin").write_bytes(b"x" * (64 << 20))
+        idle, busy = self.client(), self.client()
+        sock = busy.transfercmd("RETR big.bin")              # a transfer left half-read
+        sock.recv(1 << 16)
+        self.server.proc.stdin.write("s")
+        self.server.proc.stdin.flush()
+        self.assertEqual(self.server.proc.stdout.readline().strip(), "stop 0")
+        with self.assertRaises((OSError, EOFError, ftplib.Error)):
+            idle.voidcmd("NOOP")
+        sock.close()
+        with self.assertRaises(OSError):
+            socket.create_connection(("127.0.0.1", self.server.port), timeout=2).close()
+        self.server.proc.stdin.write("g")
+        self.server.proc.stdin.flush()
+        self.assertEqual(self.server.proc.stdout.readline().strip(), "start 0")
+        c = self.client()
+        self.put(c, "after.bin", b"A" * 100)
+        self.assertEqual(self.get(c, "after.bin"), b"A" * 100)
+        self.assertIn("ftp: stopped (TCP", self.server.text())
+
     # ---- sessions and paths ----
 
     def test_login_and_directories(self) -> None:

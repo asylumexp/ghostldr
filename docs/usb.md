@@ -77,7 +77,7 @@ python3 ghostldr.py copy /path/to/CUSA12345/app0 /Volumes/MYDRIVE --folder "Game
 - **Stopped?** Run the same command again: files already there with the same size are kept, changed ones are copied again, and files the dump no longer has are removed.
 - It writes `prefix` and `meta.bin` beside the game's `app0`. Each file is written under a `.part` name and renamed when complete, without macOS's `._` companion files.
 
-**With the drive in the PS5,** while a game runs through ghostldr (its FTP server, [ftp.md](ftp.md)):
+**With the drive in the PS5,** while the game selector shows or a game runs through ghostldr (its FTP server, [ftp.md](ftp.md)):
 
 ```bash
 python3 ghostldr.py copy /path/to/CUSA12345/app0 ps5

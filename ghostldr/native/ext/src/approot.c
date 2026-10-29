@@ -1169,5 +1169,10 @@ static int usb_open(const char *path, char *out, size_t size)
 /* a save tool's scan before the title loads (ghost_api.save_prescan) */
 int save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg) HIDDEN;
 
+/* the game selector's FTP server (ftp_sys.c; the ELF loader's extension has a stand-in server, elfldr_only.c) */
+int ftp_early_start(u32 port) HIDDEN;
+int ftp_early_stop(void) HIDDEN;
+
 const struct ext_early g_approot_early HIDDEN = {EXT_EARLY_MAGIC, sizeof(struct ext_early), approot_init,
-                                                  approot_pick, lib_get, save_prescan};
+                                                  approot_pick, lib_get, save_prescan, ftp_early_start,
+                                                  ftp_early_stop};

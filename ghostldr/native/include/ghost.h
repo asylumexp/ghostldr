@@ -735,6 +735,7 @@ struct bx_reclaim;
 int ext_reclaim(struct bx_reclaim *r); /* bigexec.c's reclaim, done by the extension (ghost_api.h) */
 extern int (*g_reclaim)(struct bx_reclaim *r); /* the extension's, set by its ext_early (ext.c) */
 int ext_approot_pick(const char *title, int index, const char **root);
+void ext_ftp_early(u32 port); /* the FTP server while the game selector shows (0: none) */
 struct lib_title;
 int ext_library(const struct lib_title **list); /* the games approot_init found (ghost_api.library) */
 void ext_abandon(void);  /* a boot stopped before the title loaded: free the code's JIT block and the blob */

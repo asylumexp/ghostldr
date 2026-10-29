@@ -266,6 +266,8 @@ long fv_recv(int fd, void *buf, unsigned long n)
     return r < 0 ? err() : r;
 }
 
+void fv_shutdown(int fd) { shutdown(fd, SHUT_RDWR); }
+
 void fv_sclose(int fd)
 {
     shutdown(fd, SHUT_RDWR);
@@ -306,6 +308,12 @@ int main(int argc, char **argv)
     while (read(0, &c, 1) > 0)
         if (c == 'r') {
             printf("relisten %d\n", ftp_relisten());
+            fflush(stdout);
+        } else if (c == 's') { /* the game selector's server going (ftp_sys.c ftp_early_stop) */
+            printf("stop %d\n", ftp_stop(15000));
+            fflush(stdout);
+        } else if (c == 'g') { /* and the title's starting it again */
+            printf("start %d\n", ftp_start((unsigned short)port));
             fflush(stdout);
         }
     return 0;

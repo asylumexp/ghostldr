@@ -64,6 +64,7 @@ int fv_timeouts(int fd, int seconds); /* a receive or send that waits longer fai
 long fv_send(int fd, const void *buf, unsigned long n); /* all of it: n, or < 0 */
 long fv_recv(int fd, void *buf, unsigned long n);       /* 0: the peer closed it */
 void fv_sclose(int fd);
+void fv_shutdown(int fd); /* both directions: wakes a thread waiting on it, without closing it */
 
 /* the directory a client starts in: the USB drive when one is mounted */
 const char *fv_home(void);
@@ -105,3 +106,7 @@ const char *fv_home(void);
 /* Listen on port and serve clients from a thread of its own: 0, or < 0
  * (the port is taken, no memory).  Once per process. */
 int ftp_start(unsigned short port);
+/* Stop it and free all it made, waiting at most max_ms for its threads:
+ * 0, or < 0 when one is still running.  ftp_start may then start it again. */
+int ftp_stop(unsigned max_ms);
+int ftp_running(void);

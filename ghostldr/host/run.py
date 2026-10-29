@@ -768,7 +768,8 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as e:
             raise SystemExit(f"could not send to {args.host}:{port} ({e}): {LOADER_HELP}")
         if args.mode == "boot" and args.ftp_port:
-            print(f"FTP: ftp://{args.host}:{args.ftp_port}/ once the title starts (any user and password)",
+            print(f"FTP: ftp://{args.host}:{args.ftp_port}/ while the game selector shows and the title runs "
+                  "(any user and password)",
                   flush=True)
         if ext and not ext_server.sent.wait(60):
             print(f"extension: the console did not fetch it (is TCP {EXT_PORT} open in this computer's firewall?)",

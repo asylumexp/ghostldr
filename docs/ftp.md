@@ -17,7 +17,7 @@ Use any FTP client in passive mode, the usual default: FileZilla, WinSCP, Cyberd
 `run.py boot` prints the address once the boot is sent:
 
 ```
-FTP: ftp://192.168.1.23:1212/ once the title starts (any user and password)
+FTP: ftp://192.168.1.23:1212/ while the game selector shows and the title runs (any user and password)
 ```
 
 The server starts as the title's main thread is created, so it's up shortly after the title begins to load, and it stays up until SWRR closes. The console's log shows it:
@@ -75,7 +75,7 @@ Measured on a stock 13.60 PS5 with Ghost of Tsushima running from the drive (a U
 
 ## Security
 
-There's no password and no encryption: while a title runs, anyone on your network can read and write the USB drive and SWRR's sandbox. Use it on a network you trust, or turn it off with `--ftp-port 0`.
+There's no password and no encryption: while the selector shows or a title runs, anyone on your network can read and write the USB drive and SWRR's sandbox. Use it on a network you trust, or turn it off with `--ftp-port 0`.
 
 ## Limits
 
@@ -93,10 +93,12 @@ There's no password and no encryption: while a title runs, anyone on your networ
 
 - **Sockets.** On a PS5 at 8.00 or later (a PS4 at 14.00 or later), SWRR's own `socket()` answers ENOSYS for an internet socket. As Luac0re does for its loader, the JIT compiler process makes the socket and hands it to SWRR (`jit_recv_fd`); `bind`, `listen`, `accept` and the transfers then work in SWRR. That channel belongs to the boot thread, so every socket the server listens on is made at start: the control port and one passive data port for each of the ten client slots. Passive mode answers with the slot's own port, and connections left waiting from an unused `PASV` are dropped at the next one.
 - **Buffers.** SWRR's sockets start with 32 KiB to send and 64 KiB to receive, which held one connection to a few MiB/s. Every listening and accepted socket gets 2 MiB of each; the listening ones get it before `listen`, so the connections they accept offer a large enough window.
-- **Start.** The core calls the extension's `title_starting` hook just before it creates the title's main thread (`boot.c`). By then the boot can't stop short, so a failed boot never leaves a server thread running in freed memory, and the boot thread still has the compiler's channel for the sockets. `run.py --ftp-port` reaches the console in bits 48–63 of the boot context's flags.
+- **Start.** When the game selector is about to show, the core starts the server from the extension's early entry (`struct ext_early.ftp_start`, `boot.c`), on the boot thread, which still has the compiler's channel for the sockets. When the selector is beside the ELF loader (the release's first call), the port is 1212, the release's: those flags' port bits hold the ELF loader's. Otherwise `run.py --ftp-port` reaches the console in bits 48–63 of the boot context's flags.
+- **Through to the title.** Once the extension's code is placed it stays where it is when the title loads, so the server goes on serving: the `title_starting` hook, just before the title's main thread, finds it running and leaves it. A boot without the selector starts it there, as before.
+- **Stop.** Before the core gives the extension's code back (Close ghostldr, the selector beside the ELF loader handing over to the title's call, a boot that stops before its title), `ftp_stop` shuts every client's control and data connections, waits for their threads and the listener's (at most 15 s), and frees the slots. A thread that doesn't end in time keeps the code where it is, so nothing runs in freed memory. The title's call starts the server again.
 - **The drives.** Before the title's code runs, `approot.c` opens the session to the system's AutoMounter and mounts the plugged-in drives at `/ghostldr_usb`, `/ghostldr_usb2`, ..., as it does for a title on a drive ([usb.md](usb.md#how-the-console-reaches-the-drive)). The title's own `sceUsbStorageInit` and `Term` are then kept off that session (`hle_usbstorage.c`). When a client logs in, a drive that has gone away is forgotten and a newly plugged-in one is mounted (the drive a title runs from is mounted again by `usb_live.c` instead: [usb.md](usb.md#pulling-the-drive-out-rest-mode)).
 - **Rest mode.** After rest mode the listening socket is checked (`poll`, `SO_ERROR`, `getsockname`); one that stopped working is made again on the same port, with new passive ports for the idle slots, from the JIT compiler as at the start (`ftp_relisten`). Clients connected before rest mode reconnect.
-- **Memory.** Ten client slots, each with a 128 KiB transfer buffer, about 1.4 MiB in all, are allocated once at start. The title is already running then, and memory taken later would come out of what it was promised. Each client gets a thread with a 64 KiB stack.
+- **Memory.** Ten client slots, each with a 128 KiB transfer buffer, about 1.4 MiB in all, are allocated once at start, before the title's memory is planned (or as the title starts, without the selector); memory taken later would come out of what it was promised. Each client gets a thread with a 64 KiB stack.
 - **Speed** comes from connections: each client has its own thread on the console, so `gfs_pack.py --usb` sends eight files at once (`--jobs`). Most of a dump is small files, and each costs a few round trips.
 - **Uploads** are written in 128 KiB pieces, which a USB drive takes much faster than the network's small ones.
 - **SIGPIPE** is ignored for the whole process and every socket has `SO_NOSIGPIPE`: a client that drops its connection mustn't take SWRR with it.

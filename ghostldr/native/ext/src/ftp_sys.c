@@ -369,6 +369,12 @@ long fv_recv(int fd, void *buf, unsigned long n)
     return r;
 }
 
+void fv_shutdown(int fd)
+{
+    if (S.shutdown)
+        S.shutdown(fd, 2);
+}
+
 void fv_sclose(int fd)
 {
     if (S.shutdown)
@@ -464,12 +470,32 @@ HIDDEN void ftp_after_resume(void)
         ftp_relisten();
 }
 
+/* The game selector's FTP server (struct ext_early.ftp_start, from the
+ * core on the boot thread before the selector shows): the same server, up
+ * while games are picked; it carries on into the title when the code stays
+ * where it is, and goes (ftp_early_stop) before the core gives the code back. */
+int ftp_early_start(u32 port) HIDDEN;
+int ftp_early_start(u32 port)
+{
+    if (!port || net_setup() != 0)
+        return -1;
+    usb_ftp_prepare();
+    return ftp_start((unsigned short)port);
+}
+
+int ftp_early_stop(void) HIDDEN;
+int ftp_early_stop(void) { return ftp_stop(15000); }
+
 void ftp_title_starting(void) HIDDEN;
 void ftp_title_starting(void)
 {
     u32 port = CTX_FTP_PORT(g_ctx->flags);
     if (!port) {
         logf("ftp: no FTP server (run.py --ftp-port 0)");
+        return;
+    }
+    if (ftp_running()) {
+        logf("ftp: serving since the game selector, on into the title");
         return;
     }
     if (net_setup() != 0) {

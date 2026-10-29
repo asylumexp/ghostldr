@@ -7,7 +7,9 @@
  * drive is /ghostldr_usb.
  *
  * One thread accepts clients and each client gets a thread of its own and
- * one of FTP_SESSIONS slots.  Everything is made once, at ftp_start: the
+ * one of FTP_SESSIONS slots.  ftp_stop ends them all (the game selector's
+ * server, before the extension's code goes; ftp_sys.c).  Everything is made
+ * once, at ftp_start: the
  * slots and their transfer buffers (a title is running by then, and memory
  * taken later would come out of what it was promised), and every socket the
  * server listens on, each slot's passive data port included (on a PS5 at
@@ -29,6 +31,7 @@
 
 struct sess {
     int ctl;                 /* control socket */
+    volatile int data;       /* the transfer's data socket, -1 between transfers (ftp_stop wakes it) */
     int dl;                  /* the slot's passive data listener */
     unsigned short dport;    /* its port */
     bool pasv;               /* PASV/EPSV given: the next transfer's connection comes to dl */
@@ -51,6 +54,7 @@ static struct sess *g_sess[FTP_SESSIONS];
 static int g_lfd = -1;
 static unsigned short g_port;
 static unsigned g_ids;
+static volatile int g_stop, g_listening; /* ftp_stop asked; the listener thread runs */
 
 static const char *err_text(long e)
 {
@@ -290,6 +294,7 @@ static int data_open(struct sess *s)
         return -1;
     }
     fv_timeouts(fd, 60);
+    s->data = fd;
     return fd;
 }
 
@@ -448,6 +453,7 @@ static void cmd_list(struct sess *s, const char *arg, int kind)
     }
     if (ok && used)
         ok = fv_send(fd, s->buf, used) == (long)used;
+    s->data = -1;
     fv_sclose(fd);
     say(s, ok ? "226 Listing sent" : "426 Connection closed; listing stopped");
 }
@@ -543,6 +549,7 @@ static void cmd_retr(struct sess *s, const char *arg)
         total += n;
     }
     fv_close(f);
+    s->data = -1;
     fv_sclose(fd);
     xfer_done(s, "RETR", path, total, t0, disk, code, err);
 }
@@ -597,6 +604,7 @@ static void cmd_stor(struct sess *s, const char *arg, bool append)
     disk += fv_clock_ms() - t;
     if (rc < 0 && code == 226)
         code = 451, err = rc;
+    s->data = -1;
     fv_sclose(fd);
     xfer_done(s, append ? "APPE" : "STOR", path, total, t0, disk, code, err);
 }
@@ -850,10 +858,15 @@ static void *session(void *arg)
 static void *listener(void *arg)
 {
     unsigned fails = 0;
-    for (;;) {
+    while (!g_stop) {
         unsigned a = 0;
         unsigned short p = 0;
-        int c = fv_accept(g_lfd, -1, &a, &p);
+        int c = fv_accept(g_lfd, 500, &a, &p);
+        if (c == -FV_ETIMEDOUT || g_stop) {
+            if (c >= 0)
+                fv_sclose(c);
+            continue;
+        }
         if (c < 0) {
             if (fails++ % 100 == 0)
                 fv_log("ftp: accept: %s (errno %d)", err_text(c), -c);
@@ -872,6 +885,7 @@ static void *listener(void *arg)
             continue;
         }
         s->ctl = c;
+        s->data = -1;
         s->pasv = false;
         s->peer = a;
         s->act = false;
@@ -885,6 +899,7 @@ static void *listener(void *arg)
             __atomic_store_n(&s->busy, 0, __ATOMIC_RELEASE);
         }
     }
+    __atomic_store_n(&g_listening, 0, __ATOMIC_RELEASE);
     return arg;
 }
 
@@ -970,8 +985,10 @@ int ftp_start(unsigned short port)
     }
     g_lfd = fd;
     g_port = port;
+    g_stop = 0, g_listening = 1;
     int rc = fv_thread(listener, NULL, "ghostldr-ftpd");
     if (rc != 0) {
+        g_listening = 0;
         fv_log("ftp: no thread for the server");
         fv_sclose(fd);
         g_lfd = -1;
@@ -981,3 +998,43 @@ int ftp_start(unsigned short port)
     fv_log("ftp: listening on TCP %u (%u clients at once, %u KiB each)", port, FTP_SESSIONS, FTP_BUF >> 10);
     return 0;
 }
+
+/* The server goes: no new clients, every client's connections shut down
+ * (a transfer's too), then its threads and memory.  It waits for them, at
+ * most max_ms: 0, or -FV_EBUSY when one is still there (the caller must not
+ * take its code away then).  ftp_start may start it again. */
+int ftp_stop(unsigned max_ms)
+{
+    if (g_lfd < 0)
+        return 0;
+    g_stop = 1;
+    for (unsigned i = 0; i < FTP_SESSIONS; i++) {
+        struct sess *s = g_sess[i];
+        if (s && __atomic_load_n(&s->busy, __ATOMIC_ACQUIRE)) {
+            int d = s->data;
+            if (d >= 0)
+                fv_shutdown(d);
+            fv_shutdown(s->ctl);
+        }
+    }
+    unsigned waited = 0;
+    for (;; waited += 20) {
+        bool busy = __atomic_load_n(&g_listening, __ATOMIC_ACQUIRE);
+        for (unsigned i = 0; i < FTP_SESSIONS && !busy; i++)
+            busy = g_sess[i] && __atomic_load_n(&g_sess[i]->busy, __ATOMIC_ACQUIRE);
+        if (!busy)
+            break;
+        if (waited >= max_ms) {
+            fv_log("ftp: a client's thread is still there after %u ms", waited);
+            return -FV_EBUSY;
+        }
+        fv_sleep_ms(20);
+    }
+    fv_sclose(g_lfd);
+    g_lfd = -1;
+    free_sessions();
+    fv_log("ftp: stopped (TCP %u)", g_port);
+    return 0;
+}
+
+int ftp_running(void) { return g_lfd >= 0; }

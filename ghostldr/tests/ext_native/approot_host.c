@@ -497,6 +497,9 @@ int save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void
 extern const struct ext_early g_approot_early;
 bool usb_session_open(void);
 void usb_ftp_prepare(void);
+/* struct ext_early's FTP server calls (ftp_sys.c, not built here) */
+int ftp_early_start(u32 port) { return -1; }
+int ftp_early_stop(void) { return 0; }
 const char *usb_ftp_home(void);
 static void f_spin(volatile int *l)
 {

@@ -262,6 +262,12 @@ struct ext_early {
      * the host's libraries give.  The core places the code for it when no
      * app root did (ext.c).  NULL: none. */
     int (*save_prescan)(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg);
+    /* The FTP server while the game selector shows (ext/src/ftp_sys.c), on
+     * the boot thread: 0, or < 0 when it didn't start.  ftp_stop ends it
+     * before the code goes: 0, or < 0 when a thread of it is still running
+     * (then the code must stay).  NULL: none (the ELF loader's extension). */
+    int (*ftp_start)(u32 port);
+    int (*ftp_stop)(void);
 };
 typedef const struct ext_early *(*ext_early_fn)(const struct ghost_api *api);
 

@@ -167,6 +167,11 @@ static int elfldr_select(struct el_select *s)
     }
     g_choose = choose, g_library = library;
     char title[16];
+    /* the FTP server beside it: the release's port (these flags' port bits
+     * hold the ELF loader's); it goes with the extension below, and the
+     * title's boot starts it again */
+    if (!is_ps4() && !is_jakx())
+        ext_ftp_early(1212);
     int picked = sel_run(true, title);
     __atomic_store_n(&s->stop, 1, __ATOMIC_RELEASE);
     logf("elfldr: %s picked: the ELF loader stops once no payload runs", picked >= 0 ? title : "nothing");
@@ -248,11 +253,14 @@ int ghost_boot(void)
         title[sizeof(title) - 1] = 0;
         picked = s->index, g_title_user = s->user;
         logf("boot: %s, picked in the game selector beside the ELF loader", picked >= 0 ? title : "no title");
-    } else /* a save tool (Apollo) asks whose saves even when it is the only title; with no
-            * --title the selector shows one title too, or none, with its Settings */
-        picked = sel_run(choose || (g_ctx->flags & CTX_FLAG_SELECT) || profile_has(PF_SAVE_TOOL) ||
-                             (settings && !profile_requested()),
-                         title);
+    } else { /* a save tool (Apollo) asks whose saves even when it is the only title; with no
+              * --title the selector shows one title too, or none, with its Settings */
+        bool show = choose || (g_ctx->flags & CTX_FLAG_SELECT) || profile_has(PF_SAVE_TOOL) ||
+                    (settings && !profile_requested());
+        if (show && !is_ps4() && !is_jakx()) /* the FTP server while games are picked, on into the title */
+            ext_ftp_early(CTX_FTP_PORT(g_ctx->flags));
+        picked = sel_run(show, title);
+    }
     if (picked == SEL_EXIT_LOADER) { /* Settings: "Close ghostldr" */
         ext_abandon();
         return picked;

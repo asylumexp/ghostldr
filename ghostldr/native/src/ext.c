@@ -501,6 +501,33 @@ int ext_reclaim(struct bx_reclaim *r)
     return early("the JIT reclaim") && g_reclaim ? g_reclaim(r) : -1; /* -1, r->why empty: bigexec.c says why */
 }
 
+/* The FTP server while the game selector shows (struct ext_early.ftp_start):
+ * port 0, or a PS4 or Jak X, where a drive isn't read either: none.  It
+ * goes in ftp_gone() before the code does. */
+static bool g_ftp;
+void ext_ftp_early(u32 port)
+{
+    if (!port || g_ftp)
+        return;
+    const struct ext_early *e = early("the FTP server");
+    if (e && e->size >= __builtin_offsetof(struct ext_early, ftp_stop) + 8 && e->ftp_start && e->ftp_stop)
+        g_ftp = e->ftp_start(port) == 0;
+}
+
+/* before the code goes: the selector's FTP server first; false when a
+ * thread of it is still running, so the code must stay */
+static bool ftp_gone(void)
+{
+    if (!g_ftp)
+        return true;
+    if (g_early->ftp_stop() != 0) {
+        logf("ext: the FTP server didn't stop: the extension's code stays where it is");
+        return false;
+    }
+    g_ftp = false;
+    return true;
+}
+
 int ext_approot_pick(const char *title, int index, const char **root)
 {
     return g_early ? g_early->approot_pick(title, index, root) : -1;
@@ -533,6 +560,8 @@ static void ext_gone(void)
 
 void ext_unplace(void)
 {
+    if (!ftp_gone())
+        return;
     ext_gone();
     if (g_in_jit)
         jit_block_destroy(&g_jb);
@@ -548,6 +577,8 @@ void ext_unplace(void)
  * the blob with it. */
 void ext_abandon(void)
 {
+    if (!ftp_gone())
+        return; /* its threads keep the code, and the blob, where they are */
     ext_gone();
     if (g_in_jit)
         jit_block_destroy(&g_jb);
