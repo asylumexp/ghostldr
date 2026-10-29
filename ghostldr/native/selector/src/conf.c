@@ -20,11 +20,18 @@
  * (the last one with the masks never reached the selector) leaves them out
  * once, writes pending=safe and says so; the selector then says so too.
  * Reset to defaults empties the file's switches.
+ *
+ * community_off=CUSA00001,CUSA11456 lists the games whose community memory
+ * plan the player turned off in their Information panel (sel_community);
+ * the game picked gets CTX_FLAG_NO_COMMUNITY_MEM from it and the switch
+ * (conf_start), in this boot's flags only.
  */
 #include "plat.h"
 
 void *memset(void *dst, int c, size_t n);
 void *memcpy(void *dst, const void *src, size_t n);
+void *memmove(void *dst, const void *src, size_t n);
+int memcmp(const void *a, const void *b, size_t n);
 size_t strlen(const char *s);
 
 #define CONF_DIR "GLDRCONF"
@@ -70,6 +77,22 @@ int conf_switch(int i, struct sel_switch *w)
                  sizeof(w->on));
         str_copy(w->off, "Off: a game may turn Remote Play off, as on its own", sizeof(w->off));
         w->flag = CTX_FLAG_KEEP_REMOTE_PLAY, w->on_sets = 1, w->def = 0; /* run.py --keep-remote-play */
+        return 0;
+    case CONF_SHARE_MEM: /* the console only logs the plan: the computer that started the boot sends it */
+        str_copy(w->key, "share_memory", sizeof(w->key));
+        str_copy(w->label, "Share learned memory plans", sizeof(w->label));
+        str_copy(w->on, "On: when the ghostldr app or run.py starts a game, it sends the game's plan to ghostldr",
+                 sizeof(w->on));
+        str_copy(w->off, "Off: plans stay on this console", sizeof(w->off));
+        w->flag = CTX_FLAG_SHARE_MEM, w->on_sets = 1, w->def = 0; /* run.py --share-memory */
+        return 0;
+    case CONF_COMMUNITY_MEM: /* a game's own Information panel can turn it off for that game (conf_start) */
+        str_copy(w->key, "community_memory", sizeof(w->key));
+        str_copy(w->label, "Use community memory plans", sizeof(w->label));
+        str_copy(w->on, "On: a game with no plan of its own starts from one shared by others, and keeps learning",
+                 sizeof(w->on));
+        str_copy(w->off, "Off: every game learns its own from scratch", sizeof(w->off));
+        w->flag = CTX_FLAG_NO_COMMUNITY_MEM, w->on_sets = 0, w->def = 1; /* run.py --no-community-memory */
         return 0;
     }
     return -1;
@@ -139,13 +162,20 @@ void conf_load(struct plat *P)
         P->conf_on |= (u32)on << i;
     }
     u64 on = get(t, n, "flags_on", v, sizeof(v)) > 0 ? hex(v) : 0, off = get(t, n, "flags_off", v, sizeof(v)) > 0 ? hex(v) : 0;
+    if (get(t, n, "community_off", P->conf_off, sizeof(P->conf_off)) < 0)
+        P->conf_off[0] = 0;
     int pending = get(t, n, "pending", v, sizeof(v)) > 0;
     P->conf_safe = pending && str_same(v, "safe");
     /* this boot's flags: with them (ghostldr.lua applied them), without, or nothing to apply */
     P->conf_live = !(on | off) ? -1 : (P->ctx->flags & on) == on && !(P->ctx->flags & off);
+    /* no community plans asked for by someone other than the switch (run.py --no-community-memory): it stands */
+    P->conf_no_community = (P->ctx->flags & CTX_FLAG_NO_COMMUNITY_MEM) &&
+                           !(P->conf_live == 1 && (on & CTX_FLAG_NO_COMMUNITY_MEM));
     LOG(P, "settings: %s/%s: %d bytes, switches %x, flags_on %lx, flags_off %lx (this boot %s them)%s", CONF_DIR,
         CONF_FILE, n, P->conf_on, on, off, P->conf_live < 0 ? "needs none of" : P->conf_live ? "has" : "lacks", !pending ? "" : P->conf_safe ? "; the last boot with them stopped before the selector: "
                                                              "left out of this one" : "; pending: cleared");
+    if (P->conf_off[0])
+        LOG(P, "settings: community memory plans off for %s", P->conf_off);
     if (pending)
         conf_write(P);
 }
@@ -167,6 +197,8 @@ static int conf_text(struct plat *P, char *t, int cap, u64 *on_mask, u64 *off_ma
             *off_mask |= w.flag;
     }
     n += fmt(t + n, (size_t)(cap - n), "flags_on=0x%lx\nflags_off=0x%lx\n", *on_mask, *off_mask);
+    if (P->conf_off[0])
+        n += fmt(t + n, (size_t)(cap - n), "community_off=%s\n", P->conf_off);
     return n;
 }
 
@@ -237,4 +269,84 @@ int sel_switch(struct sel *S, int i, int want)
     if (want >= 0 && conf_set(P, i, want) != 0)
         return -1;
     return (int)((P->conf_on >> i) & 1);
+}
+
+/* ---- community_off: the games whose community memory plan the player
+ * turned off in their Information panel (IDs, commas between them; Reset to
+ * defaults leaves it: it isn't a switch) ---- */
+
+/* where id is in the list, or -1 */
+static int off_find(const char *list, const char *id)
+{
+    int len = str_len(id);
+    for (int at = 0; len && list[at];) {
+        int end = at;
+        while (list[end] && list[end] != ',')
+            end++;
+        if (end - at == len && !memcmp(list + at, id, (size_t)len))
+            return at;
+        at = list[end] ? end + 1 : end;
+    }
+    return -1;
+}
+
+int conf_community_off(const struct plat *P, const char *id) { return off_find(P->conf_off, id) >= 0; }
+
+int sel_community(struct sel *S, int title, int on)
+{
+    struct plat *P = PLAT(S);
+    const char *id = S->titles[title].id;
+    int len = str_len(id);
+    for (int i = 0; i < len; i++)
+        if (id[i] == ',' || id[i] == '\n' || id[i] == '\r')
+            len = 0;
+    if (!len || len + 1 >= CONF_OFF_MAX)
+        return -1;
+    char was[CONF_OFF_MAX], *l = P->conf_off;
+    memcpy(was, l, sizeof(was));
+    int at = off_find(l, id);
+    if (at >= 0) { /* out of the list, with its comma */
+        int end = at + len + (l[at + len] == ',');
+        int rest = str_len(l + end);
+        memmove(l + at, l + end, (size_t)rest + 1);
+        if (at && !l[at] && l[at - 1] == ',')
+            l[at - 1] = 0;
+    }
+    if (!on) { /* at the end; the oldest go when it is full */
+        while (str_len(l) + (l[0] ? 1 : 0) + len + 1 > CONF_OFF_MAX) {
+            int k = 0;
+            while (l[k] && l[k] != ',')
+                k++;
+            memmove(l, l + k + (l[k] == ','), (size_t)str_len(l + k + (l[k] == ',')) + 1);
+        }
+        int n = str_len(l);
+        if (n)
+            l[n++] = ',';
+        memcpy(l + n, id, (size_t)len + 1);
+    }
+    int rc = conf_write(P);
+    if (rc != 0)
+        memcpy(l, was, sizeof(was));
+    LOG(P, "settings: community memory plan %s for %s: %x (community_off %s)", on ? "used" : "off", id, (u32)rc,
+        l[0] ? l : "empty");
+    return rc == 0 ? 0 : -1;
+}
+
+/* The game picked: CTX_FLAG_NO_COMMUNITY_MEM unless the switch is on and the
+ * game's own choice too.  Set before the selector by run.py, it stays. */
+void conf_start(struct plat *P, const struct title *t)
+{
+    int sw = (P->conf_on >> CONF_COMMUNITY_MEM) & 1, game = !conf_community_off(P, t->id);
+    int off = P->conf_no_community || !sw || !game;
+    if (off)
+        P->ctx->flags |= CTX_FLAG_NO_COMMUNITY_MEM;
+    else
+        P->ctx->flags &= ~CTX_FLAG_NO_COMMUNITY_MEM;
+    const char *why = P->conf_no_community ? "off before the selector" : !sw ? "off in Settings"
+                    : !game ? "off for this game" : "on";
+    if (t->community)
+        LOG(P, "%s: a community memory plan from %u console(s): %s (CTX_FLAG_NO_COMMUNITY_MEM %s)", t->id,
+            t->community_from, why, off ? "set" : "clear");
+    else
+        LOG(P, "%s: no community memory plan (CTX_FLAG_NO_COMMUNITY_MEM %s: %s)", t->id, off ? "set" : "clear", why);
 }

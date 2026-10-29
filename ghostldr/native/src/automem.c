@@ -28,7 +28,11 @@
  *     is left to shrink after running out of real memory, allocations past
  *     what the title is told are refused again (the plan-free budget).
  *
- * The first boot of a build is the plan-free budget with lazy commit.
+ * The first boot of a build is the plan-free budget with lazy commit, or,
+ * when the title's profile carries a community plan for the build (REC_SEED,
+ * docs/community-plans.md) and CTX_FLAG_NO_COMMUNITY_MEM is clear, that plan
+ * as last boot's: it keeps learning here.  With CTX_FLAG_SHARE_MEM each save
+ * also goes to the outbox the game selector shares from (plan_share).
  * run.py --no-auto-memory turns all of it off, --auto-memory uses it instead
  * of a profile's manual plan, and --forget-memory starts the learned plan
  * over.
@@ -114,9 +118,26 @@ static u64 now_us(void)
     return pt ? pt() : 0;
 }
 
+/* "Share learned memory plans" (CTX_FLAG_SHARE_MEM): the saved plan, also in
+ * GLDRPLANS as share-<title>-<fingerprint>-<ps5|ps4>.bin, which the game
+ * selector sends to the collection server next time (plansync/) */
+COLD static void plan_share(void)
+{
+    char name[96], fp[41];
+    const char *title = profile_title();
+    if (!title[0])
+        return;
+    for (u32 i = 0; i < 20; i++)
+        fmt(fp + 2 * i, 3, "%02x", g_now->fingerprint[i]);
+    fmt(name, sizeof(name), "share-%s-%s-%s.bin", title, fp, (g_ctx->flags & CTX_FLAG_PS4) ? "ps4" : "ps5");
+    savedata_outbox(name, g_now, sizeof(*g_now));
+}
+
 COLD static void save(void)
 {
     g_dirty = false;
+    if (g_ctx->flags & CTX_FLAG_SHARE_MEM)
+        plan_share();
     s64 n = savedata_aux_write(AM_FILE, g_now, sizeof(*g_now));
     if (n != (s64)sizeof(*g_now))
         logf("automem: saving the learned plan failed (%ld)", n);
@@ -352,6 +373,29 @@ COLD static void apply_shrinks(struct module *m, u8 *text)
 
 /* ---- plan time ---- */
 
+/* no plan of this console's own for the build: the community's (REC_SEED),
+ * if the profile carries one for it, becomes last boot's plan */
+COLD static bool seed(struct module *m, struct am_plan *l)
+{
+    if (g_ctx->flags & CTX_FLAG_NO_COMMUNITY_MEM)
+        return false;
+    const struct prof_seed *s = profile_seed(m->fingerprint, (g_ctx->flags & CTX_FLAG_PS4) ? SEED_PS4 : SEED_PS5);
+    if (!s)
+        return false;
+    if (s->plan_size == sizeof(*l))
+        memcpy(l, s->plan, sizeof(*l));
+    if (s->plan_size != sizeof(*l) || l->magic != AM_MAGIC || l->version != AM_VERSION || l->size != sizeof(*l) ||
+        memcmp(l->fingerprint, m->fingerprint, 20) || l->nsites > AM_SITES || l->nshrink > AM_SHRINKS) {
+        logf("automem: the community plan for this build is not one this ghostldr reads (%u bytes): not used",
+             s->plan_size);
+        memset(l, 0, sizeof(*l));
+        return false;
+    }
+    logf("automem: no plan of its own for this build: starting from the community plan (from %u consoles, %u boots)",
+         s->contributors, l->boots);
+    return true;
+}
+
 /* phys: direct memory the title can have for real.  Returns what it is told. */
 COLD u64 automem_plan(struct module *m, u8 *text, u64 phys)
 {
@@ -369,8 +413,10 @@ COLD u64 automem_plan(struct module *m, u8 *text, u64 phys)
         savedata_aux_read(AM_FILE, l, sizeof(*l)) == (s64)sizeof(*l) && l->magic == AM_MAGIC &&
         l->version == AM_VERSION && l->size == sizeof(*l) && !memcmp(l->fingerprint, m->fingerprint, 20))
         g_have_last = true;
-    else
+    else {
         memset(l, 0, sizeof(*l));
+        g_have_last = seed(m, l);
+    }
     *g_now = (struct am_plan){.magic = AM_MAGIC, .version = AM_VERSION, .size = sizeof(*g_now),
                              .boots = l->boots + 1, .phys_mib = (u32)(phys / MiB), .strict = l->strict};
     memcpy(g_now->fingerprint, m->fingerprint, 20);

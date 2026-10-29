@@ -569,7 +569,7 @@ int set_busy(const struct sel *S)
 }
 
 /* ---- drawing ---- */
-static void switch_glyph(surface *s, int x, int cy, int on, u32 a)
+void ui_switch(surface *s, int x, int cy, int on, u32 a)
 {
     int w = 76, h = 40;
     draw_rrect(s, x, cy - h / 2, w, h, h / 2, fade(on ? 0xFF4FB86Cu : 0x40FFFFFFu, a));
@@ -606,7 +606,7 @@ static void draw_row(struct sel *S, surface *s, const struct srow *r, int y, int
         if (r->nsub)
             draw_text(S, s, 23, x, y + 88, r->sub[0], fade(DIM, a), CW - 140);
         if (r->kind == SROW_TOGGLE)
-            switch_glyph(s, x + CW - 76, y + r->h / 2, r->on, a);
+            ui_switch(s, x + CW - 76, y + r->h / 2, r->on, a);
         else
             draw_text(S, s, 40, x + CW - 24, y + r->h / 2 + 14, "\xE2\x80\xBA", fade(DIM, a), 0);
     }

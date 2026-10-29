@@ -8,6 +8,8 @@ __pycache__/
 *.bin
 # except the installer's pump: our own code, built from ghostldr/native/pump
 !ghostldr/data/gfs_pump.bin
+# and the community memory plans (docs/community-plans.md): ghostldr's own data
+!plans/**/*.bin
 *.self
 *.sprx
 *.prx

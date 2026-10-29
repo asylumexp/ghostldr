@@ -24,6 +24,49 @@
  * and struct sel (in the heap).
  */
 #include "plat.h"
+#include "plansync.h"
+
+/* community memory plans (plansync/plansync_sel.c, docs/community-plans.md) */
+int plansync_start(const struct ghost_api *api, const char (*titles)[16], unsigned n, int share, int fetch,
+                   void **handle);
+const struct ps_job *plansync_poll(void *handle);
+void plansync_stop(void *handle);
+
+/* the plans the job found: offered in their games' Information panels */
+static void community_offer(struct sel *S, struct plat *P, const struct ps_job *job)
+{
+    for (unsigned k = 0; k < job->nplans; k++) {
+        const struct ps_plan *p = &job->plans[k];
+        if ((int)p->platform != (P->ps4 ? SEED_PS4 : SEED_PS5))
+            continue;
+        for (int i = 0; i < S->ntitles; i++) {
+            struct title *t = &S->titles[i];
+            if (strcmp(t->id, p->title) != 0)
+                continue;
+            if (!t->community)
+                t->community_off = (u8)conf_community_off(P, t->id);
+            t->community = 1;
+            if (p->contributors > t->community_from)
+                t->community_from = p->contributors;
+            S->changed |= CH_ALL;
+        }
+    }
+    LOG(P, "plans: %u community plans for the games here (GitHub: HTTP %d); %u shared, %u waiting", job->nplans,
+        job->github, job->shared, job->unshared);
+}
+
+/* the picked game's downloaded plans to the core (ghost_api.seed_add), unless
+ * community plans are off for this boot (conf_start decided) */
+static void community_give(struct plat *P, const struct ps_job *job, const char *id)
+{
+    if (!job || (P->ctx->flags & CTX_FLAG_NO_COMMUNITY_MEM) || !P->api->seed_add)
+        return;
+    for (unsigned k = 0; k < job->nplans; k++) {
+        const struct ps_plan *p = &job->plans[k];
+        if (strcmp(p->title, id) == 0 && (int)p->platform == (P->ps4 ? SEED_PS4 : SEED_PS5))
+            P->api->seed_add(p->title, p->fingerprint, p->platform, p->contributors, p->plan, PS_PLAN_SIZE);
+    }
+}
 
 /* ---- logging and formatting (rt.c's vfmt) ---- */
 void *memset(void *dst, int c, size_t n);
@@ -189,6 +232,8 @@ static void sync_title(struct sel *S, struct plat *P, int i)
     if (!t->id[0] && c->id[0])
         str_copy(t->id, c->id, sizeof(t->id));
     t->flags |= title_flags(c) & TITLE_SAVE_TOOL; /* an ID first learnt from param.sfo */
+    if (c->seed && !t->community)                 /* its profile, by that ID */
+        t->community = 1, t->community_from = c->seed_from, t->community_off = (u8)conf_community_off(P, t->id);
     u32 dump = title_flags(c) & TITLE_DUMP;
     if ((t->flags & TITLE_DUMP) != dump) {
         LOG(P, "title %d (%s): %s, by its param.sfo (%s, %s)", i, c->id, dump ? "a game's dump" : "homebrew",
@@ -531,6 +576,8 @@ static struct title *reload(struct sel *S, struct plat *P, struct title *titles)
             str_copy(t[i].version, c->version, sizeof(t[i].version));
             str_copy(t[i].prefix, c->prefix, sizeof(t[i].prefix));
             t[i].size = c->total;
+            t[i].community = c->seed, t[i].community_from = c->seed_from;
+            t[i].community_off = (u8)conf_community_off(P, c->id);
             if (ui_title_alloc(S, &t[i]) != 0) {
                 P->cat = old, P->ncat = had;
                 return titles;
@@ -622,6 +669,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     struct plat P;
     memset(&P, 0, sizeof(P));
     P.api = api;
+    void *ps = NULL;            /* the community plans' job, once started */
+    const struct ps_job *job = NULL;
     api->logf("selector: entered");
     P.ctx = *api->ctx;
     P.k = api->k;
@@ -697,6 +746,7 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         str_copy(titles[i].prefix, P.ghostfs ? c->prefix : "", sizeof(titles[i].prefix));
         titles[i].size = c->total;
         titles[i].flags = title_flags(c);
+        titles[i].community = c->seed, titles[i].community_from = c->seed_from;
         str_copy(titles[i].note, c->note, sizeof(titles[i].note));
         P.tiles_used++;
         if (P.library) { /* its folder, as the drive shows it: without the mount point and app0 */
@@ -744,8 +794,22 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     for (int i = 0; i < n && i < 2; i++) /* the first icons; the rest load while the row is on screen */
         ui_load_icon(S, i);
 
-    /* Settings > Advanced: the switches, and a safe-mode boot's notice */
+    /* Settings > Advanced: the switches, and a safe-mode boot's notice; the
+     * games whose community memory plan the player turned off */
     conf_load(&P);
+    for (int i = 0; i < S->ntitles; i++)
+        S->titles[i].community_off = (u8)conf_community_off(&P, S->titles[i].id);
+    {   /* community memory plans: shared and fetched on a thread while the games show */
+        int share = ((P.conf_on >> CONF_SHARE_MEM) & 1) || (P.ctx->flags & CTX_FLAG_SHARE_MEM); /* or run.py's */
+        int fetch = ((P.conf_on >> CONF_COMMUNITY_MEM) & 1) && !P.conf_no_community;
+        char ids[PS_MAX_TITLES][16];
+        unsigned nid = 0;
+        for (int i = 0; i < P.ncat && nid < PS_MAX_TITLES; i++)
+            if (P.cat[i].id[0])
+                memcpy(ids[nid++], P.cat[i].id, 16);
+        if (share || fetch)
+            plansync_start(api, (const char (*)[16])ids, nid, share, fetch, &ps);
+    }
 
     /* 4. screen and pad */
     if (video_open(&P) != 0) {
@@ -772,6 +836,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         tick(S, &P, now, &boot);
         if (S->scan_req)
             run_scan(S, &P, S->sel, first + S->sel);
+        if (ps && !job && (job = plansync_poll(ps)) != NULL)
+            community_offer(S, &P, job);
         if (S->reload_req) {
             S->reload_req = 0;
             titles = reload(S, &P, titles);
@@ -785,6 +851,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         if (boot >= 0) {
             choice = first + boot;
             memcpy(chosen, P.cat[boot].id, 16);
+            conf_start(&P, &S->titles[boot]);
+            community_give(&P, job ? job : plansync_poll(ps), P.cat[boot].id);
             if (S->user_chosen) {
                 *api->title_user = (u32)S->users[S->user_focus].id;
                 LOG(&P, "title %d (%s) opens the saves of user %x", choice, P.cat[boot].id, *api->title_user);
@@ -806,6 +874,7 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
 
 out:
     /* 6. give everything back */
+    plansync_stop(ps);
     info_netinst_stop(&P);
     video_close(&P);
     sysfont_close(&P);

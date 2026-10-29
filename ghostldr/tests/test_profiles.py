@@ -557,6 +557,59 @@ class AutoMemoryTests(unittest.TestCase):
                       "committed as they are mapped", lines)
         self.assertFalse([ln for ln in lines if "admitted" in ln])
 
+    def seed_bundle(self, plan: bytes, contributors: int = 3) -> Path:
+        """Ghost's profiles with a community plan (REC_SEED) for ANOTHER_GHOST on a PS5."""
+        out = Path(self.tmp.name) / f"{self.id()}-seed.bundle"
+        out.write_bytes(profiles.boot_bundle("CUSA11456", seeds={"CUSA11456": [
+            {"fingerprint": ANOTHER_GHOST, "platform": "ps5", "contributors": contributors, "data": plan}]}))
+        return out
+
+    def boot_with(self, bundle: Path, run: str, **env: str) -> list[str]:
+        out = subprocess.run([str(self.exe), str(bundle), "boot", ANOTHER_GHOST, "CUSA11456", run],
+                             capture_output=True, text=True, timeout=60,
+                             env={**os.environ, "GHOSTLDR_TEST_AUTOMEM": str(self.plan), **env})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return [ln for ln in out.stdout.splitlines() if ln.startswith(("automem:", "run:"))]
+
+    def test_a_build_without_a_plan_starts_from_the_community_plan(self) -> None:
+        """REC_SEED (docs/community-plans.md): another console's plan becomes last boot's, and learning goes on."""
+        self.boot("c1500")
+        shared = self.plan.read_bytes()             # one console's plan after its first boot
+        self.plan.unlink()                           # this console has none for the build
+        bundle = self.seed_bundle(shared)
+        lines = self.boot_with(bundle, "c1500")
+        self.assertIn("automem: no plan of its own for this build: starting from the community plan (from 3 consoles, "
+                      "1 boots)", lines)
+        self.assertIn("automem: learned plan, boot 2 of this build: last time told 4352 MiB, reserved at most 5050, "
+                      "held 4252, ran out of memory; its heaps left 798 MiB unused", lines)
+        self.assertIn("automem: the 1120 MiB pool from eboot+eee115 (its size varies 419% across memory modes) "
+                      "shrinks to 658 MiB, 3 size cells", lines)
+        lines = self.boot_with(bundle, "c1500")      # its own from now on: boot 3, the community plan left alone
+        self.assertFalse([ln for ln in lines if "community plan" in ln], lines)
+        self.assertTrue([ln for ln in lines if "learned plan, boot 3 of this build" in ln], lines)
+
+    def test_community_plans_off_and_other_builds_learn_from_scratch(self) -> None:
+        self.boot("c1500")
+        bundle = self.seed_bundle(self.plan.read_bytes())
+        self.plan.unlink()
+        lines = self.boot_with(bundle, "c1500", GHOSTLDR_TEST_FLAGS=str(0x10000000))  # CTX_FLAG_NO_COMMUNITY_MEM
+        self.assertFalse([ln for ln in lines if "community plan" in ln], lines)
+        self.assertIn("automem: told 4352 MiB of direct memory (4352 MiB for real); allocations of 64 MiB or more "
+                      "are committed as they are mapped, and admitted past that much", lines)
+        self.plan.unlink()
+        lines = self.boot(fp="33" * 20)             # another build: the seed isn't for it
+        self.assertFalse([ln for ln in lines if "community plan" in ln], lines)
+
+    def test_a_plan_that_isnt_one_is_not_used(self) -> None:
+        lines = self.boot_with(self.seed_bundle(b"\0" * 1080), "c1500")
+        self.assertIn("automem: the community plan for this build is not one this ghostldr reads (1080 bytes): not "
+                      "used", lines)
+
+    def test_sharing_writes_the_outbox(self) -> None:
+        lines = self.boot("c1500", GHOSTLDR_TEST_FLAGS=str(0x8000000))                  # CTX_FLAG_SHARE_MEM
+        self.assertIn(f"automem: outbox share-CUSA11456-{ANOTHER_GHOST}-ps5.bin 1080 bytes", lines)
+        self.assertFalse([ln for ln in self.boot("c1500") if "outbox" in ln])           # not without the switch
+
     def test_forget_and_other_builds_start_over(self) -> None:
         self.boot("c1500")
         self.boot("c1500")

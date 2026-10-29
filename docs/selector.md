@@ -22,6 +22,7 @@ Each game shows its real name and art: from the game's own files when it has the
 | In Settings | Up / Down move between the sections on the left; Right or Cross goes into the open one, where Up / Down move between its entries and the list scrolls; Cross changes a switch or starts an action; Left or Circle comes back out; Circle on the sections, or Square, closes Settings. |
 | In Install over network | Circle stops the installer and closes the card; while a browser is installing, hold it for a second (the install can go on later). |
 | Circle | Close the information panel. |
+| Square, in the information panel | Turn the game's community memory plan off for that game, or on again. Only when the panel shows one; otherwise Square opens Settings as anywhere in the row. |
 | In the PS4 question | Left / Right (d-pad or left stick; Up / Down too) choose Yes or No, No first. Cross takes the one chosen, Circle is No. |
 | In a save tool's question (whose saves) | Up / Down (d-pad or left stick) move between the users. Cross opens the saves of the one chosen; on a user who isn't signed in it says why instead. Circle goes back to the list (not when the save tool is the only title, or after a scan was cancelled). |
 | While a save tool's saves are looked for | Hold Circle to cancel: the question comes back. |
@@ -56,9 +57,9 @@ The selector uses its built-in font by default; `--select-font auto` tries the c
   - a **Start** button, greyed out when the title can't start.
 - **The backdrop:** the focused game's, full screen, dimmed and shaded darker towards the top, the left (where the text is) and the bottom. It is decoded once the row stops moving and crossfades from the previous one.
 - **The top bar:** ghostldr's mark (a little ghost the selector draws) on the left; on the right the signed-in user's name (`sceUserServiceGetUserName`) beside a disc with their initial, and the clock in the system's 12/24-hour setting.
-- **Options:** an information panel slides in from the right: the icon and the name, the same labels, then title ID, version, size, install state, where the art came from and the save containers; for a game on a USB drive, its folder on the drive instead of size and install state, and a note (a second copy, or why it can't start). On a PS4 it also says whether the title was taken for a game's dump or homebrew.
+- **Options:** an information panel slides in from the right: the icon and the name, the same labels, then title ID, version, size, install state, where the art came from and the save containers; for a game on a USB drive, its folder on the drive instead of size and install state, and a note (a second copy, or why it can't start). On a PS4 it also says whether the title was taken for a game's dump or homebrew. When the game's profile has a community memory plan for this console (a `REC_SEED` for PS5 or PS4: [community-plans.md](community-plans.md)) and **Use community memory plans** is on, a **Memory plan** row says `Community plan from 12 consoles` (the most of the game's builds), with a switch: Square turns it off for that game (`Off for this game: it learns its own from scratch`) and on again. A game with no such plan, because none was shared or the computer couldn't download them (a GitHub rate limit included), has no row and no message.
 - **Messages:** Cross on a title that can't start shows why, in a card at the bottom that fades in and out.
-- **Button hints** at the bottom right, drawn as the controller's buttons: Options for the panel; in the panel and the PS4 question, Cross and Circle.
+- **Button hints** at the bottom right, drawn as the controller's buttons: Options for the panel; in the panel and the PS4 question, Cross and Circle; in the panel of a game with a community plan, Square too (`Turn off community plan`, `Use community plan`).
 
 Icons are loaded one per frame, nearest to the selection first.
 
@@ -220,6 +221,10 @@ A user of a release has no `run.py`, so what its flags did that a user may need 
 | Show the system's dialogs | Advanced | 0x400000 (dialogs answered at once) set when Off | On | `--dialog-auto` |
 | Plan memory automatically | Advanced | `CTX_FLAG_NO_AUTO_MEM` set when Off | On | `--no-auto-memory` |
 | Keep Remote Play on | Advanced | `CTX_FLAG_KEEP_REMOTE_PLAY` set when On | Off | `--keep-remote-play` |
+| Share learned memory plans | Advanced | `CTX_FLAG_SHARE_MEM` set when On | Off | `--share-memory` |
+| Use community memory plans | Advanced | `CTX_FLAG_NO_COMMUNITY_MEM` set when Off | On | `--no-community-memory` |
+
+**Share learned memory plans** only makes the console log each plan it saves (`automem: plan`); the ghostldr app or `run.py`, when it started the boot, sends those lines to ghostldr's collection. The console never connects anywhere for it. **Use community memory plans** lets a game with no plan of its own on this console start from the one in its profile, and keep learning; a game's Information panel can turn it off for that game alone.
 
 They are kept in a save container of ghostldr's own, `GLDRCONF/settings.txt` (96 blocks, made the first time a switch changes), which only the selector writes (`selector/src/conf.c`):
 
@@ -230,7 +235,7 @@ flags_on=0x200
 flags_off=0x0
 ```
 
-A key for each switch that isn't at its default, and the two masks they make. A change counts at once: the selector sets or clears the flag in this boot's context. The release's ghostldr.lua sets `flags_on` and clears `flags_off` in the flags it boots with, for the selector's call and again (read once more) for the game's, so a change made in the selector reaches the game picked right after. `run.py` doesn't read the file: a developer's flags stand, and Advanced says that boot started without the switches.
+A key for each switch that isn't at its default, and the two masks they make; then `community_off=CUSA00001,CUSA11456`, the games whose community plan was turned off in their Information panel (at most 511 bytes: the oldest go first; Reset to defaults leaves it). When a game is started the selector sets `CTX_FLAG_NO_COMMUNITY_MEM` in this boot's flags if the switch is off or the game is in that list, and clears it otherwise, unless it was set before the selector (`run.py --no-community-memory`), which stands. A change counts at once: the selector sets or clears the flag in this boot's context. The release's ghostldr.lua sets `flags_on` and clears `flags_off` in the flags it boots with, for the selector's call and again (read once more) for the game's, so a change made in the selector reaches the game picked right after. `run.py` doesn't read the file: a developer's flags stand, and Advanced says that boot started without the switches.
 
 **Safe mode.** A switch must not lock anyone out. ghostldr.lua writes `pending=1` before it uses the masks, and the selector clears it when it comes up. A boot that finds `pending=1` (the last one with the switches never reached the selector) goes to the selector without them, once: it writes `pending=safe`, the TV says "Settings > Advanced is left out of this boot", and so do a message in the selector and a note in Advanced. The game's call after the selector uses them again (the selector was reached). **Reset to defaults** puts every switch back (the log's too) and empties the masks.
 
@@ -243,6 +248,8 @@ ghostldr: settings: flags 4bc000000003002 -> 4bc000000003202
 selector: settings: GLDRCONF/settings.txt: 121 bytes, switches f, flags_on 200, flags_off 0 (this boot has them); pending: cleared
 selector: settings: GLDRCONF/settings.txt written: 0 (switches 7: flags_on 0, flags_off 0)
 selector: settings: reset to defaults: 0
+selector: settings: community memory plan off for CUSA00001: 0 (community_off CUSA00001)
+selector: CUSA00001: a community memory plan from 12 console(s): off for this game (CTX_FLAG_NO_COMMUNITY_MEM set)
 ```
 
 ### Install over network
@@ -345,7 +352,7 @@ python3 -m unittest ghostldr.tests.test_selector      # or discover -s ghostldr/
 SELECTOR_SHOTS=/tmp/shots python3 -m unittest ghostldr.tests.test_selector   # keep the screenshots
 ```
 
-- **`ghostldr/tests/selector/preview.c`:** the UI code against a fake catalogue with generated placeholder art: games, one with a very long name, and two homebrew titles. It writes PNG screenshots of a tour (moving along the row, fallbacks, an incomplete title, a clock tick), the information panel, the launch fade, games on a USB drive (`--scene usb --usb`), a PS4 (`--scene ps4 --ps4`: the marked tiles, the question with No selected, No, Circle, a homebrew title and its panel, then Yes), a long name (`--scene long --start 8`), and a save tool (`--scene apollo`: the question, a user who isn't signed in, a long scan with its bar; `apollo-only`: the save tool alone, asked at once, a short scan without a bar; `apollo-cancel`: Circle held during the scan, a tap that is missed, the question again, then the rest), and prints what frames cost. Without `--ps4` the PS4 scene shows that the first Cross boots. `--meta TITLE=meta.bin` reads a `<prefix>META` file as the console does; `--art TITLE=DIR` takes a dump's `sce_sys` (`icon0.png`, `pic1.png`) or what `gfs_meta.py fetch` saved (`icon.png`, `backdrop.png`); `--user NAME` fills the top bar; `--users NAME*,NAME+,NAME` lists the console's users (`*` runs SWRR, `+` signed in too, the rest not signed in); `--scan TITLES:MS` simulates a save tool's scan; `--ps4` runs as on a PS4; `--start N` starts at title N; `--verify` compares every partial frame with a whole redraw; `--is-dump ID SFO_TITLE_ID CONTENT_ID` prints whether the selector takes those for a game's dump. The art is read at run time and never copied.
+- **`ghostldr/tests/selector/preview.c`:** the UI code against a fake catalogue with generated placeholder art: games, one with a very long name, and two homebrew titles. It writes PNG screenshots of a tour (moving along the row, fallbacks, an incomplete title, a clock tick), the information panel, the launch fade, games on a USB drive (`--scene usb --usb`), a PS4 (`--scene ps4 --ps4`: the marked tiles, the question with No selected, No, Circle, a homebrew title and its panel, then Yes), a long name (`--scene long --start 8`), a community memory plan (`--scene community`: the panel's row, Square off and on, a game without one, the row gone once the switch is off), and a save tool (`--scene apollo`: the question, a user who isn't signed in, a long scan with its bar; `apollo-only`: the save tool alone, asked at once, a short scan without a bar; `apollo-cancel`: Circle held during the scan, a tap that is missed, the question again, then the rest), and prints what frames cost. Without `--ps4` the PS4 scene shows that the first Cross boots. `--meta TITLE=meta.bin` reads a `<prefix>META` file as the console does; `--art TITLE=DIR` takes a dump's `sce_sys` (`icon0.png`, `pic1.png`) or what `gfs_meta.py fetch` saved (`icon.png`, `backdrop.png`); `--user NAME` fills the top bar; `--users NAME*,NAME+,NAME` lists the console's users (`*` runs SWRR, `+` signed in too, the rest not signed in); `--scan TITLES:MS` simulates a save tool's scan; `--ps4` runs as on a PS4; `--start N` starts at title N; `--verify` compares every partial frame with a whole redraw; `--is-dump ID SFO_TITLE_ID CONTENT_ID` prints whether the selector takes those for a game's dump. The art is read at run time and never copied.
 
   ```bash
   python3 ghostldr/host/gfs_meta.py fetch CUSA11456 --out ../art/CUSA11456          # outside the repository

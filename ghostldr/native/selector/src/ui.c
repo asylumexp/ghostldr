@@ -546,6 +546,27 @@ void ui_scan_end(struct sel *S, u64 now, int result)
     S->changed |= CH_ALL;
 }
 
+/* the information panel offers the game's community memory plan: it has
+ * one, and Settings uses them (a game without one shows nothing of it) */
+static int community_shown(struct sel *S, const struct title *t)
+{
+    return t->community && sel_switch(S, CONF_COMMUNITY_MEM, -1) > 0;
+}
+
+/* Square in the panel: that plan off for this game, or used again (kept by the platform) */
+static void community_flip(struct sel *S, u64 now)
+{
+    struct title *t = &S->titles[S->sel];
+    int on = t->community_off;
+    if (sel_community(S, S->sel, on) != 0) {
+        toast(S, now, "The setting couldn't be saved");
+        return;
+    }
+    t->community_off = (u8)!on;
+    S->changed |= CH_ALL;
+    sel_log(S, "information: community memory plan %s for title %d (%s)", on ? "used" : "off", S->sel, t->id);
+}
+
 /* the title starts, or a save tool asks whose saves first */
 static void start(struct sel *S)
 {
@@ -673,6 +694,8 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int stick_
         }
         if (pressed & PAD_CROSS)
             choose(S, now);
+        else if ((pressed & PAD_SQUARE) && S->panel_open && !on_gear(S) && community_shown(S, &S->titles[S->sel]))
+            community_flip(S, now);
         else if (pressed & PAD_SETTINGS)
             S->panel_open = 0, set_open(S, now);
         else if ((pressed & (PAD_OPTIONS | PAD_TRIANGLE)) && !on_gear(S))
@@ -828,8 +851,11 @@ static void hints(struct sel *S, surface *s)
         set_hints(S, s);
     } else if (S->panel > 0.5f) {
         u32 start_c = S->titles[S->sel].flags & TITLE_COMPLETE ? SOFT : 0x60FFFFFFu;
+        const struct title *t = &S->titles[S->sel];
         x = hint(S, s, x, base, PAD_CIRCLE, "Back", SOFT) - 44;
-        hint(S, s, x, base, PAD_CROSS, "Start", start_c);
+        x = hint(S, s, x, base, PAD_CROSS, "Start", start_c) - 44;
+        if (community_shown(S, t))
+            hint(S, s, x, base, PAD_SQUARE, t->community_off ? "Use community plan" : "Turn off community plan", SOFT);
     } else if (on_gear(S)) {
         hint(S, s, x, base, PAD_CROSS, "Settings", SOFT);
     } else {
@@ -1255,6 +1281,19 @@ static void info_panel(struct sel *S, surface *s, float k)
             col = 1;
         if (i == nc - 1 && col)
             y += 96;
+    }
+    if (community_shown(S, t)) { /* its community memory plan, and a switch for it (Square) */
+        char what[64];
+        if (t->community_from > 1)
+            sel_fmt(what, sizeof(what), "Community plan from %u consoles", t->community_from);
+        else
+            str_copy(what, t->community_from ? "Community plan from 1 console" : "Community plan", sizeof(what));
+        text_tracked(S, s, 18, x, y, "MEMORY PLAN", FAINT, 2);
+        draw_text(S, s, 28, x, y + 40, what, t->community_off ? DIM : WHITE, cw - 100);
+        draw_text(S, s, 22, x, y + 76, t->community_off ? "Off for this game: it learns its own from scratch"
+                                                        : "The game starts from it and keeps learning", DIM, cw - 100);
+        ui_switch(s, x + cw - 76, y + 30, !t->community_off, 255);
+        y += 126;
     }
     if (t->note[0]) { /* up to three lines */
         text_tracked(S, s, 18, x, y, t->flags & TITLE_COMPLETE ? "NOTE" : "WHY IT CAN'T START", FAINT, 2);

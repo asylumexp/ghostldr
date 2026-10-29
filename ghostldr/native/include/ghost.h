@@ -469,6 +469,7 @@ struct prof_rec {
 #define REC_EXEC 6      /* a module's code ranges (bigexec.c) */
 #define REC_NEO 7       /* the plan for a Pro-mode host (Jak X): the title's own Pro memory mode */
 #define REC_PREFIX 8    /* the title's save container prefix, A-Z 0-9 + NUL (a USB drive's title without a prefix file: approot.c) */
+#define REC_SEED 9      /* a community memory plan for one build (automem.c; docs/community-plans.md) */
 struct prof_tls {       /* tools/tls_sites.py: one module's thread-pointer loads, checked before patching */
     struct prof_rec r;
     char module[32];    /* its file name, e.g. "eboot.bin" */
@@ -479,6 +480,17 @@ struct prof_exec {      /* a module's code ranges, instead of the evidence bxpla
     char module[32];    /* its file name, e.g. "eboot.bin" */
     u32 count, range[]; /* start, end text offsets of each range */
 };
+struct prof_seed {      /* a learned plan shared by other players: a build without one of its own starts from it */
+    struct prof_rec r;
+    u8 fingerprint[20]; /* the eboot it was learned on */
+    u32 platform;       /* 0 PS5, 1 PS4 */
+    u32 contributors;   /* consoles it was picked from */
+    u32 plan_size;      /* bytes of struct am_plan that follow */
+    u32 reserved;
+    u8 plan[];
+};
+#define SEED_PS5 0
+#define SEED_PS4 1
 struct prof_plan {
     struct prof_rec r;
     u32 title_fixed_mib, overcommit_mib, nsites, sites[]; /* lazily backed allocation sites (return addresses) */
@@ -517,6 +529,10 @@ void profile_bind(const u8 *fingerprint);
 u32 profile_has(u32 mask);
 const struct prof_hdr *profile_hdr(void);
 const char *profile_title(void);
+const struct prof_seed *profile_seed(const u8 *fingerprint, u32 platform); /* this title's community plan for the build */
+int profile_seed_add(const char *title, const u8 fingerprint[20], u32 platform, u32 contributors, const void *plan,
+                     u32 size); /* one the game selector downloaded (ghost_api.seed_add) */
+s64 savedata_outbox(const char *name, const void *buf, u64 size); /* a file in GLDRPLANS (automem.c's plans to share) */
 const char *profile_thread_name(void);
 s32 profile_app_param(u32 id);
 const void *profile_record(u32 kind, u32 n);
@@ -637,7 +653,9 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
  * came in a bundle, 4194304 dialogs are never drawn (hle_dialog.h, run.py
  * --dialog-auto), 8388608 the USB storage session is open (approot.c),
  * 16777216 no log on a USB drive (Settings), 33554432 the extension in an
- * emulator buffer, 67108864 the reclaim forced (bigexec.c); bits 32-47
+ * emulator buffer, 67108864 the reclaim forced (bigexec.c), 134217728
+ * share learned memory plans, 268435456 no community memory plan (automem.c,
+ * docs/community-plans.md); bits 32-47
  * hold the ELF loader's port, bits 48-63 the FTP server's (CTX_FTP_PORT) */
 #define CTX_FLAG_NO_AUTO_MEM 65536      /* plan-free titles keep the plain budget (run.py --no-auto-memory) */
 #define CTX_FLAG_AUTO_MEM 131072        /* the automatic plan instead of a profile's manual one (run.py --auto-memory) */
@@ -652,6 +670,8 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 #define CTX_FLAG_LIBRARY 262144        /* set by the core: app_root is a folder of title folders (the selector reads it) */
 #define CTX_FLAG_USB_SESSION 8388608   /* set by the extension: it opened libSceUsbStorage's session (approot.c), kept when its code is placed again */
 #define CTX_FLAG_NO_USB_LOG 16777216   /* Settings: the log is not written to a USB drive (docs/logs.md; the selector may set it live) */
+#define CTX_FLAG_SHARE_MEM 134217728   /* Settings/run.py --share-memory: log each saved learned plan for the computer to share */
+#define CTX_FLAG_NO_COMMUNITY_MEM 268435456 /* Settings, the game's Information panel, run.py --no-community-memory: no REC_SEED start */
 #define CTX_FTP_PORT(flags) ((u32)((flags) >> 48)) /* the FTP server's TCP port (run.py --ftp-port; 0: none) */
 #define CTX_FLAG_ELFLDR 1048576 /* no title: serve the ELF loader (run.py elfldr, docs/elfldr.md) */
 #define CTX_ELFLDR_PORT(flags) ((u32)((flags) >> 32) & 0xFFFF) /* its TCP port (run.py elfldr --port) */

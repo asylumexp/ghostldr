@@ -81,6 +81,9 @@ struct title {
     u8 bg_state;      /* 0 not tried, 1 has a backdrop, 2 none */
     u8 icon_src, bg_src; /* ART_*: set by sel_load_art, or ART_GENERATED */
     u8 marked;        /* the PS4 warning is drawn into icon and icon_small */
+    u8 community;     /* its profile has a community memory plan for this console (REC_SEED) */
+    u8 community_off; /* the player turned that plan off for this game (GLDRCONF's community_off) */
+    u32 community_from; /* the consoles the plan was picked from (the most of several) */
     char where[128];  /* a game on a USB drive: its folder there; empty: installed */
     char note[96];    /* why it can't start, or about this copy; may be empty */
 };
@@ -127,7 +130,7 @@ struct sel_inst {
 /* a switch of Settings > Advanced (conf.c: a boot context flag, kept in GLDRCONF/settings.txt) */
 #define SEL_MAX_SWITCHES 8
 struct sel_switch {
-    char key[16], label[48];
+    char key[24], label[48];
     char on[112], off[112]; /* what On and Off do, one line each */
     u64 flag;               /* CTX_FLAG_* */
     u8 on_sets;             /* On sets the flag (else clears it) */
@@ -135,6 +138,8 @@ struct sel_switch {
     u8 logs;                /* shown under Logs, not Advanced */
 };
 #define CONF_LOG_USB 0      /* the switch for the log on the USB drive (rel-diag's CTX_FLAG_NO_USB_LOG) */
+#define CONF_SHARE_MEM 4    /* share learned memory plans (CTX_FLAG_SHARE_MEM) */
+#define CONF_COMMUNITY_MEM 5 /* use community memory plans (CTX_FLAG_NO_COMMUNITY_MEM when Off) */
 struct sel_info {
     struct sel_switch sw[SEL_MAX_SWITCHES];
     int nsw;
@@ -336,6 +341,7 @@ int sel_load_art(struct sel *S, int title, int which, surface *out);
  * the network installer (NETOP_*: 0, or < 0; NETOP_STATUS fills *st) */
 void sel_info_load(struct sel *S, struct sel_info *info);
 int sel_switch(struct sel *S, int i, int want); /* Advanced switch i: want < 0 asks; its state, or -1; i < 0: reset all */
+int sel_community(struct sel *S, int title, int on); /* a game's community memory plan used or off for it, kept: 0, or -1 */
 int sel_netinst(struct sel *S, int op, struct sel_net *st);
 
 /* ---- drawing (draw.c) ---- */
@@ -432,6 +438,7 @@ int set_busy(const struct sel *S);   /* the sheet or its card is moving or up: d
 int ui_hint(struct sel *S, surface *s, int x, int base, int button, const char *label, u32 c);
 void ui_card(surface *s, int x, int y, int w, int h, float e);
 int ui_chip(struct sel *S, surface *s, int x, int y, u32 fg, int sign, const char *text, u32 a);
+void ui_switch(surface *s, int x, int cy, int on, u32 a); /* a switch, On or Off: 76 x 40, centred on cy (setui.c) */
 void ui_text_shadowed(struct sel *S, surface *s, int px, int x, int y, const char *str, u32 c, int max_w);
 void ui_text_bold(struct sel *S, surface *s, int px, int x, int y, const char *str, u32 c, int max_w);
 int ui_text_tracked(struct sel *S, surface *s, int px, int x, int y, const char *str, u32 c, int track);

@@ -472,6 +472,22 @@ static const struct step SETTINGS[] = {
     {3100, 0x40},   {3200, 0}, {3500, 0x4000}, {3600, 0}, {8000, 0x2000}, {8100, 0}, {8400, 0x80}, {8500, 0},
     {8800, 0x40},   {8900, 0}, {9200, 0x20}, {9300, 0}, {9600, 0x4000}, {9700, 0}, {10000, 0x2000}, {10100, 0},
     {10400, 0x2000}, {10500, 0}, {11000, 0x20}, {11100, 0}, {11500, 0x20}, {11600, 0}, {12500, 0x4000}, {12600, 0}};
+/* A community memory plan (CUSA00001's profile has one): Options, Square x3
+ * (off, on, off), Circle; Square (Settings), Down x4 (Advanced), Right, Down
+ * x3, Cross (Share learned memory plans: on), Down, Cross, Cross (Use
+ * community memory plans: off, on); Circle, Circle; Cross */
+static const struct step COMMUNITY[] = {
+    {1500, 0x8},    {1600, 0}, {2200, 0x8000}, {2300, 0}, {2700, 0x8000}, {2800, 0}, {3200, 0x8000}, {3300, 0},
+    {3700, 0x2000}, {3800, 0}, {4200, 0x8000}, {4300, 0}, {4600, 0x40},   {4700, 0}, {4800, 0x40},   {4900, 0},
+    {5000, 0x40},   {5100, 0}, {5200, 0x40},   {5300, 0}, {5500, 0x20},   {5600, 0}, {5900, 0x40},   {6000, 0},
+    {6100, 0x40},   {6200, 0}, {6300, 0x40},   {6400, 0}, {6600, 0x4000}, {6700, 0}, {7000, 0x40},   {7100, 0},
+    {7400, 0x4000}, {7500, 0}, {7800, 0x4000}, {7900, 0}, {8200, 0x2000}, {8300, 0}, {8600, 0x2000}, {8700, 0},
+    {9200, 0x4000}, {9300, 0}};
+/* CUSA00002 has none: Right, Options, Square (Settings: no row to change), Circle, Cross */
+static const struct step COMMUNITY_NONE[] = {{1500, 0x20},   {1600, 0}, {2600, 0x8}, {2700, 0}, {3200, 0x8000},
+                                             {3300, 0},      {3800, 0x2000}, {3900, 0}, {4400, 0x4000}, {4500, 0}};
+/* run.py --no-community-memory: Cross on CUSA00001 */
+static const struct step COMMUNITY_RUNPY[] = {{1500, 0x4000}, {1600, 0}};
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
 
 static int pad_open(s32 user, s32 type, s32 index, const void *param) { return user == 0x10000001 ? 5 : -1; }
@@ -481,9 +497,13 @@ static int pad_read(s32 handle, u8 *data)
     shots();
     const struct step *s = str_eq(g_mode, "multi") ? MULTI : str_eq(g_mode, "ps4") ? PS4 : str_eq(g_mode, "apollo") ? APOLLO
                          : str_eq(g_mode, "apollo-one") ? APOLLO_ONE : str_eq(g_mode, "one") ? ONE
-                         : str_eq(g_mode, "empty") ? EMPTY : str_eq(g_mode, "settings") ? SETTINGS : SINGLE;
+                         : str_eq(g_mode, "empty") ? EMPTY : str_eq(g_mode, "settings") ? SETTINGS
+                         : str_eq(g_mode, "community") ? COMMUNITY : str_eq(g_mode, "community-none") ? COMMUNITY_NONE
+                         : str_eq(g_mode, "community-runpy") ? COMMUNITY_RUNPY : SINGLE;
     int n = str_eq(g_mode, "ps4") ? N(PS4) : str_eq(g_mode, "apollo") ? N(APOLLO) : str_eq(g_mode, "apollo-one") ? N(APOLLO_ONE)
-          : str_eq(g_mode, "one") ? N(ONE) : str_eq(g_mode, "empty") ? N(EMPTY) : str_eq(g_mode, "settings") ? N(SETTINGS) : 6;
+          : str_eq(g_mode, "one") ? N(ONE) : str_eq(g_mode, "empty") ? N(EMPTY) : str_eq(g_mode, "settings") ? N(SETTINGS)
+          : str_eq(g_mode, "community") ? N(COMMUNITY) : str_eq(g_mode, "community-none") ? N(COMMUNITY_NONE)
+          : str_eq(g_mode, "community-runpy") ? N(COMMUNITY_RUNPY) : 6;
     u32 ms = (u32)((g_now - 1000000) / 1000), b = 0;
     for (int i = 0; i < n; i++)
         if (ms >= s[i].ms)
@@ -818,11 +838,14 @@ int main(int argc, char **argv)
     cx->app_root = (u64)(str_eq(g_mode, "approot") ? "/data/test/app0" : "ghostfs");
     int apollo = str_eq(g_mode, "apollo") || str_eq(g_mode, "apollo-one");
     int settings = str_eq(g_mode, "one") || str_eq(g_mode, "empty") || str_eq(g_mode, "settings");
+    int community = !strncmp(g_mode, "community", 9);
     cx->flags = (str_eq(g_mode, "skip") || apollo || settings ? 0 : CTX_FLAG_SELECT) | 2 |
-                (str_eq(g_mode, "single") || str_eq(g_mode, "multi") || str_eq(g_mode, "ps4") || apollo || settings
+                (str_eq(g_mode, "single") || str_eq(g_mode, "multi") || str_eq(g_mode, "ps4") || apollo || settings ||
+                         community
                      ? CTX_FLAG_SEL_FONT_BUILTIN
                      : 0) |
-                (str_eq(g_mode, "ps4") ? CTX_FLAG_PS4 : 0);
+                (str_eq(g_mode, "ps4") ? CTX_FLAG_PS4 : 0) |
+                (str_eq(g_mode, "community-runpy") ? CTX_FLAG_NO_COMMUNITY_MEM : 0);
     struct ghost_api *a = &g_ghost_api;
     a->version = GHOST_API_VERSION, a->size = sizeof(*a), a->ctx = &g_ctx, a->k = &K, a->logf = logf;
     a->call_gadget6 = call_gadget6, a->host_dlsym = host_dlsym, a->hle_lookup = hle_lookup;
@@ -857,7 +880,7 @@ int main(int argc, char **argv)
                        title);
 
     int want = str_eq(g_mode, "multi") || str_eq(g_mode, "settings") ? 2 : str_eq(g_mode, "ps4") ? 1
-             : str_eq(g_mode, "skip") || str_eq(g_mode, "badcrc") ? -1 : str_eq(g_mode, "empty") ? SEL_EXIT_LOADER : 0;
+             : str_eq(g_mode, "community-none") ? 1 : str_eq(g_mode, "skip") || str_eq(g_mode, "badcrc") ? -1 : str_eq(g_mode, "empty") ? SEL_EXIT_LOADER : 0;
     say("selector_host: %s chose %d (%.16s)", g_mode, pick, pick >= 0 ? title : "-");
     check(pick == want, "the expected title was chosen");
     if (str_eq(g_mode, "multi"))
@@ -870,6 +893,17 @@ int main(int argc, char **argv)
         check(g_conf_creates == 1 && g_conf_writes == 1, "GLDRCONF made once, written once (the log switch)");
         check((cx->flags & (1ull << 24)) != 0, "the log switch applied to this boot (CTX_FLAG_NO_USB_LOG)");
     }
+    if (str_eq(g_mode, "community")) { /* the game's own choice, and the share switch live */
+        check(str_eq(title, "CUSA00001"), "its ID is returned");
+        check((cx->flags & CTX_FLAG_NO_COMMUNITY_MEM) != 0, "the game's community plan off: CTX_FLAG_NO_COMMUNITY_MEM set");
+        check((cx->flags & CTX_FLAG_SHARE_MEM) != 0, "the share switch applied to this boot (CTX_FLAG_SHARE_MEM)");
+    }
+    if (str_eq(g_mode, "community-none")) {
+        check(str_eq(title, "CUSA00002"), "its ID is returned");
+        check(!(cx->flags & CTX_FLAG_NO_COMMUNITY_MEM), "community plans on: CTX_FLAG_NO_COMMUNITY_MEM clear");
+    }
+    if (str_eq(g_mode, "community-runpy"))
+        check((cx->flags & CTX_FLAG_NO_COMMUNITY_MEM) != 0, "run.py's CTX_FLAG_NO_COMMUNITY_MEM stands");
     if (apollo) {
         check(str_eq(title, "APOL00004"), "its ID is returned");
         check(g_picks == 1 && str_eq(g_picked, "APOL00004") && g_picked_index == 0, "the save tool mounted once, by its place");

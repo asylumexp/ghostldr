@@ -35,6 +35,8 @@ struct cat_title {
     u64 total, cap;
     u32 containers, flags;
     u32 prof_flags; /* its profile's PF_* (PF_SAVE_TOOL: a save tool asks whose saves) */
+    u8 seed;        /* its profile has a community memory plan for this console's platform (REC_SEED) */
+    u32 seed_from;  /* the consoles that plan was picked from (the most of several) */
     struct {
         u64 off, size;
     } file[NFILES];
@@ -48,6 +50,7 @@ struct cat_title {
 };
 
 struct sysfont;
+#define CONF_OFF_MAX 512 /* community_off's list, commas between IDs: about 50 games (the oldest go first) */
 
 struct plat {
     const struct ghost_api *api;
@@ -111,6 +114,8 @@ struct plat {
     u32 conf_on;          /* Settings > Advanced: the switches' states (conf.c) */
     int conf_safe;        /* ghostldr.lua left them out of this boot (safe mode) */
     int conf_live;        /* this boot's flags have the switches' masks: 1, 0, or -1 none to apply */
+    int conf_no_community; /* CTX_FLAG_NO_COMMUNITY_MEM was set before the selector, not by the switch (run.py) */
+    char conf_off[CONF_OFF_MAX]; /* GLDRCONF's community_off: the games the player turned it off for, by ID */
     /* time and system settings */
     u64 (*proc_time)(void);
     s32 (*gettimeofday)(void *tv, void *tz);
@@ -144,6 +149,8 @@ void info_netinst_stop(struct plat *P);
 #define CONF_MAX 2048
 int conf_switch(int i, struct sel_switch *w);
 void conf_load(struct plat *P);
+int conf_community_off(const struct plat *P, const char *id); /* the game is in community_off */
+void conf_start(struct plat *P, const struct title *t);       /* CTX_FLAG_NO_COMMUNITY_MEM for the game picked */
 int info_has_netinst(void);
 
 /* sysfont.c */

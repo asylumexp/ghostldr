@@ -58,6 +58,7 @@ static const struct {
               {0x13c40000, 0x13e00000}, {0x50080000, 0x503b8000}, {0x11e000000, 0x11e74c000}};
 
 char *getenv(const char *name);
+unsigned long long strtoull(const char *s, char **end, int base);
 unsigned long strtoul(const char *s, char **end, int base);
 
 static int fake_dmq(off_t off, int next, void *out, size_t size)
@@ -178,6 +179,13 @@ s64 savedata_aux_write(const char *name, const void *buf, u64 size)
     if (fd >= 0)
         close(fd);
     return n;
+}
+
+/* GLDRPLANS (automem.c's plans to share): said, not kept */
+s64 savedata_outbox(const char *name, const void *buf, u64 size)
+{
+    logf("automem: outbox %s %lu bytes", name, (unsigned long)size);
+    return (s64)size;
 }
 
 /* lazy allocations (vdm.c): synthetic offsets, MiB committed behind each */
@@ -403,6 +411,9 @@ int main(int argc, char **argv)
     K.direct_size = fake_direct_size;
     if (!getenv("GHOSTLDR_TEST_AUTOMEM"))
         g_ctx->flags |= CTX_FLAG_NO_AUTO_MEM;
+    const char *more = getenv("GHOSTLDR_TEST_FLAGS"); /* CTX_FLAG_SHARE_MEM, CTX_FLAG_NO_COMMUNITY_MEM, ... */
+    if (more)
+        g_ctx->flags |= strtoull(more, NULL, 0);
     const char *cap = getenv("GHOSTLDR_TEST_PS4_CAP");
     if (cap) {
         g_cap = strtoul(cap, NULL, 0) * MiB;

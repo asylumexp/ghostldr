@@ -6,7 +6,8 @@
     and its QOI pictures decoded by the module's own code; as on a PS4, game
     dumps are marked and ask before they boot, homebrew isn't; a save tool
     (Apollo) asks whose saves to open, greys users who aren't signed in, and
-    shows a long save scan's progress, which Circle held cancels.
+    shows a long save scan's progress, which Circle held cancels; a game
+    with a community memory plan has a row for it in its panel (Square).
   - selector_host: the core's real src/sel.c and the real selector.bin run as
     x86-64 (Rosetta on Apple silicon) against a fake console whose save data
     is a directory tree built here in ghostfs's formats: a v0.1 install
@@ -18,7 +19,10 @@
     On a fake PS4 (CTX_FLAG_PS4) a game's dump boots only after a Yes.  A
     save tool (its profile's "save_tool") asks whose saves to open, has the
     core mount it (title_pick) and scan it (save_prescan) before it returns,
-    and leaves the user in title_user; alone, it is asked at once.
+    and leaves the user in title_user; alone, it is asked at once.  A
+    title whose profile has a REC_SEED shows it in its panel; Square keeps
+    the game's choice in GLDRCONF (community_off), and the start sets
+    CTX_FLAG_NO_COMMUNITY_MEM from it and the switch (run.py's stands).
 
     python3 -m unittest discover -s ghostldr/tests
 
@@ -106,6 +110,21 @@ def pack_title(saves: Path, prefix: str, title: str, files: dict[str, bytes], ca
     (saves / index_dir).mkdir(parents=True, exist_ok=True)
     (saves / index_dir / "index.bin").write_bytes(index)
     return len(linear), count
+
+
+def seed_record(platform: int, contributors: int, fingerprint: bytes) -> bytes:
+    """A REC_SEED (profile record 9, docs/community-plans.md): a community memory plan for one build and
+    platform (0 PS5, 1 PS4), then a struct am_plan of 1080 bytes."""
+    plan = struct.pack("<QII20s", 0x314D454D52444C47, 1, 1080, fingerprint).ljust(1080, b"\0")
+    body = struct.pack("<20sIIII", fingerprint, platform, contributors, len(plan), 0) + plan
+    body += b"\0" * (-(len(body) + 8) % 8)
+    return struct.pack("<HHI", 9, 8 + len(body), 0) + body
+
+
+def with_seeds(blob: bytes, records: list[bytes]) -> bytes:
+    """A compiled profile blob (struct prof_hdr + records) with these records added: its total grows."""
+    extra = b"".join(records)
+    return blob[:8] + struct.pack("<I", len(blob) + len(extra)) + blob[12:] + extra
 
 
 def catalogue(saves: Path, titles: list[dict]) -> None:
@@ -235,6 +254,24 @@ class Selector(unittest.TestCase):
         cls.bundle.write_bytes(profiles.compile_blob(profiles.load("CUSA11456")) + profiles.compile_blob(named)
                                + profiles.compile_blob(profiles.load("APOL00004"))
                                + profiles.compile_blob(profiles.load(None)) + b"\0" * 8)
+        # community memory plans: CUSA00001's profile has two PS5 builds' (7 and 12 consoles) and a PS4
+        # one (99, not for this console); CUSA00002 has a profile without one
+        cls.community = t / "saves-community"
+        cat = []
+        for tid in ("CUSA00001", "CUSA00002"):
+            prefix = "G" + tid[-5:]
+            files = {"eboot.bin": b"\1" * 5000, "sce_sys/icon0.png": art(2 if tid[-1] == "1" else 4, "icon0.png")}
+            total, count = pack_title(cls.community, prefix, tid, files, 200 << 10, prefix + "INDEX")
+            cat.append({"id": tid, "prefix": prefix, "index": prefix + "INDEX", "name": "", "version": "01.00",
+                        "total": total, "containers": count, "flags": 0})
+        catalogue(cls.community, cat)
+        seeded = profiles.load("CUSA00001")
+        seeded["name"] = "Starfall Odyssey"
+        cls.community_bundle = t / "profiles-community.bin"
+        cls.community_bundle.write_bytes(
+            with_seeds(profiles.compile_blob(seeded), [seed_record(0, 7, b"\x0a" * 20), seed_record(1, 99, b"\x0b" * 20),
+                                                       seed_record(0, 12, b"\x0c" * 20)])
+            + profiles.compile_blob(named) + profiles.compile_blob(profiles.load(None)) + b"\0" * 8)
         # a test module with the fake network installer linked in (as native/netinst will be)
         cls.sel_net = t / "selnet/selector.bin"
         if shutil.which("make") and subprocess.run(
@@ -264,9 +301,9 @@ class Selector(unittest.TestCase):
     # ---- the blob ----
     def test_blob_layout(self) -> None:
         blob = SEL_BIN.read_bytes()
-        magic, fmt, hsize, api, abi, isize, entry, font, font_size = struct.unpack_from("<QIIIIIIII", blob)
+        magic, fmt, hsize, api, abi, isize, entry, font, font_size, nrel = struct.unpack_from("<QIIIIIIIII", blob)
         self.assertEqual(magic, 0x4C45535244484C47)
-        self.assertEqual((fmt, hsize, hsize + isize, entry), (1, 40, len(blob), 0))
+        self.assertEqual((fmt, hsize, hsize + isize + 8 * nrel, entry), (2, 48, len(blob), 0))   # relocations last
         self.assertEqual(blob[hsize + font:hsize + font + 4], b"GLF1")
         self.assertEqual(blob[hsize + font:hsize + font + font_size], FONT.read_bytes())
         self.assertLess(len(blob), 4 << 20)
@@ -394,14 +431,17 @@ class Selector(unittest.TestCase):
         self.assertGreater((self.shots / "meta-single.png").stat().st_size, 10000)
 
     # ---- the real module through the core's loader ----
-    def run_host(self, mode: str, shots: str = "", in_memory: bool = False, module: Path | None = None) -> str:
+    def run_host(self, mode: str, shots: str = "", in_memory: bool = False, module: Path | None = None,
+                 profiles: Path | None = None) -> str:
         if not self.host:
             self.skipTest("no way to build and run x86-64 code here")
         module = module or SEL_BIN
         saves = {"multi": self.multi, "approot": self.approot, "apollo": self.apollo,
                  "apollo-one": self.apollo_one, "one": self.one, "empty": self.empty,
-                 "settings": self.netsaves}.get(mode, self.legacy)
-        env = dict(os.environ, SEL_SHOTS=shots, SEL_PROFILES=str(self.bundle), SEL_BUNDLE="1" if in_memory else "")
+                 "settings": self.netsaves, "community": self.community, "community-none": self.community,
+                 "community-runpy": self.community}.get(mode, self.legacy)
+        env = dict(os.environ, SEL_SHOTS=shots, SEL_PROFILES=str(profiles or self.bundle),
+                   SEL_BUNDLE="1" if in_memory else "")
         crc = hex(zlib.crc32(module.read_bytes()))
         p = subprocess.run([str(self.host), mode, str(module), crc, str(saves), str(self.shots)],
                            capture_output=True, text=True, env=env, timeout=300)
@@ -538,6 +578,69 @@ class Selector(unittest.TestCase):
         (self.netsaves / "GLDRCONF/settings.txt").unlink()
         (self.netsaves / "GLDRCONF").rmdir()
         self.assertIn("Cross on title 2 (CUSA00042)", out)
+
+    def test_preview_community_plan(self) -> None:
+        """A game with a community memory plan: a row in its Information panel, Square turns it off for
+        that game and on again; a game without one has no row; with Settings' switch off the row goes,
+        and Square opens Settings as elsewhere."""
+        out = self.preview_run("--scene", "community")
+        self.assertIn("information: community memory plan off for title 1 (CUSA00001)", out)
+        self.assertIn("information: community memory plan used for title 1 (CUSA00001)", out)
+        self.assertEqual(out.count("information: community memory plan"), 2)   # none for the game without one
+        self.assertEqual(out.count("settings: opened"), 1)                     # Square with the switch off
+        for name in ("community", "community-off", "community-on", "community-none", "community-switch-off",
+                     "community-square-settings"):
+            self.assertGreater((self.shots / f"preview-{name}.png").stat().st_size, 10000, name)
+
+    def community_conf(self) -> Path:
+        conf = self.community / "GLDRCONF/settings.txt"
+        if conf.exists():
+            conf.unlink()
+            conf.parent.rmdir()
+        self.addCleanup(lambda: conf.exists() and (conf.unlink(), conf.parent.rmdir()))
+        return conf
+
+    def test_community_plan_on_the_console_side(self) -> None:
+        """The real module: CUSA00001's REC_SEED for a PS5 (the most consoles of two builds; the PS4's
+        not counted) gives its panel the row; Square off, on, off keeps community_off; Settings' two new
+        switches change live and are kept; Cross starts it with CTX_FLAG_NO_COMMUNITY_MEM set."""
+        conf = self.community_conf()
+        out = self.run_host("community", "1900:panel,2600:off,9000:closed", profiles=self.community_bundle)
+        self.assertEqual(out.count("information: community memory plan off for title 0 (CUSA00001)"), 2)
+        self.assertEqual(out.count("information: community memory plan used for title 0 (CUSA00001)"), 1)
+        self.assertIn("settings: community memory plan off for CUSA00001: 0 (community_off CUSA00001)", out)
+        self.assertIn("settings: community memory plan used for CUSA00001: 0 (community_off empty)", out)
+        self.assertIn("settings: share_memory: 1", out)
+        self.assertIn("settings: community_memory: 0", out)
+        self.assertIn("settings: community_memory: 1", out)
+        self.assertIn("CUSA00001: a community memory plan from 12 console(s): off for this game "
+                      "(CTX_FLAG_NO_COMMUNITY_MEM set)", out)
+        self.assertEqual(conf.read_text(), "# ghostldr settings: the game selector's Settings writes this file\n"
+                                           "share_memory=on\nflags_on=0x8000000\nflags_off=0x0\n"
+                                           "community_off=CUSA00001\n")
+        # read back by the next boot: the switch and the game's choice
+        conf.write_text(conf.read_text().replace("flags_on=0x8000000", "community_memory=off\nflags_on=0x18000000")
+                        .replace("community_off=CUSA00001", "community_off=CUSA00009,CUSA00001"))
+        out = self.run_host("community-runpy", profiles=self.community_bundle)
+        self.assertIn("switches 17, flags_on 18000000, flags_off 0 (this boot lacks them)", out)
+        self.assertIn("settings: community memory plans off for CUSA00009,CUSA00001", out)
+        self.assertIn("CUSA00001: a community memory plan from 12 console(s): off before the selector", out)
+
+    def test_community_plan_none(self) -> None:
+        """A game whose profile has no community plan: no row in its panel (Square opens Settings), and
+        with community plans on it starts with CTX_FLAG_NO_COMMUNITY_MEM clear."""
+        self.community_conf()
+        out = self.run_host("community-none", "3000:panel", profiles=self.community_bundle)
+        self.assertNotIn("information: community memory plan", out)
+        self.assertIn("settings: opened", out)
+        self.assertIn("CUSA00002: no community memory plan (CTX_FLAG_NO_COMMUNITY_MEM clear: on)", out)
+
+    def test_community_plan_run_py(self) -> None:
+        """run.py --no-community-memory (the flag set before the selector) stands for a game with a plan."""
+        self.community_conf()
+        out = self.run_host("community-runpy", profiles=self.community_bundle)
+        self.assertIn("CUSA00001: a community memory plan from 12 console(s): off before the selector "
+                      "(CTX_FLAG_NO_COMMUNITY_MEM set)", out)
 
     def test_catalogue(self) -> None:
         out = self.run_host("multi", "2000:home,2560:moving,4000:third,4500:launch")

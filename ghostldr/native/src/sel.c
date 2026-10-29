@@ -6,9 +6,10 @@
  *  - The blob comes over the TCP socket ghostldr.lua connected (ctx sel_fd)
  *    into the compiler-visible staging buffer: no allocation.  From a bundle
  *    (CTX_FLAG_BUNDLE) it is copied there from where ghostldr.lua received it.
- *  - Its image (read-only code and data, no relocations) is copied through
- *    the compiler into the emulator's JIT code buffer, where the title's
- *    modules are placed afterwards.
+ *  - Its image (read-only code and data) is relocated where it lies in the
+ *    staging buffer, for the address it will run at, then copied through the
+ *    compiler into the emulator's JIT code buffer, where the title's modules
+ *    are placed afterwards.
  *  - sel_main(&g_ghost_api, title) runs on this thread.  The module allocates
  *    and frees its own memory (whole direct-memory blocks) and closes what it
  *    opened.
@@ -59,10 +60,10 @@ COLD int sel_run(bool show, char title[16])
         return -1;
     /* mksel.py checked the image; the CRC proves this is that file */
     bool ok = got == n && crc32(b, n) == (u32)c->sel_crc && h->magic == SEL_BLOB_MAGIC && h->abi == GHOST_ABI &&
-              h->header_size + (u64)h->image_size == n;
+              h->format == SEL_FORMAT && h->header_size + (u64)h->image_size + (u64)h->reloc_count * 8 == n;
     /* the header's fields before arena_init: on a PS4 its probes copy
      * through the staging buffer's first bytes, over the header */
-    u64 hsize = h->header_size, size = h->image_size, entry = h->entry;
+    u64 hsize = h->header_size, size = h->image_size, entry = h->entry, nrel = ok ? h->reloc_count : 0;
     if (!ok || arena_init() || arena_code_region(&lo, &hi)) {
         logf("sel: no usable selector (%lu of %lu bytes, ABI %x, core %x)", got, n, got >= sizeof(*h) ? h->abi : 0,
              GHOST_ABI);
@@ -74,7 +75,15 @@ COLD int sel_run(bool show, char title[16])
     u64 w = arena_wr(lo, size); /* lo, except on a PS4 (arena.c) */
     if (!w || lo + size > hi)
         return -1;
-    logf("sel: placing %lu KiB at %lx, entry +%lx", size >> 10, lo, entry);
+    const u32 *rel = (const u32 *)(b + hsize + size);
+    for (u64 i = 0; i < nrel; i++) {
+        if (rel[2 * i] > size - 8 || rel[2 * i + 1] >= size) {
+            logf("sel: relocation %lu (%x -> %x) outside the image", i, rel[2 * i], rel[2 * i + 1]);
+            return -1;
+        }
+        *(u64 *)(b + hsize + rel[2 * i]) = lo + rel[2 * i + 1];
+    }
+    logf("sel: placing %lu KiB at %lx, entry +%lx, %lu relocations", size >> 10, lo, entry, nrel);
     jit_call(c->jit_memcpy, 0, w, (u64)b + hsize, size, 0, 0, 0);
     logf("sel: placed (first qword %lx), calling", *(volatile u64 *)lo);
     memset(title, 0, 16);

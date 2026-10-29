@@ -208,6 +208,11 @@ struct ghost_api {
      * ext_early sets it; ext/src/reclaim.c) to keep the core small: 0, or
      * < 0 with r->why said.  NULL: this extension has none. */
     int (**reclaim)(struct bx_reclaim *r);
+    /* A community memory plan the game selector downloaded for the title it
+     * picks (plansync/, docs/community-plans.md): copied, and used beside the
+     * profile's REC_SEED records (profile.c profile_seed).  0, or < 0. */
+    int (*seed_add)(const char *title, const u8 fingerprint[20], u32 platform, u32 contributors, const void *plan,
+                    u32 size);
 };
 
 /* A game found under an app root that is a folder of games (a USB drive, or

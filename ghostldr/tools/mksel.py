@@ -3,10 +3,11 @@
 
     python3 ghostldr/tools/mksel.py --abi N build/ghostldr/selector.elf build/ghostldr/selector.bin
 
-The core copies the module's image into executable memory as is (src/sel.c),
-so it is checked here: one image linked at 0, no relocations, no writable
-data, no GOT entries, and the entry point inside it.  Layout: struct sel_blob
-(include/sel_api.h, 40 bytes), then the image.  The header records
+The core relocates the module's image and copies it into executable memory
+(src/sel.c), so it is checked here: one image linked at 0, no writable data,
+only R_X86_64_RELATIVE relocations inside the image, and the entry point
+inside it.  Layout: struct sel_blob (include/sel_api.h, 48 bytes), the
+image, then the relocations as u32 pairs {offset, addend}.  The header records
 GHOST_API_VERSION and GHOST_ABI (the Makefile's checksum of ghost.h and
 ghost_api.h): the core refuses a selector built against other headers.
 """
@@ -20,8 +21,9 @@ import sys
 from pathlib import Path
 
 MAGIC = 0x4C45535244484C47  # "GHLDRSEL"
-FORMAT = 1
-HEADER = struct.Struct("<QIIIIIIII")
+FORMAT = 2
+HEADER = struct.Struct("<QIIIIIIIIII")
+R_X86_64_RELATIVE = 8
 MAX_IMAGE = 4 << 20  # the core reads it into the 4 MiB staging buffer
 SHF_WRITE, SHF_ALLOC = 1, 2
 
@@ -69,13 +71,19 @@ def main() -> int:
         raise SystemExit(f"{elf_path}: not an ELF64 file")
     secs = sections(elf)
     syms = symbols(elf, secs)
-    problems = []
+    problems, relocs = [], []
     for name, (typ, flags, addr, off, size) in secs.items():
         if not size or not flags & SHF_ALLOC:
             continue
-        if name.startswith((".rela", ".rel.")):
-            problems.append(f"{name}: {size // 24} relocations (pointers in static data?)")
-        elif flags & SHF_WRITE and name not in (".dynamic",):
+        if name.startswith(".rela"):
+            for i in range(size // 24):
+                r_off, info, addend = struct.unpack_from("<QQq", elf, off + i * 24)
+                if info & 0xFFFFFFFF != R_X86_64_RELATIVE or info >> 32:
+                    problems.append(f"{name}: relocation type {info & 0xFFFFFFFF} at {r_off:#x}")
+                relocs.append((r_off, addend))
+        elif name.startswith(".rel."):
+            problems.append(f"{name}: REL relocations")
+        elif flags & SHF_WRITE and name not in (".dynamic", ".data.rel.ro"):   # relocated here, read-only after
             problems.append(f"{name}: {size} bytes of writable data")
     if problems:
         raise SystemExit("selector.elf cannot be loaded as is:\n  " + "\n  ".join(problems))
@@ -94,13 +102,17 @@ def main() -> int:
         raise SystemExit(f"bad entry {entry:#x} or font {font:#x}-{font_end:#x} (image {len(image):#x})")
     if image[font:font + 4] != b"GLF1":
         raise SystemExit("the built-in font is not in the image")
-    if len(image) + HEADER.size > MAX_IMAGE:
+    for r_off, addend in relocs:
+        if not (0 <= r_off <= len(image) - 8 and 0 <= addend < len(image)):
+            raise SystemExit(f"relocation {r_off:#x} -> {addend:#x} outside the image ({len(image):#x})")
+    table = b"".join(struct.pack("<II", o, a) for o, a in sorted(relocs))
+    if len(image) + HEADER.size + len(table) > MAX_IMAGE:
         raise SystemExit(f"image too large: {len(image)} bytes")
     blob = HEADER.pack(MAGIC, FORMAT, HEADER.size, api_version(), args.abi & 0xFFFFFFFF, len(image), entry, font,
-                       font_end - font) + image
+                       font_end - font, len(relocs), 0) + image + table
     out.write_bytes(blob)
     print(f"{out.name}: {len(blob)} bytes (image {len(image) // 1024} KiB, of it the font "
-          f"{(font_end - font) // 1024} KiB)")
+          f"{(font_end - font) // 1024} KiB; {len(relocs)} relocations)")
     return 0
 
 

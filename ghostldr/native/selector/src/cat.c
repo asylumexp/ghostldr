@@ -160,11 +160,13 @@ static void copy_str(char *d, const u8 *s, int n, int cap)
 /* The title's name and flags in its profile: run.py sends every profile it knows
  * (profiles.py boot_bundle) and ghostldr.lua leaves them in the boot
  * context's last u64 (profile.c PROFILE_SLOT); REC_NAME is the profile's
- * "name".  Read in place: blobs of struct prof_hdr + records, ended by a
- * zero magic. */
+ * "name", a REC_SEED for this console's platform a community memory plan
+ * (docs/community-plans.md).  Read in place: blobs of struct prof_hdr +
+ * records, ended by a zero magic. */
 #define PROFILE_SLOT 63
 static void profile_name(struct plat *P, struct cat_title *c)
 {
+    u32 platform = P->ps4 ? SEED_PS4 : SEED_PS5;
     const u8 *p = (const u8 *)((const u64 *)P->ctx)[PROFILE_SLOT];
     for (int n = 0; p && c->id[0] && n < 256; n++) {
         const struct prof_hdr *h = (const struct prof_hdr *)p;
@@ -179,6 +181,13 @@ static void profile_name(struct plat *P, struct cat_title *c)
                     return;
                 if (r->kind == REC_NAME)
                     copy_str(c->prof_name, (const u8 *)(r + 1), (int)(r->size - sizeof(*r)), sizeof(c->prof_name));
+                const struct prof_seed *sd = (const struct prof_seed *)r;
+                if (r->kind == REC_SEED && r->size >= sizeof(*sd) && sd->platform == platform && sd->plan_size &&
+                    sd->plan_size <= r->size - sizeof(*sd)) {
+                    c->seed = 1;
+                    if (sd->contributors > c->seed_from)
+                        c->seed_from = sd->contributors;
+                }
                 at += r->size;
             }
             return;

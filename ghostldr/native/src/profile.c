@@ -146,6 +146,61 @@ COLD const void *profile_record(u32 kind, u32 n)
     return NULL;
 }
 
+/* community plans the game selector downloaded (ghost_api.seed_add): each a
+ * struct prof_seed with its plan, for the title named */
+#define MAX_ADDED 8
+static struct {
+    char title[16];
+    struct prof_seed *s;
+} g_added[MAX_ADDED];
+
+COLD int profile_seed_add(const char *title, const u8 fingerprint[20], u32 platform, u32 contributors, const void *plan,
+                          u32 size)
+{
+    u32 i = 0;
+    while (i < MAX_ADDED && g_added[i].s)
+        i++;
+    u32 total = ALIGN_UP((u32)sizeof(struct prof_seed) + size, 8);
+    struct prof_seed *s = i < MAX_ADDED && title && plan && size <= 0x4000 ? page_alloc(total) : NULL;
+    if (!s)
+        return -1;
+    s->r.kind = REC_SEED, s->r.size = (u16)total;
+    memcpy(s->fingerprint, fingerprint, 20);
+    s->platform = platform, s->contributors = contributors, s->plan_size = size;
+    memcpy(s->plan, plan, size);
+    strlcpy(g_added[i].title, title, sizeof(g_added[i].title));
+    g_added[i].s = s;
+    return 0;
+}
+
+/* the title's community plan for this build and platform: one the selector
+ * downloaded this session, else a REC_SEED in the title's own blob, whether
+ * or not its profile is for this build */
+COLD const struct prof_seed *profile_seed(const u8 *fingerprint, u32 platform)
+{
+    const struct prof_hdr *h = g_title[0] ? find(g_title) : NULL;
+    if (!fingerprint)
+        return NULL;
+    for (u32 i = 0; i < MAX_ADDED && g_added[i].s; i++) {
+        const struct prof_seed *s = g_added[i].s;
+        if (!strcmp(g_added[i].title, g_title) && s->platform == platform && !memcmp(s->fingerprint, fingerprint, 20))
+            return s;
+    }
+    if (!h)
+        return NULL;
+    const u8 *p = (const u8 *)h + h->header_size, *end = (const u8 *)h + h->total;
+    while (p + sizeof(struct prof_rec) <= end) {
+        const struct prof_seed *s = (const struct prof_seed *)p;
+        if (s->r.size < sizeof(s->r) || p + s->r.size > end)
+            break;
+        if (s->r.kind == REC_SEED && s->r.size >= sizeof(*s) + s->plan_size && s->platform == platform &&
+            memcmp(s->fingerprint, fingerprint, 20) == 0)
+            return s;
+        p += s->r.size;
+    }
+    return NULL;
+}
+
 /* ---- HLE rules ---- */
 static const struct prof_rule *g_rules[MAX_RULES];
 static u64 g_rule_stub[MAX_RULES];

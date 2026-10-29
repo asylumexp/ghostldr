@@ -184,6 +184,33 @@ s64 savedata_aux_write(const char *name, const void *buf, u64 size)
     return n;
 }
 
+/* A file in ghostldr's GLDRPLANS container (made when missing; 96 blocks,
+ * the smallest), which the game selector's plan sync reads (plansync/):
+ * automem.c's plans to share.  Bytes written, or -1. */
+s64 savedata_outbox(const char *name, const void *buf, u64 size)
+{
+    static volatile int lock;
+    char mp[16], p[96];
+    while (__atomic_exchange_n(&lock, 1, __ATOMIC_ACQUIRE))
+        K.usleep(1000);
+    int rc = gfs_mount("GLDRPLANS", 2, 0, mp);
+    if (rc == (int)ERR_SAVE_NOT_FOUND)
+        rc = gfs_mount("GLDRPLANS", 6, 96, mp);
+    s64 n = -1;
+    if (rc == 0) {
+        fmt(p, sizeof(p), "%s/%s", mp, name);
+        int fd = k_open(p, O_RDWR | O_CREAT, 0666);
+        n = fd >= 0 ? k_pwrite(fd, buf, size, 0) : -1;
+        if (fd >= 0)
+            k_close(fd);
+        gfs_umount(mp, 60000);
+    }
+    __atomic_store_n(&lock, 0, __ATOMIC_RELEASE);
+    if (n != (s64)size)
+        logf("savedata: GLDRPLANS/%s -> %ld (mount %x)", name, n, (u32)rc);
+    return n;
+}
+
 static void sdm_path(char *buf, size_t size, u32 slot, const char *what)
 {
     fmt(buf, size, "%s/sdmemory_%u.%s", save_root(), slot, what);

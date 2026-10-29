@@ -8,9 +8,11 @@
  *  - run.py serves it over TCP at boot like ext.bin (selector socket in the
  *    boot context); the core reads it into the compiler-visible staging
  *    buffer, so receiving it allocates nothing;
- *  - its image has no writable sections and no relocations (sel.ld,
- *    tools/mksel.py), so placing it is one copy through the compiler into the
- *    emulator's JIT code buffer, where the title's modules go afterwards;
+ *  - its image has no writable sections (sel.ld, tools/mksel.py); its
+ *    relocations (pointers in read-only data: BearSSL's tables, plansync/)
+ *    are applied in the staging buffer, then placing it is one copy through
+ *    the compiler into the emulator's JIT code buffer, where the title's
+ *    modules go afterwards;
  *  - sel_main(&g_ghost_api, title) runs on the boot thread with the same core
  *    services as the extension.  The module allocates its own memory (whole
  *    direct-memory blocks), closes what it opens and frees all of it before
@@ -24,9 +26,11 @@
 #include "ghost_api.h"
 
 #define SEL_BLOB_MAGIC 0x4C45535244484C47ULL /* "GHLDRSEL" */
-#define SEL_FORMAT 1
+#define SEL_FORMAT 2
 
-/* build/ghostldr/selector.bin: this header, then the image (linked at 0) */
+/* build/ghostldr/selector.bin: this header, the image (linked at 0), then
+ * reloc_count u32 pairs {offset, addend}: the u64 at offset becomes the
+ * image's address plus addend (R_X86_64_RELATIVE) */
 struct sel_blob {
     u64 magic;
     u32 format;       /* SEL_FORMAT */
@@ -36,6 +40,7 @@ struct sel_blob {
     u32 image_size;   /* bytes after the header */
     u32 entry;        /* offset of sel_main in the image */
     u32 font_off, font_size; /* the built-in font inside the image (for tools) */
+    u32 reloc_count, reserved;
 };
 
 /* ctx flags: CTX_FLAG_SELECT and CTX_FLAG_SEL_FONT_BUILTIN (ghost.h) */

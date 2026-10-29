@@ -68,7 +68,8 @@ MAGIC = b"GLPF"
 VERSION = 1
 HEADER = struct.Struct("<4sHHII16s20sI5iIiII4x")  # struct prof_hdr, 96 bytes
 REC = struct.Struct("<HHI")                        # struct prof_rec
-REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME, REC_EXEC, REC_NEO, REC_PREFIX = 1, 2, 3, 4, 5, 6, 7, 8
+REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME, REC_EXEC, REC_NEO, REC_PREFIX, REC_SEED = 1, 2, 3, 4, 5, 6, 7, 8, 9
+SEED = struct.Struct("<20sIIII")                   # struct prof_seed after its record header, then the plan
 NAME_MAX = 127                 # bytes of UTF-8 in REC_NAME (the selector's name field is 128)
 TLS_PER_REC = 15000            # offsets per REC_TLS record (its size is a u16)
 MAX_BLOB = 0x10000
@@ -544,10 +545,18 @@ def tls_site_list(name: str) -> list[int]:
     return sorted(out)
 
 
+def seed_record(seed: dict) -> bytes:
+    """A community plan (plans.seeds()) as a REC_SEED record."""
+    import plans
+    return _rec(REC_SEED, SEED.pack(bytes.fromhex(seed["fingerprint"]), plans.PLATFORMS[seed["platform"]],
+                                    int(seed.get("contributors", 1) or 1), len(seed["data"]), 0) + seed["data"])
+
+
 def compile_blob(prof: dict, src: Path | None = None, flags: int = 0, extra_features: tuple[str, ...] = (),
-                 params: list[int] | None = None) -> bytes:
+                 params: list[int] | None = None, seeds: list[dict] = ()) -> bytes:
     """One title's blob (struct prof_hdr + records).  `params` are its app
-    params when known already (layout.json), else they come from `src`."""
+    params when known already (layout.json), else they come from `src`;
+    `seeds` its community plans (plans.seeds())."""
     import orbis_elf as oe
     if prof.get("_has_profile"):
         flags |= PF_OWN
@@ -600,6 +609,8 @@ def compile_blob(prof: dict, src: Path | None = None, flags: int = 0, extra_feat
     for mod, ranges in sorted(exec_ranges(prof).items()):
         flat = [v for r in ranges for v in r]
         recs += _rec(REC_EXEC, struct.pack("<32sI", mod.encode(), len(ranges)) + struct.pack(f"<{len(flat)}I", *flat))
+    for seed in seeds:
+        recs += seed_record(seed)
     video = mem.get("video_reserve_mib")
     params = params if params is not None else app_params(prof, src)
     header = HEADER.pack(MAGIC, VERSION, HEADER.size, HEADER.size + len(recs), flags, prof["title"].encode(), fp,
@@ -639,14 +650,32 @@ def packed(title: str) -> dict:
         return {}
 
 
+def _with_seeds(blobs: list[tuple[str, bytes]], seeds: dict[str, list[dict]], build, room: int) -> list[bytes]:
+    """The blobs, each title's rebuilt with its community plans while they
+    fit in `room` bytes more: the titles named first, then those with plans
+    from the most consoles.  build(title, its seeds) -> its blob."""
+    out = dict(blobs)
+    order = [t for t, _ in blobs if t in seeds]
+    order += sorted((t for t in seeds if t not in out), key=lambda t: -max(int(s.get("contributors", 1) or 1)
+                                                                        for s in seeds[t]))
+    for t in order:
+        blob = build(t, seeds[t])
+        grow = len(blob) - len(out.get(t, b""))
+        if grow <= room:
+            out[t], room = blob, room - grow
+    return [out[t] for t in out]
+
+
 def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = (),
-                drive_titles: dict[str, Path] | None = None) -> bytes:
+                drive_titles: dict[str, Path] | None = None, seeds: dict[str, list[dict]] | None = None) -> bytes:
     """What run.py sends as GHOSTLDR_PROFILE_B64: with a title, its blob
     (marked requested) and the generic default; without, one blob per title
     this computer knows (profiles, packs and the titles on a USB drive it
     sees, drive_titles {ID: app0}: the core picks the installed one, or the
     one whose eboot fingerprint matches) and the default.  Ends with 8 zero
-    bytes."""
+    bytes.  `seeds` (plans.seeds()) adds community plans: with a title, its
+    own; without, every title's that fits, a title without a profile
+    getting a generic blob that carries them."""
     drive_titles = drive_titles or {}
     if title:
         t = normalize_title(title)
@@ -656,16 +685,19 @@ def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = (),
     else:
         packs = [f.parent.name for f in TITLES_OUT.glob("*/layout.json")]
         titles, flags = sorted(set(known_titles()) | {t for t in packs if normalize_title(t)} | set(drive_titles)), 0
-    blobs = []
-    for t in titles:
+    def build(t: str, with_seeds: list[dict] = ()) -> bytes:
         info = packed(t)
         src = Path(info["src"]) if info.get("src") else (DEFAULT_SRC if detect_title(DEFAULT_SRC) == t else None)
         if t in drive_titles and not (src and src.is_dir()):
             src = drive_titles[t]
         params = info.get("app_params") if not (src and src.is_dir()) else None
-        blobs.append(compile_blob(load(t), src if src and src.is_dir() else None, flags, extra_features, params))
-    blobs.append(compile_blob(load(None), None, 0, extra_features))
-    data = b"".join(blobs) + b"\0" * 8
+        return compile_blob(load(t), src if src and src.is_dir() else None, flags, extra_features, params, with_seeds)
+
+    blobs = [(t, build(t)) for t in titles]
+    default = compile_blob(load(None), None, 0, extra_features)
+    seeds = {t: v for t, v in (seeds or {}).items() if not title or t in titles}
+    room = MAX_BUNDLE - 8 - len(default) - sum(len(b) for _, b in blobs)
+    data = b"".join(_with_seeds(blobs, seeds, build, room) if seeds else [b for _, b in blobs]) + default + b"\0" * 8
     if len(data) > MAX_BUNDLE:
         raise ProfileError(f"{len(titles)} profiles take {len(data)} bytes (at most {MAX_BUNDLE}): pass --title")
     return data
@@ -673,10 +705,16 @@ def boot_bundle(title: str | None = None, extra_features: tuple[str, ...] = (),
 
 def release_bundle() -> bytes:
     """GHOSTLDR_PROFILE_B64 of the release's ghostldr.lua (tools/mkbundle.py):
-    every profile in ghostldr/data/titles and the generic default, from the
-    repository alone: nothing of this computer's packs, dumps or drives."""
+    every profile in ghostldr/data/titles and the generic default, with the
+    community plans in plans/ that fit, from the repository alone: nothing of
+    this computer's packs, dumps, drives or downloads."""
+    import plans
     titles = known_titles()
-    data = b"".join(compile_blob(load(t)) for t in titles) + compile_blob(load(None)) + b"\0" * 8
+    blobs = [(t, compile_blob(load(t))) for t in titles]
+    default = compile_blob(load(None))
+    room = MAX_BUNDLE - 8 - len(default) - sum(len(b) for _, b in blobs)
+    seeds = plans.seeds(downloaded=False)          # the repository's plans/ only
+    data = b"".join(_with_seeds(blobs, seeds, lambda t, s: compile_blob(load(t), seeds=s), room)) + default + b"\0" * 8
     if len(data) > MAX_BUNDLE:
         raise ProfileError(f"{len(titles)} profiles take {len(data)} bytes (at most {MAX_BUNDLE})")
     return data

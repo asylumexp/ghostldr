@@ -72,6 +72,7 @@ SELECTOR = ROOT / "build/ghostldr/selector.bin"
 BOOT_LUA = ROOT / "ghostldr/lua/ghostldr.lua"
 NOTIFY_HOOK = ROOT / "ghostldr/lua/notify_hook.lua"
 from console import LOADERS, console_ip, loader_port
+import plans
 import profiles
 import usb_drive
 LOG_PORT = int(os.environ.get("GHOSTLDR_PORT_BASE", "18194"))  # +1, +2 below; another base lets two run.py share a computer
@@ -597,6 +598,7 @@ def boot_flags(args) -> int:
         | (2048 if args.select else 0) | (4096 if args.select_font == "builtin" else 0) \
         | (16384 if args.diag else 0) | (65536 if args.no_auto_memory else 0) \
         | (131072 if args.auto_memory else 0) | (524288 if args.forget_memory else 0) \
+        | (0x8000000 if args.share_memory else 0) | (0x10000000 if args.no_community_memory else 0) \
         | (args.ftp_port << 48 if args.mode == "boot" else 0)
 
 
@@ -658,6 +660,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="use the automatic memory plan even when the title's profile has a manual one")
     parser.add_argument("--forget-memory", action="store_true",
                         help="start the title's learned memory plan over (it is kept next to its saves)")
+    parser.add_argument("--share-memory", action="store_true",
+                        help="share the title's learned memory plans with ghostldr's plan collection (the next "
+                             "game selector sends them), as its Settings switch does (docs/community-plans.md)")
+    parser.add_argument("--no-community-memory", action="store_true",
+                        help="don't download community memory plans, and don't start the title from one")
     parser.add_argument("--keep-remote-play", action="store_true",
                         help="dev: ignore the title's sceRemoteplayProhibit, so a Remote Play viewer keeps its picture")
     parser.add_argument("--select", action="store_true",
@@ -755,9 +762,13 @@ def main(argv: list[str] | None = None) -> int:
         payload = build_payload(flags, local_ip_for(args.host), args.app_root, knobs, ext, sel)
         if args.select and args.title:   # every profile, so whichever title is picked gets its own
             print(f"--select: the selector picks the title (--title {args.title} is not used)", flush=True)
+        seeds = {}
+        if args.mode == "boot" and not args.no_community_memory:
+            # community plans (plans.py): the release's, and GitHub's when it answers; silent when not
+            seeds = plans.seeds(downloaded=plans.sync())
         try:   # the title profiles (host/profiles.py; read by native/src/profile.c)
             bundle = profiles.boot_bundle(None if args.select else args.title,
-                                          ("trace_opens",) if args.trace_opens else (), drive_titles)
+                                          ("trace_opens",) if args.trace_opens else (), drive_titles, seeds)
         except profiles.ProfileError as e:
             raise SystemExit(str(e))
         payload = f'GHOSTLDR_PROFILE_B64 = "{base64.b64encode(bundle).decode()}"\n'.encode() + payload
