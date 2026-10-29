@@ -424,6 +424,7 @@ static struct {
     u64 handle;
     u64 buf[3], len[3], phys[3];
 } g_vdec[4];
+static u32 g_vdec_last; /* the slot the latest query filled */
 
 static int dm_map_typed(u64 len, int type, int prot, u64 *addr, u64 *phys)
 {
@@ -511,6 +512,7 @@ static s64 hle_sceVideodec2QueryDecoderMemoryInfo(const u64 *cfg, struct vdec_me
         if (i < ARRAY_SIZE(g_vdec)) {
             g_vdec[i].info = info;
             g_vdec[i].real = *info;
+            g_vdec_last = i;
             info->cpu_size = info->gpu_size = info->cpugpu_size = VDEC_TOKEN;
         }
     }
@@ -526,6 +528,14 @@ static s64 hle_sceVideodec2CreateDecoder(const u64 *cfg, const struct vdec_mem *
     u32 i = 0;
     while (i < ARRAY_SIZE(g_vdec) && g_vdec[i].info != info)
         i++;
+    /* CRI's movie player (Persona 5 Royal) creates the decoder with a copy of
+     * the struct the query filled: still the token sizes, at another address */
+    if (i == ARRAY_SIZE(g_vdec) && info && info->cpu_size == VDEC_TOKEN && info->gpu_size == VDEC_TOKEN &&
+        info->cpugpu_size == VDEC_TOKEN && g_vdec[g_vdec_last].info && !g_vdec[g_vdec_last].handle) {
+        i = g_vdec_last;
+        logf("sceVideodec2CreateDecoder: memory info %p is a copy of the latest query's (%p)", (const void *)info,
+             (const void *)g_vdec[i].info);
+    }
     if (i == ARRAY_SIZE(g_vdec))
         return real(cfg, info, handle);
     struct vdec_mem m = *info;
