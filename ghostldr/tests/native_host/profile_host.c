@@ -138,6 +138,7 @@ int hle_map_named_direct(void **addr, size_t len, int prot, int flags, off_t phy
 }
 int hle_map_direct2(void **addr, size_t len, int type, int prot, int flags, off_t phys, size_t align) { return 0; }
 int hle_checked_release_direct(off_t start, size_t len) { return 0; }
+void thread_note(u64 tid, const char *name) {} /* tls.c: the automatic plan's thread, for back to the selector */
 int hle_dmem_query(off_t off, int flags, void *info, size_t size) { return 0; }
 int hle_dmem_type(off_t off, int *type, off_t *start, off_t *end) { return 0; }
 

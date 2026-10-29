@@ -213,6 +213,11 @@ struct ghost_api {
      * profile's REC_SEED records (profile.c profile_seed).  0, or < 0. */
     int (*seed_add)(const char *title, const u8 fingerprint[20], u32 platform, u32 contributors, const void *plan,
                     u32 size);
+    /* ---- back to the game selector (CTX_FLAG_RETURN, ext/src/title_back.c) ----
+     * Every thread the title made and ghostldr's own made for it (tls.c; at
+     * most max, ended ones included), and one of ghostldr's own added. */
+    u32 (*thread_list)(u64 *tids, const char **names, u32 max);
+    void (*thread_note)(u64 tid, const char *name);
 };
 
 /* A game found under an app root that is a folder of games (a USB drive, or
@@ -392,6 +397,13 @@ struct ext_exports {
      * addresses.  The core checks size before calling it; NULL in the ELF
      * loader's extension. */
     void (*title_watch)(u64 eboot, u32 phase, u64 core_lo, u64 core_hi);
+    /* CTX_FLAG_RETURN (ext/src/title_back.c): on the boot thread once the
+     * title runs, until it ends (it quit, it crashed, or L1+R1+Options+
+     * touchpad on the controller); then its threads are stopped and what it
+     * held goes back (handles, mounts, executable memory), and 0 is returned
+     * for the core to give back the rest.  The core checks size before
+     * calling it; NULL in the ELF loader's extension. */
+    int (*title_back)(void);
 };
 
 typedef const struct ext_exports *(*ext_init_fn)(const struct ghost_api *api);
@@ -512,6 +524,9 @@ struct ghost_diag {
     s32 sig;
     u64 rip, addr;
     char at[96];                    /* the extension's: "eboot.bin+1234" */
+    /* CTX_FLAG_RETURN: the title's run is over (it quit or crashed, its
+     * screen was shown): the boot thread stops it (ext/src/title_back.c) */
+    volatile u32 back;
 };
 
 /* the state, from the extension (its api; NULL from an older core) */

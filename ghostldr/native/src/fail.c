@@ -49,8 +49,9 @@ const char k_fail_notice[] = "ghostldr: the game stopped. Its log says why: ghos
 COLD int fail_result(int rc)
 {
     struct ghost_diag *D = log_diag();
-    /* -7: ghostldr.lua says it; -20: the selector's "Close ghostldr" (rel-settings' SEL_EXIT_LOADER) */
-    if (!rc || !D || D->shown || rc == -7 || rc == -20)
+    /* -7: ghostldr.lua says it; -20: the selector's "Close ghostldr" (rel-settings' SEL_EXIT_LOADER);
+     * CTX_TITLE_BACK: the title ran and ended, back to the game selector */
+    if (!rc || !D || D->shown || rc == -7 || rc == -20 || rc == CTX_TITLE_BACK)
         return rc;
     logf("boot: stopped (%d)", rc);
     if (rc == -3 && bx_why && bx_why())

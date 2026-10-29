@@ -190,6 +190,9 @@ local EL_BOOT, EL_BUNDLE, EL_FORGET = 1, 2, 3   -- the ELF loader's results (ext
 -- once a game is picked, and the pick's fields
 local CTX_ELFLDR_SELECT, EL_PICKED = 1 << 57, 4
 local SEL_INDEX, SEL_USER, SEL_TITLE, SEL_BOOT = 0x18, 0x1c, 0x20, 0x30
+-- back to the game selector when the game ends (ghost.h CTX_FLAG_RETURN): the core returns once the game has
+-- quit or crashed, or L1+R1+Options+touchpad were held, with the game stopped (CTX_TITLE_BACK)
+local CTX_FLAG_RETURN, TITLE_BACK = 1 << 29, 0xBAC
 local SO_REUSEADDR_, SO_NOSIGPIPE, SO_RCVBUF, SO_SNDTIMEO, SO_RCVTIMEO = 0x4, 0x800, 0x1002, 0x1005, 0x1006
 -- the extension's ELF loader runs on a PS5 in SWRR (Luac0re); not on a PS4 or in Jak X
 local HAS_ELFLDR = PLATFORM ~= "PS4" and not ULTRA
@@ -1178,19 +1181,33 @@ local function listen_main()
             end
         else    -- boot: the pick from beside the ELF loader, else the selector (even for one game)
             local was_cached, sent = b.cached, b.from ~= nil
-            local code, ctx = run_bundle(b, base_flags | (picked and 0 or CTX_FLAG_SELECT), GHOSTLDR_APP_ROOT,
-                picked)
-            if code == 0 then
+            -- on a PS5, with this build cached, the core waits while the game runs and comes back when it ends
+            local back_flag = HAS_ELFLDR and was_cached and CTX_FLAG_RETURN or 0
+            local code, ctx = run_bundle(b, base_flags | back_flag | (picked and 0 or CTX_FLAG_SELECT),
+                GHOSTLDR_APP_ROOT, picked)
+            if code == TITLE_BACK then
+                -- the game has stopped and what it held went back: the game selector again, from the cache
+                b, picked = cache_read(2), nil
+                if not b or b.kind ~= 1 then
+                    if b then unmap(b.ext, b.ext_size) end
+                    return back("the game ended, but this build's ghostldr-ext.bin is not cached to open the game "
+                        .. "selector with", code, ctx)
+                end
+                hold(b)
+                mode = "select"
+                event("the game ended: back to the game selector", "The game ended.\nBack to the game selector.")
+            elseif code == 0 then
                 if conn >= 0 then say("the game runs; its log keeps coming here") end
                 return
-            end
-            if code == -7 and was_cached then cache_delete() end   -- the core found the extension damaged
-            if code == -7 and was_cached and not sent then
-                event("the cached bundle is damaged (the core's checksum of its extension failed): it is deleted")
-                drop(ctx)
-                note, mode, picked = "The cached bundle is damaged: deleted.\nSend the bundle again.", "prompt", nil
             else
-                return back(code == -20 and "closed in Settings" or "the boot stopped", code, ctx)
+                if code == -7 and was_cached then cache_delete() end   -- the core found the extension damaged
+                if code == -7 and was_cached and not sent then
+                    event("the cached bundle is damaged (the core's checksum of its extension failed): it is deleted")
+                    drop(ctx)
+                    note, mode, picked = "The cached bundle is damaged: deleted.\nSend the bundle again.", "prompt", nil
+                else
+                    return back(code == -20 and "closed in Settings" or "the boot stopped", code, ctx)
+                end
             end
         end
     end

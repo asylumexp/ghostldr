@@ -339,6 +339,16 @@ void ext_title_starting(void)
         g_exp->title_starting();
 }
 
+/* CTX_FLAG_RETURN (boot.c): the boot thread waits while the title runs, and
+ * once it ends the extension stops it (title_back.c); -1: this one can't */
+int ext_title_back(void)
+{
+    if (g_exp && g_exp->size >= __builtin_offsetof(struct ext_exports, title_back) + sizeof(void *) &&
+        g_exp->title_back)
+        return g_exp->title_back();
+    return -1;
+}
+
 /* A module's text before it is written to executable memory (loader.c):
  * the extension patches raw system call sites in it (hle_rawsys.c). */
 void ext_patch_text(struct module *m, u8 *text, u64 size)

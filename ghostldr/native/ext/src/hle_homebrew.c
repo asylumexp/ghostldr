@@ -109,11 +109,12 @@ static void hb__exit(int code)
     HOST(NULL, "_exit");
     u64 ra = (u64)__builtin_return_address(0);
     struct module *m = g_main_mod;
-    logf("title called _exit(%d) from eboot+%lx: SWRR ends with it", code, m && ra > m->base ? ra - m->base : ra);
+    logf("title called _exit(%d) from eboot+%lx: %s", code, m && ra > m->base ? ra - m->base : ra,
+         g_ctx->flags & CTX_FLAG_RETURN ? "back to the game selector" : "SWRR ends with it");
     struct ghost_diag *D = GHOST_DIAG(G); /* said on the TV first (failure.c) */
     if (D && D->show)
         D->show(FAIL_EXIT, code);
-    if (real)
+    if (real && !(g_ctx->flags & CTX_FLAG_RETURN)) /* else the boot thread stops the title (title_back.c) */
         real((u64)code, 0, 0, 0, 0, 0);
     for (;;)
         K.usleep(1000000);

@@ -648,5 +648,6 @@ COLD void automem_start(void)
     if (!g_on)
         return;
     u64 tid = 0;
-    K.pthread_create(&tid, NULL, automem_thread, NULL, "ghostldr-automem");
+    if (K.pthread_create(&tid, NULL, automem_thread, NULL, "ghostldr-automem") == 0)
+        thread_note(tid, "ghostldr-automem");
 }

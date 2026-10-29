@@ -224,6 +224,22 @@ int boot_save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total),
     return g_pick_rc ? -1 : ext_save_prescan(user, progress, arg);
 }
 
+/* CTX_FLAG_RETURN: the boot thread waits while the title runs; once it has
+ * ended and the extension has stopped it, ghostfs's mounts, the extension and
+ * the direct memory allocated since the boot began go back, and ghostldr.lua
+ * opens the game selector again (docs/selector.md).  0: the extension can't,
+ * and the title runs on as before. */
+static int title_back(void)
+{
+    if (ext_title_back() != 0)
+        return 0;
+    gfs_unmount_all();
+    ext_abandon();
+    u64 freed = dmem_release_new();
+    logf("back: the title has stopped and %lu MiB of direct memory went back: to the game selector", freed >> 20);
+    return CTX_TITLE_BACK;
+}
+
 int ghost_boot(void)
 {
     const char *root = (const char *)g_ctx->app_root;
@@ -242,6 +258,8 @@ int ghost_boot(void)
     if (rc != 0)
         return rc;
     boot_quiet_host();
+    if (g_ctx->flags & CTX_FLAG_RETURN)
+        dmem_mark();
     /* ---- game selector (sel.c): it picks the title before its index is
      * loaded and its memory planned, and frees all it used first ---- */
     char title[16];
@@ -339,5 +357,5 @@ int ghost_boot(void)
     if (g_ctx->flags & 4)
         crash_start_watchdog();
     automem_start();
-    return rc;
+    return rc == 0 && (g_ctx->flags & CTX_FLAG_RETURN) ? title_back() : rc;
 }

@@ -161,6 +161,9 @@ void ov_pad_state(s32 handle, u8 *data) HIDDEN __attribute__((weak));
 /* the watchdog's Ghost 2.18 reads (ghost_watch.c); not in the ELF loader's extension */
 void ghost_watch(u64 eboot, u32 phase, u64 core_lo, u64 core_hi) HIDDEN __attribute__((weak));
 
+/* back to the game selector (title_back.c); not in the ELF loader's extension */
+int title_back(void) HIDDEN __attribute__((weak));
+
 /* the planner's reclaim (reclaim.c); not in the ELF loader's extension */
 int jit_reclaim(struct bx_reclaim *r) HIDDEN __attribute__((weak));
 
@@ -207,6 +210,6 @@ const struct ext_exports *ext_init(const struct ghost_api *api)
     }
     g_exports = (struct ext_exports){EXT_EXPORTS_MAGIC, sizeof(g_exports), ext_lookup, lib_policy, g_hle,
                                      g_nhle, nfam, g_nlibs, ext_sysmodule_failed, title_starting, elfldr_main,
-                                     rawsys_patch_text, ov_video_buffers, ov_pad_state, ghost_watch};
+                                     rawsys_patch_text, ov_video_buffers, ov_pad_state, ghost_watch, title_back};
     return &g_exports;
 }

@@ -56,6 +56,7 @@ __attribute__((cold)) static void crash_tell(int sig, u64 rip, u64 fault)
     __atomic_store_n(&D->crashed, 1, __ATOMIC_RELEASE);
     if (D->show)
         D->show(FAIL_CRASH, sig);
+    D->back = 1; /* CTX_FLAG_RETURN: shown (show returns then); the boot thread stops the title */
 }
 
 /* The ELF loader (ext/src/elfldr_sys.c): a payload thread that faults is
@@ -340,7 +341,8 @@ void crash_start_watchdog(void)
         return;
     }
     u64 tid = 0;
-    K.pthread_create(&tid, NULL, watchdog, NULL, "ghostldr-watchdog");
+    if (K.pthread_create(&tid, NULL, watchdog, NULL, "ghostldr-watchdog") == 0)
+        thread_note(tid, "ghostldr-watchdog");
 }
 
 void crash_install(void)

@@ -230,6 +230,8 @@ int jit_ps4_check(void); /* PS4: the stubs, clock_gettime, the socket pair, EFAU
 /* ---- memory (mem.c) ---- */
 void *page_alloc(size_t size);
 void *direct_alloc(size_t size, int prot, u64 fixed);
+void dmem_mark(void);        /* CTX_FLAG_RETURN: the direct memory allocated as the title's boot begins */
+u64 dmem_release_new(void);  /* ... and all allocated since given back (its mappings first): bytes */
 void direct_free(void *addr);
 void page_free(void *addr, size_t size);
 void *arena_alloc(size_t size);
@@ -349,6 +351,7 @@ int budget_patch_text(struct module *m, u8 *text); /* -1: the title cannot fit, 
 void hooks_patch_text(struct module *m, u8 *text);
 bool vdm_is(u64 off);
 u32 ghost_thread_list(u64 *tids, const char **names, u32 max);
+void thread_note(u64 tid, const char *name); /* one of ghostldr's own threads, for the list above */
 struct dm_usage {
     u64 phys, len, mapped, from;
     int type;
@@ -655,7 +658,8 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
  * 16777216 no log on a USB drive (Settings), 33554432 the extension in an
  * emulator buffer, 67108864 the reclaim forced (bigexec.c), 134217728
  * share learned memory plans, 268435456 no community memory plan (automem.c,
- * docs/community-plans.md); bits 32-47
+ * docs/community-plans.md), 536870912 back to the game selector when the
+ * title ends (CTX_FLAG_RETURN); bits 32-47
  * hold the ELF loader's port, bits 48-63 the FTP server's (CTX_FTP_PORT) */
 #define CTX_FLAG_NO_AUTO_MEM 65536      /* plan-free titles keep the plain budget (run.py --no-auto-memory) */
 #define CTX_FLAG_AUTO_MEM 131072        /* the automatic plan instead of a profile's manual one (run.py --auto-memory) */
@@ -672,6 +676,14 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 #define CTX_FLAG_NO_USB_LOG 16777216   /* Settings: the log is not written to a USB drive (docs/logs.md; the selector may set it live) */
 #define CTX_FLAG_SHARE_MEM 134217728   /* Settings/run.py --share-memory: log each saved learned plan for the computer to share */
 #define CTX_FLAG_NO_COMMUNITY_MEM 268435456 /* Settings, the game's Information panel, run.py --no-community-memory: no REC_SEED start */
+/* Back to the game selector (ghostldr.lua's listen mode on a PS5 with the
+ * bundle cached; docs/selector.md "Back to the game selector"): ghost_boot
+ * does not return once the title runs, but when it ends (it quits or
+ * crashes, or L1+R1+Options+touchpad are held), after the extension stopped
+ * it (ext/src/title_back.c) and what it held went back; ghostldr.lua then
+ * opens the game selector again. */
+#define CTX_FLAG_RETURN 536870912
+#define CTX_TITLE_BACK 0xBAC /* ghost_boot's result then */
 #define CTX_FTP_PORT(flags) ((u32)((flags) >> 48)) /* the FTP server's TCP port (run.py --ftp-port; 0: none) */
 #define CTX_FLAG_ELFLDR 1048576 /* no title: serve the ELF loader (run.py elfldr, docs/elfldr.md) */
 #define CTX_ELFLDR_PORT(flags) ((u32)((flags) >> 32) & 0xFFFF) /* its TCP port (run.py elfldr --port) */
@@ -765,6 +777,7 @@ u64 ext_hle_lookup(const char *lib, const char *nid, const char *name);
 const struct ext_lib *ext_lib_policy(const char *lib);
 void ext_note_sysmodule(u32 id, s32 rc); /* a failed sysmodule load, for the extension's families */
 void ext_title_starting(void); /* the title's main thread is next: the extension's last boot step (its FTP server) */
+int ext_title_back(void);       /* CTX_FLAG_RETURN: waits while the title runs, stops it once it ended (title_back.c) */
 void ext_patch_text(struct module *m, u8 *text, u64 size); /* a module's text before it is written */
 void ext_title_watch(u64 eboot, u32 phase, u64 core_lo, u64 core_hi); /* the watchdog's PF_DIAG reads (ghost_watch.c) */
 void ext_video_buffers(s32 handle, s32 start, const u64 *addrs, s32 num, const void *attr); /* drawn dialogs */

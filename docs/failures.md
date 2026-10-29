@@ -3,7 +3,7 @@
 ghostldr says every failure on the TV: what went wrong, and what to do. The details go to the log ([logs.md](logs.md)), and each message names where that log is.
 
 - **Before a game runs**, a boot that stops shows its message in the system's message dialog, the one Luac0re's loader shows its own text in. Press OK (Cross): ghostldr goes back to Luac0re's loader, which says the boot stopped, and you can send `ghostldr.lua` again. Don't press OK on Luac0re's "The boot stopped" dialog too: in the final 1.0 test that left the TV black, and the next `ghostldr.lua` wasn't taken (Luac0re's loader had ended). If that happens, close SWRR from the PS button menu and start it again. Booted from a computer (`run.py`, `ghostldr.py boot`), whose terminal shows the log too, the message closes by itself after a minute.
-- **While a game runs**, a crash, or the game quitting, replaces the game's picture with a page of ghostldr's own. After a crash the page stays until you close SWRR. After the game quits, SWRR closes: a PS4 goes back to its home screen, and a PS5 starts SWRR again.
+- **While a game runs**, a crash, or the game quitting, replaces the game's picture with a page of ghostldr's own. With the release's two-file boot on a PS5, the game selector comes back after 6 seconds (Cross skips the wait; [selector.md](selector.md#back-to-the-game-selector)). Otherwise, after a crash the page stays until you close SWRR, and after the game quits SWRR closes: a PS4 goes back to its home screen, and a PS5 starts SWRR again.
 - **A game that stops drawing** gets a notification, and its picture stays. It may come back by itself.
 - If ghostldr can't show its own message, a system notification says the game stopped and where the log is.
 
@@ -59,6 +59,7 @@ The two that need a code to say more show it under the log's place ("Code: -9").
 | Failure | How it shows | Headline | What happened | What to do |
 |---|---|---|---|---|
 | The game crashed | A notification, then ghostldr's page, kept until SWRR is closed. Under the log's place: "Crash: signal 11 at eboot.bin+1234" for a bug report | The game crashed. | It stopped working and can't go on. | To play again, close SWRR from the PS button's menu and start it again. If it crashes at the same place each time, this game may not work with ghostldr yet. |
+| Back to the game selector (PS5, two-file boot): a crash or a quit | The page above for 6 seconds (Cross skips it), then the game selector | as above | as above | Back to the game selector: press Cross, or wait a few seconds. |
 | It quit (`_exit`, `exit`) | ghostldr's page, then SWRR closes (Cross, or after 15 seconds) as an app closes, with no error screen | The game has quit. | It ended itself (with an error, code N). | SWRR closes now (a PS5 starts it again): press Cross, or wait. |
 | Its program ended (its entry returned) | The same | The game has ended. | Its program finished. | The same |
 | No new picture for a minute | A notification | The game seems stuck. | | If nothing changes, close SWRR from the PS button's menu. |

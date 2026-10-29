@@ -101,4 +101,6 @@ const struct ghost_api g_ghost_api = {
     .arena_adopt = arena_adopt,
     .reclaim = &g_reclaim,
     .seed_add = profile_seed_add,
+    .thread_list = ghost_thread_list,
+    .thread_note = thread_note,
 };

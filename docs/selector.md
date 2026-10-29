@@ -27,6 +27,8 @@ Each game shows its real name and art: from the game's own files when it has the
 | In a save tool's question (whose saves) | Up / Down (d-pad or left stick) move between the users. Cross opens the saves of the one chosen; on a user who isn't signed in it says why instead. Circle goes back to the list (not when the save tool is the only title, or after a scan was cancelled). |
 | While a save tool's saves are looked for | Hold Circle to cancel: the question comes back. |
 
+**While a game runs, L1 + R1 + Options + touchpad** (held together for a moment) stops it and brings the game selector back. A game that quits or crashes comes back to the selector too, after a few seconds of ghostldr's page saying what happened ([Back to the game selector](#back-to-the-game-selector)).
+
 To leave without booting: Settings › About › **Close ghostldr** (after a Yes, SWRR is back at Luac0re's loader, which takes ghostldr.lua again), or close SWRR from the PS button menu.
 
 ## When it appears
@@ -341,6 +343,35 @@ ghostldr's memory is tight: the title's memory plan is computed after the select
 
   The two "largest free run" figures should match. The mount and unmount counts must match too.
 - **Other memory:** the module image lives in the emulator's JIT buffer and costs nothing. The transfer uses the staging buffer. The system modules it loads use a little of SWRR's flexible memory, and unloading them returns it. Nothing else is allocated, and the boot thread's stack is the only stack used.
+
+## Back to the game selector
+
+With the release's two-file boot on a PS5 (`ghostldr.lua` with `ghostldr-ext.bin` cached), the game selector comes back when a game ends, without restarting SWRR or sending `ghostldr.lua` again:
+
+- **L1 + R1 + Options + touchpad**, held together for about 0.3 s while the game runs. A notification says "Back to the game selector." Nothing of the game is saved that it didn't save itself.
+- **The game quits** (`exit`, `_exit`, its program returns, or it asks the system to end it with `sceSystemServiceLoadExec`): ghostldr's page says "The game has quit." for 6 seconds (Cross skips it), then the selector.
+- **The game crashes:** the crash page, with where it crashed, for 6 seconds (Cross skips it), then the selector. The log on the USB drive has the crash report as before.
+
+A crash the system ends SWRR for (a GPU fault, the system out of memory) still ends SWRR: ghostldr gets no chance to run then ([failures.md](failures.md#when-ghostldr-cant-say-anything)). On a PS4, in Jak X, or when the bundle isn't cached (it was sent and couldn't be stored), the game ends as before: SWRR closes after a quit, and a crash's page stays.
+
+How it works (`ghostldr.lua`, `boot.c title_back`, `ext/src/title_back.c`):
+
+1. `ghostldr.lua` boots the game with ctx flag `CTX_FLAG_RETURN` (536870912). The core then doesn't return once the game's main thread runs. The boot thread (Luac0re's Lua thread) waits in the extension, which reads the controller every 0.1 s and watches for the failure page's end (`ghost_diag.back`, set by `failure.c` after a quit's or a crash's page).
+2. **The game's threads stop.** Every thread it made, and ghostldr's own made for it (the monitor, the drive watch, the FTP server, the drawn dialogs, the memory planner, the watchdog), is on the core's list (`tls.c`). Each is sent SIGUSR2, whose handler sends it to `scePthreadExit` instead of back to what it was doing. For the first 1.5 s only threads stopped in the game's own code are taken, since one inside a system library may hold that library's lock, which the next game needs. After that, any thread that isn't writing ghostldr's log is taken, then any thread at all. The FTP server stops first, as it does before a game.
+3. **What the game held in SWRR's process goes:** its compute queues (unmapped: the GPU reads their rings), its AvPlayers (closed on a thread of their own, waited for 2 s, since their threads call the game back), its audio ports, its VideoOut handle (the screen reads its buffers) and its save mounts (unmounted as at the game's own unmount).
+4. **Executable memory:** each of the emulator's JIT buffers the game's modules, their data or the extension went into is mapped whole again at its home, from the compiler's descriptor of it, and a large executable's range (its views, `bigexec.c`) is unmapped. The next boot's arena finds the buffers as the first boot did.
+5. **The core** unmounts ghostfs's containers, gives the extension back (its JIT block and the blob), then gives back every piece of direct memory allocated since the boot began. It marks what was allocated after SWRR's own memory went back (`dmem_mark`), compares page by page (`dmem_release_new`), unmaps this process's mappings of the rest and releases it. It returns `CTX_TITLE_BACK` (0xBAC).
+6. `ghostldr.lua` reads the cached bundle again and opens the game selector, with the ELF loader beside it, as at the first boot.
+
+The log says each step (`back: ...`): what ended the run, how many threads were listed and how many were left, each handle and buffer, and how many MiB of direct memory went back.
+
+**Tested** on a PS5 at 13.60 (two-file boot, games on a USB drive), with L1 + R1 + Options + touchpad: PS4-Xplorer (47 threads stopped in 1.6 s, 2319 MiB back), then Bloodborne twice (53 threads, its compute queue unmapped, about 4290 MiB back each time). Each time the selector's largest free run was the same 3292 MiB as at the first boot, the JIT buffers were the same, and the next game booted to its title screen. Not yet on hardware: the quit and crash pages leading back (offline tests only), and a game that needed the reclaim.
+
+**Limits:**
+
+- A game whose code needed fresh JIT objects (the reclaim, [compatibility.md](compatibility.md)) leaves them holding JIT memory. The emulator's buffers were dropped for them, so the next game may not fit: send `ghostldr.lua` after restarting SWRR if a game then stops with "There's no room for the game's code."
+- System libraries the game loaded stay loaded, and their state stays with them; the next game gets them as SWRR has them. Sockets the game opened in the JIT compiler stay open.
+- A thread with SIGUSR2 blocked doesn't stop; the log names it.
 
 ## Offline preview and tests
 

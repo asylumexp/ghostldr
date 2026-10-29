@@ -134,11 +134,17 @@ static void *av_wrap(const u8 *data, u64 size, u64 shift)
     return copy;
 }
 
+/* title_back.c closes them when the title is stopped (not in the ELF loader's extension) */
+void back_note_avplayer(u64 h) HIDDEN __attribute__((weak));
+
 /* SceAvPlayerHandle sceAvPlayerInit(SceAvPlayerInitData *data) (0x78 bytes) */
 static u64 hle_av_init(const u8 *data)
 {
     u64 (*fn)(const void *) = host_real_in("libSceAvPlayer", "sceAvPlayerInit");
-    return fn ? fn(data && tls_thunk ? av_wrap(data, 0x78, 0) : data) : 0;
+    u64 h = fn ? fn(data && tls_thunk ? av_wrap(data, 0x78, 0) : data) : 0;
+    if (h && back_note_avplayer)
+        back_note_avplayer(h);
+    return h;
 }
 
 /* s32 sceAvPlayerInitEx(const SceAvPlayerInitDataEx *data, SceAvPlayerHandle *h) */
@@ -148,7 +154,10 @@ static s32 hle_av_init_ex(const u8 *data, void *handle)
     u64 size = data ? *(const u64 *)data : 0;
     if (data && tls_thunk && size >= 0x68 && size <= 0x1000)
         data = av_wrap(data, size, 8);
-    return fn ? fn(data, handle) : E_INVAL;
+    s32 rc = fn ? fn(data, handle) : E_INVAL;
+    if (rc == 0 && handle && back_note_avplayer)
+        back_note_avplayer(*(u64 *)handle);
+    return rc;
 }
 
 /* sceKernelIsProspero: the title runs as a PS4 title; libc's thread atexit

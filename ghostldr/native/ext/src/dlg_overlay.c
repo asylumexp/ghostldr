@@ -912,6 +912,7 @@ static void start_thread(void)
         __atomic_store_n(&g_thread, 0, __ATOMIC_RELEASE);
         return;
     }
+    ext_thread_note(th, "ghostldr_dialog");
     if (detach)
         detach(th);
 }

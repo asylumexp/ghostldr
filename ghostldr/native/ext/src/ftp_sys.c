@@ -113,6 +113,7 @@ int fv_thread(void *(*fn)(void *), void *arg, const char *name)
     K.pthread_attr_destroy(attr);
     if (rc != 0)
         return -FV_EAGAIN;
+    ext_thread_note(tid, name);
     if (S.detach)
         S.detach(tid);
     return 0;

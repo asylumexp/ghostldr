@@ -1792,6 +1792,25 @@ void savedata_data_release(void)
     unlock();
 }
 
+/* The title was stopped (title_back.c): each of its mounts goes as at its
+ * unmount, then its /data.  A stopped thread may have held the lock: after
+ * 2 s it is taken anyway. */
+void savedata_title_end(void) HIDDEN;
+void savedata_title_end(void)
+{
+    char mp[16];
+    for (u32 t = 0; t < 200 && __atomic_load_n(&g_lock, __ATOMIC_ACQUIRE); t++)
+        K.usleep(10000);
+    unlock();
+    for (u32 v = 0; g_vm && v < VMAX; v++)
+        if (g_vm[v].live) {
+            fmt(mp, sizeof(mp), "/savedata%u", v);
+            s32 rc = do_umount(mp, false);
+            logf("savedata: %s (%s) unmounted as the title stopped: %x", mp, g_vm[v].dir, (u32)rc);
+        }
+    savedata_data_release();
+}
+
 /* ---- GetMountInfo, params, icons ---- */
 
 static s32 sd_get_mount_info(const char *mp, struct sd_mount_info *info)

@@ -60,6 +60,7 @@ SIZE, CTX_IP, CTX_HEADER, CTX_SELECT = 0x8, 0x200, 0x208, 0x210   # listen mode:
 ELFLDR_SELECT = 1 << 57                                 # the ELF loader beside the game selector
 CTX_FLAG_ELFLDR, CTX_FLAG_BUNDLE, CAN_BOOT = 1 << 20, 1 << 21, 1 << 56
 BOOT_FLAGS = 2 | 4096 | 1212 << 48                     # run.py boot's (the release's defaults)
+RETURN, TITLE_BACK = 1 << 29, 0xBAC                     # CTX_FLAG_RETURN: back to the game selector when the game ends
 SELECT = 2048                                           # CTX_FLAG_SELECT: a bundle's boot always shows the selector
 NONE = 2**64 - 1
 
@@ -277,7 +278,7 @@ class ListenMode(FakeConsole):
         self.assertEqual(r["elfldr"], ["elfldr port 9021 can-boot 0 selecting", "elfldr listening 9021"])
         self.assertEqual(r["selects"], [(0, 0, "", 0), (0, 0, "CUSA00900", 1)])   # the pick, then booted
         self.assertEqual((c[LOG_FD], c[LOG_ADDR]), (conn, 0))     # log.c: the connection, no address
-        self.assertEqual(c[FLAGS], 2 | 4096 | 1212 << 48 | CTX_FLAG_BUNDLE)       # no selector again
+        self.assertEqual(c[FLAGS], 2 | 4096 | 1212 << 48 | CTX_FLAG_BUNDLE | RETURN)       # no selector again
         maps = {int(a, 16): int(s, 16) for a, s in r["maps"].items()}
         self.assertEqual(maps[c[EXT_FD]], (pin["ext_size"] + 0x3FFF) & ~0x3FFF)
         self.assertEqual(maps[c[SEL_FD]], (pin["sel_size"] + 0x3FFF) & ~0x3FFF)
@@ -507,7 +508,7 @@ class BundleCache(FakeConsole):
         self.assertIn(("mount", "GLDRCACHE 6 512 0"), r["saves"])
         self.assertIn("ghostldr: cached ghostldr-ext.bin in this console's saved data (GLDRCACHE save container "
                       f"16.0 MiB, {self.full.stat().st_size / 1048576:.1f} MiB): from now on send ghostldr.lua alone", r["sent"])
-        self.assertEqual(r["ctx"][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE)          # the pick, from the cache
+        self.assertEqual(r["ctx"][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE | RETURN)          # the pick, from the cache
         self.assertIn("core-ext ok", r["out"])
         # the cache is written before the core has the bundle's memory
         self.assertLess(r["out"].index("save-umount GLDRCACHE"), r["out"].index("core-call"))
@@ -565,7 +566,7 @@ class BundleCache(FakeConsole):
         self.cache()
         self.conf("# ghostldr settings\nflags_on=0x0\nflags_off=0x0\n")
         r = self.boot("elfldr=pick:0:CUSA00900")
-        self.assertEqual(r["ctxs"][1][FLAGS] & ~CTX_FLAG_BUNDLE, BOOT_FLAGS)
+        self.assertEqual(r["ctxs"][1][FLAGS] & ~(CTX_FLAG_BUNDLE | RETURN), BOOT_FLAGS)
         self.assertNotIn(("mount", "GLDRCONF 2 0 0"), r["saves"])
 
     # ---- later boots: ghostldr.lua alone
@@ -592,7 +593,7 @@ class BundleCache(FakeConsole):
         self.assertEqual(r["elfldr"], ["elfldr port 9021 can-boot 0 selecting", "elfldr listening 9021"])
         self.assertEqual(r["selects"], [(0, 0, "", 0), (1, 0x10000001, "CUSA11456", 1)])
         b = r["ctxs"][1]
-        self.assertEqual(b[FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE)
+        self.assertEqual(b[FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE | RETURN)
         self.assert_ext_is(b, 1)
         self.assertEqual(r["unmaps"], {})                             # the core took all, both times
         self.assertIn("ghostldr: the cached ghostldr-ext.bin (build " + lua_build(self.lua) + "): the game selector, "
@@ -608,7 +609,23 @@ class BundleCache(FakeConsole):
         self.cache()
         r = self.boot("elfldr=pick:-1:")
         self.assertEqual(r["selects"][-1][3], 0)
-        self.assertEqual(r["ctxs"][1][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE | SELECT)
+        self.assertEqual(r["ctxs"][1][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE | SELECT | RETURN)
+
+    def test_a_game_that_ends_brings_the_selector_back(self) -> None:
+        """The game's boot comes back with CTX_TITLE_BACK (it quit, crashed, or L1+R1+Options+touchpad):
+        the cache is read again and the game selector opens beside the ELF loader, then boots the next pick."""
+        self.cache()
+        r = self.boot("elfldr=pick:0:CUSA11456,pick:1:CUSA00900,quit", f"core={TITLE_BACK},0")
+        flags = [c[FLAGS] for c in r["ctxs"]]
+        self.assertEqual(len(flags), 4)                               # select, game, select, game
+        for i in (0, 2):
+            self.assertEqual(flags[i] & ELFLDR_SELECT, ELFLDR_SELECT)
+        for i in (1, 3):
+            self.assertEqual(flags[i], BOOT_FLAGS | CTX_FLAG_BUNDLE | RETURN)
+        self.assertEqual([s[2] for s in r["selects"] if s[3]], ["CUSA11456", "CUSA00900"])
+        self.assertIn("ghostldr: the game ended: back to the game selector", r["notes"])
+        self.assertIn("The game ended. | Back to the game selector.", "\n".join(r["tv"]))
+        self.assertEqual(self.cached(), self.full.read_bytes())
 
     def test_the_selector_stops_without_a_pick(self) -> None:
         """The core's call ends otherwise (here 0, as for quit): back to Luac0re, the cache kept."""
@@ -640,7 +657,7 @@ class BundleCache(FakeConsole):
                             in m for m in mine), mine)
         self.assertEqual(mine[-1], "ghostldr: the game runs; its log keeps coming here")
         b = r["ctxs"][1]
-        self.assertEqual((b[FLAGS], b[LOG_FD]), (BOOT_FLAGS | CTX_FLAG_BUNDLE, int(conn)))
+        self.assertEqual((b[FLAGS], b[LOG_FD]), (BOOT_FLAGS | CTX_FLAG_BUNDLE | RETURN, int(conn)))
         self.assert_ext_is(b, 1)                                      # this build's, from before
         self.assertNotIn(conn, r["closes"])
 
@@ -679,7 +696,7 @@ class BundleCache(FakeConsole):
         self.assertEqual(len(r["unmaps"]), 2)                         # the bundle's parts, cached and let go
         r = self.boot("elfldr=pick:0:CUSA00900")
         self.assertEqual(r["ctxs"][0][FLAGS] & ELFLDR_SELECT, ELFLDR_SELECT)
-        self.assertEqual(r["ctx"][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE)
+        self.assertEqual(r["ctx"][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE | RETURN)
         self.assert_ext_is(r["ctx"], 1)
 
     def test_ghostldr_elfldr_bin_at_the_elf_loader_keeps_a_cached_ghostldr_ext_bin(self) -> None:
@@ -690,7 +707,7 @@ class BundleCache(FakeConsole):
         self.assertEqual(self.cached(), self.full.read_bytes())
         self.assertIn("ghostldr: not cached: the cache's ghostldr-ext.bin has the ELF loader too", r["sent"])
         self.assertNotIn("applied on the next ghostldr boot", r["out"])
-        self.assertEqual(r["ctxs"][1][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE)
+        self.assertEqual(r["ctxs"][1][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE | RETURN)
         self.assert_ext_is(r["ctxs"][1], 1)
 
     def test_another_releases_bundle_at_the_elf_loader(self) -> None:

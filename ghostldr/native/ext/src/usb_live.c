@@ -417,6 +417,8 @@ HIDDEN void usb_live_start(void)
     K.pthread_attr_setstacksize(attr, 64 << 10);
     int rc = K.pthread_create(&tid, attr, watch, NULL, "ghostldr-usb");
     K.pthread_attr_destroy(attr);
+    if (rc == 0)
+        ext_thread_note(tid, "ghostldr-usb");
     int slot = usb_title_slot();
     logf("usb: watch %s%s", rc == 0 ? "started" : "not started",
          slot >= 0 ? ": the title runs from a USB drive; pulled out or in rest mode, it waits for it" : "");

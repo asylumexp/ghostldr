@@ -118,6 +118,86 @@ bool direct_is_ours(u64 addr)
     return false;
 }
 
+/* ---- back to the game selector (CTX_FLAG_RETURN, boot.c) ----
+ * The direct memory allocated when the title's boot begins (after the
+ * host's own went back), and once the title has stopped, everything
+ * allocated since given back: the title's, its modules', the extension's.
+ * Ranges are compared page by page, so allocations the query merges with
+ * older ones still separate. */
+#define MARK_MAX 1024
+static struct drange {
+    u64 s, e;
+} *g_mark;
+static u32 g_nmark;
+
+/* the next allocated range at or after *off: 0, or -1 when there is none */
+static int dmem_next(u64 *off, struct drange *r)
+{
+    static int (*dmq)(off_t, int, void *, size_t);
+    struct {
+        off_t start, end;
+        int type;
+    } q;
+    if (!dmq)
+        dmq = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelDirectMemoryQuery");
+    for (u64 top = K.direct_size(); dmq && *off < top;) {
+        memset(&q, 0, sizeof(q));
+        if (dmq((off_t)*off, 1 /* find next */, &q, sizeof(q)) == 0) {
+            r->s = (u64)q.start, r->e = *off = (u64)q.end;
+            return 0;
+        }
+        *off = ALIGN_DOWN(*off, 1UL << 20) + (1UL << 20); /* as host_dmem_census */
+    }
+    return -1;
+}
+
+void dmem_mark(void)
+{
+    u64 off = 0;
+    if (!g_mark && !(g_mark = page_alloc(MARK_MAX * sizeof(*g_mark))))
+        return;
+    for (g_nmark = 0; g_nmark < MARK_MAX && dmem_next(&off, &g_mark[g_nmark]) == 0;)
+        g_nmark++;
+    logf("back: %u direct memory ranges allocated as the title's boot begins", g_nmark);
+}
+
+u64 dmem_release_new(void)
+{
+    int (*rel)(off_t, size_t) = host_dlsym((u32)g_ctx->libkernel_handle, "sceKernelReleaseDirectMemory");
+    struct drange cur, go[256];
+    struct vq_info {
+        u64 start, end, offset;
+        s32 prot, type;
+        u8 flags;
+        char name[32];
+    } __attribute__((packed)) vq;
+    u64 off = 0, freed = 0;
+    u32 n = 0;
+    while (g_mark && n < ARRAY_SIZE(go) && dmem_next(&off, &cur) == 0)
+        for (u64 a = cur.s; a < cur.e && n < ARRAY_SIZE(go);) {
+            u64 b = cur.e;
+            bool kept = false;
+            for (u32 i = 0; i < g_nmark && !kept; i++)
+                if (g_mark[i].s <= a && a < g_mark[i].e)
+                    a = g_mark[i].e, kept = true;
+                else if (g_mark[i].s > a && g_mark[i].s < b)
+                    b = g_mark[i].s;
+            if (!kept)
+                go[n++] = (struct drange){a, b}, a = b;
+        }
+    /* this process's mappings of it, then the memory */
+    for (u64 va = 0x10000; K.virtual_query((void *)va, 1, &vq, sizeof(vq)) == 0 && vq.end > va; va = vq.end)
+        for (u32 i = 0; i < n; i++)
+            if ((vq.flags & 2) && vq.offset < go[i].e && vq.offset + (vq.end - vq.start) > go[i].s) {
+                K.munmap((void *)vq.start, vq.end - vq.start);
+                break;
+            }
+    for (u32 i = 0; i < n && rel; i++)
+        if (rel((off_t)go[i].s, go[i].e - go[i].s) == 0)
+            freed += go[i].e - go[i].s;
+    return freed;
+}
+
 void *page_alloc(size_t size)
 {
     void *p = direct_alloc(size, PROT_READ | PROT_WRITE, 0);

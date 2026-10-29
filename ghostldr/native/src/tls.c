@@ -392,12 +392,25 @@ COLD u64 tls_thunk(u64 fn)
     return stub ? stub : fn;
 }
 
-/* every thread the title created, for the snapshot watchdog (crash.c) */
-static struct {
+/* every thread the title created, for the snapshot watchdog (crash.c), and
+ * ghostldr's own made while it runs (thread_note): what the extension stops
+ * when the title ends back at the game selector (ext/src/title_back.c).
+ * page_alloc'd: keeps the core image small. */
+#define MAX_THREADS 1024
+static struct thread_ent {
     u64 tid;
     const char *name;
-} g_title_threads[192];
+} *g_title_threads;
 static volatile u32 g_nthreads;
+
+void thread_note(u64 tid, const char *name)
+{
+    if (!g_title_threads && !(g_title_threads = page_alloc(MAX_THREADS * sizeof(*g_title_threads))))
+        return;
+    u32 i = __atomic_fetch_add(&g_nthreads, 1, __ATOMIC_SEQ_CST);
+    if (i < MAX_THREADS)
+        g_title_threads[i] = (struct thread_ent){tid, name};
+}
 
 /* A title thread through real, a host creation function with
  * scePthreadCreate's arguments (POSIX pthread_create ignores the name):
@@ -419,11 +432,7 @@ COLD static int thread_start(struct module *owner, void *real, void *thr, const 
         logf("thread create %s failed %x", name ? name : "?", rc);
         return rc;
     }
-    u32 i = __atomic_fetch_add(&g_nthreads, 1, __ATOMIC_SEQ_CST);
-    if (i < ARRAY_SIZE(g_title_threads)) {
-        g_title_threads[i].tid = *(u64 *)thr;
-        g_title_threads[i].name = arena_strdup(name ? name : "?");
-    }
+    thread_note(*(u64 *)thr, arena_strdup(name ? name : "?"));
     return rc;
 }
 
@@ -446,7 +455,7 @@ int ghost_thread_create(void *thr, const void *attr, void *(*fn)(void *), void *
 
 u32 ghost_thread_list(u64 *tids, const char **names, u32 max)
 {
-    u32 n = MIN_U32(g_nthreads, (u32)ARRAY_SIZE(g_title_threads));
+    u32 n = MIN_U32(g_title_threads ? g_nthreads : 0, MAX_THREADS);
     n = MIN_U32(n, max);
     for (u32 i = 0; i < n; i++)
         tids[i] = g_title_threads[i].tid, names[i] = g_title_threads[i].name;

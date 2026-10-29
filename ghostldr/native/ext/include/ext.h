@@ -40,6 +40,13 @@ extern const struct ghost_api *G HIDDEN;
 #define g_modules (*G->modules)
 #define g_main_mod (*G->main_mod)
 #define g_reported_dmem (*G->reported_dmem)
+/* one of ghostldr's own threads, for the core's list (back to the game
+ * selector stops them, title_back.c); a test's api may have none */
+static inline void ext_thread_note(u64 tid, const char *name)
+{
+    if (G->thread_note)
+        G->thread_note(tid, name);
+}
 
 /* core services */
 #define logf G->logf

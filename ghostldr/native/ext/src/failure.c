@@ -51,6 +51,9 @@ u32 usb_live_gen(void) HIDDEN __attribute__((weak));
 /* ---- the messages: "headline|what happened (%s: the detail)|what to do" ---- */
 #define AGAIN "Close SWRR, start it again and send ghostldr.lua again."
 #define CLOSE "close SWRR from the PS button's menu"
+/* CTX_FLAG_RETURN: after a crash or a quit, the game selector comes back (title_back.c) */
+#define BACK "Back to the game selector: press Cross, or wait a few seconds."
+#define BACK_TICKS 24 /* 6 s of the page */
 static const char *const k_msg[FAIL_COUNT] = {
     [FAIL_BOOT] = "The game didn't start.|Something went wrong while ghostldr was starting it.|" AGAIN
                   " If it happens again, the log says why.",
@@ -101,10 +104,19 @@ static const char *const k_msg[FAIL_COUNT] = {
                         "If the screen stays black, " CLOSE ".",
 };
 
+static bool back_mode(u32 kind)
+{
+    return (g_ctx->flags & CTX_FLAG_RETURN) && kind >= FAIL_CRASH && kind <= FAIL_RETURNED;
+}
+
 /* part i (0 headline, 1 what, 2 what to do) of kind's message */
 static void part(u32 kind, u32 i, char *out, size_t size)
 {
     const char *m = k_msg[kind < FAIL_COUNT && k_msg[kind] ? kind : FAIL_BOOT];
+    if (i == 2 && back_mode(kind)) {
+        strlcpy(out, BACK, size);
+        return;
+    }
     for (; i; i--)
         while (*m && *m++ != '|')
             ;
@@ -374,23 +386,30 @@ static void show(u32 kind, s64 code)
     } else if (kind == FAIL_HANG || kind == FAIL_NO_PICTURE) {
         notify(head, todo);
     } else if (page(head, what, foot)) {
-        if (kind == FAIL_CRASH)
+        bool back = back_mode(kind);
+        if (kind == FAIL_CRASH && !back)
             for (;;) { /* until SWRR is closed */
                 K.usleep(250000);
                 page_keep();
             }
-        for (u32 t = 0; t < 60 && !(ov_buttons() & P_CROSS); t++) { /* the title quit: 15 s, or Cross */
+        /* the title quit: 15 s, or Cross; back to the game selector: 6 s */
+        for (u32 t = 0; t < (back ? BACK_TICKS : 60) && !(ov_buttons() & P_CROSS); t++) {
             K.usleep(250000);
             page_keep();
         }
     } else {
-        for (u32 t = 0; kind == FAIL_CRASH || t < 1; t++) { /* nothing drawn: notifications (a crash's, each 30 s) */
+        /* nothing drawn: notifications (a crash's, each 30 s, unless the game selector comes back) */
+        for (u32 t = 0; (kind == FAIL_CRASH && !back_mode(kind)) || t < 1; t++) {
             notify(head, todo);
             K.usleep(t ? 30000000 : 3000000);
         }
     }
     log_sync();
     page_free(what, 0x4000);
+    if (back_mode(kind)) { /* the boot thread stops the title (title_back.c); the caller parks */
+        __atomic_store_n(&D->back, 1, __ATOMIC_RELEASE);
+        return;
+    }
     if (kind == FAIL_EXIT || kind == FAIL_RETURNED) { /* SWRR ends, as the title asked: as an app closes */
         s32 (*exec)(const char *, const char *const *) = host_real_in("libSceSystemService", "sceSystemServiceLoadExec");
         s32 rc = exec ? exec("exit", NULL) : -1; /* (_exit is a crash to the system: CE-34878-0) */
@@ -459,6 +478,8 @@ HIDDEN void diag_title_starting(void)
     s32 (*create)(u64 *, const void *, void *(*)(void *), void *, const char *) = host_real("scePthreadCreate");
     u64 th = 0;
     s32 rc = create ? create(&th, NULL, monitor, NULL, "ghostldr-monitor") : -1;
+    if (rc == 0)
+        ext_thread_note(th, "ghostldr-monitor");
     logf("failure: monitor thread %x", rc);
 }
 

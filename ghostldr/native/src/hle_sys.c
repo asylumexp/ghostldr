@@ -341,10 +341,7 @@ TRACE(sceSaveDataDialogGetResult, "libSceSaveDataDialog", 4)
 TRACE(sceMsgDialogOpen, "libSceMsgDialog", 4)
 TRACE(sceMsgDialogUpdateStatus, "libSceMsgDialog", 4)
 TRACE(sceMsgDialogGetResult, "libSceMsgDialog", 4)
-TRACE(sceGnmMapComputeQueue, "libSceGnmDriver", 8)
-TRACE(sceGnmMapComputeQueueWithPriority, "libSceGnmDriver", 8)
 TRACE(sceGnmDingDong, "libSceGnmDriver", 4)
-TRACE(sceGnmUnmapComputeQueue, "libSceGnmDriver", 4)
 TRACE(sceGnmAreSubmitsAllowed, "libSceGnmDriver", 2)
 TRACE(sceGnmCreateWorkloadStream, "libSceGnmDriver", 4)
 TRACE(sceGnmBeginWorkload, "libSceGnmDriver", 3)
@@ -714,10 +711,7 @@ static const struct hle_ent g_sys[] = {
     E("libSceMsgDialog", sceMsgDialogOpen),
     E("libSceMsgDialog", sceMsgDialogUpdateStatus),
     E("libSceMsgDialog", sceMsgDialogGetResult),
-    E("libSceGnmDriver", sceGnmMapComputeQueue),
-    E("libSceGnmDriver", sceGnmMapComputeQueueWithPriority),
     E("libSceGnmDriver", sceGnmDingDong),
-    E("libSceGnmDriver", sceGnmUnmapComputeQueue),
     E("libSceGnmDriver", sceGnmAreSubmitsAllowed),
     E("libSceGnmDriver", sceGnmCreateWorkloadStream),
     E("libSceGnmDriver", sceGnmBeginWorkload),

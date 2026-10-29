@@ -145,6 +145,13 @@ static s32 hle_sceSystemServiceLaunchApp(const char *title, const char *const *a
 
 static s32 hle_sceSystemServiceLoadExec(const char *path, const char *const *argv)
 {
+    struct ghost_diag *D = GHOST_DIAG(G);
+    if ((g_ctx->flags & CTX_FLAG_RETURN) && D && D->show) { /* the title ends: back to the game selector */
+        logf("sceSystemServiceLoadExec(%.128s): the title ends, back to the game selector", path ? path : "?");
+        D->show(FAIL_EXIT, 0);
+        for (;;) /* until the boot thread stops it (title_back.c) */
+            K.usleep(1000000);
+    }
     logf("sceSystemServiceLoadExec(%.128s) refused: it would replace SWRR", path ? path : "?");
     return SS_REJECTED;
 }

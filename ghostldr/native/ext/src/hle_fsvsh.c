@@ -981,6 +981,7 @@ void fsvsh_loaded(void)
         __atomic_store_n(&g_refresh, 0, __ATOMIC_RELEASE);
         return;
     }
+    ext_thread_note(th, "ghostldr_refresh");
     if (detach)
         detach(th);
     logf("fsvsh: a save tool: asking the save service about other titles' saves in the background");
