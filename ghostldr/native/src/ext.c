@@ -573,6 +573,12 @@ void ext_unplace(void)
     if (!ftp_gone())
         return;
     ext_gone();
+    /* Diagnostic build: early extension code calls host_real with literals
+     * in this image.  Record and purge any cached pointers before its JIT
+     * mapping disappears. */
+    void host_real_diag_ext_unplace(u64 lo, u64 hi);
+    if (g_base && g_hdr)
+        host_real_diag_ext_unplace(g_base, g_base + g_hdr->image_memsz);
     if (g_in_jit)
         jit_block_destroy(&g_jb);
     logf("ext: code unplaced%s; placed again for the title", g_in_jit ? " (its JIT block released)" : "");

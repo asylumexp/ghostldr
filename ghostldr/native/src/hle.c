@@ -483,6 +483,30 @@ static struct real_ent g_real[64];
 static u32 g_nreal;
 static volatile int g_real_lock;
 
+/* Diagnostic for the early extension's temporary JIT placement.  host_real
+ * caches the caller's name pointer, so an extension string literal in that
+ * placement would otherwise survive after ext_unplace destroys the mapping.
+ * Log and remove every such entry while the string is still readable. */
+void host_real_diag_ext_unplace(u64 lo, u64 hi)
+{
+    u32 out = 0, dropped = 0;
+    spin_lock(&g_real_lock);
+    for (u32 i = 0; i < g_nreal; i++) {
+        u64 p = (u64)g_real[i].name;
+        if (p >= lo && p < hi) {
+            logf("DIAG host_real: dropping cache[%u] name %p '%s' fn %p before extension unmap %lx-%lx", i,
+                 g_real[i].name, g_real[i].name, g_real[i].fn, lo, hi);
+            dropped++;
+        } else {
+            g_real[out++] = g_real[i];
+        }
+    }
+    g_nreal = out;
+    spin_unlock(&g_real_lock);
+    logf("DIAG host_real: extension unmap invalidated %u cached name pointer(s); %u cache entries remain", dropped,
+         out);
+}
+
 void *host_real(const char *name)
 {
     for (u32 i = 0; i < g_nreal; i++)
