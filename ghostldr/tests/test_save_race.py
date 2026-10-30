@@ -354,8 +354,9 @@ class SaveToolWrites(SaveRaceBase):
 
 @unittest.skipUnless(x86_64_cc(), "no way to build and run x86-64 code here")
 class SaveScan(SaveRaceBase):
-    """The game selector's save scan for a save tool (hle_fsvsh.c save_prescan): candidates from the title's /data
-    and its bundled zip, one question per title, progress, the per-user cache in /data and how long it holds."""
+    """The game selector's save scan for a save tool (hle_fsvsh.c save_prescan): candidates from the title's /data,
+    the exploit titles but the host's own, save folders on USB and the bundled zip, one question per title, progress,
+    the per-user cache in /data and how long it holds."""
 
     SAVES = "CUSA00001=2,CUSA00003=1"
     NOW = 1_800_000_000
@@ -373,6 +374,10 @@ class SaveScan(SaveRaceBase):
             f.writestr("data/CUSA00004.savepatch", b"; cheats")
             f.writestr("data/CUSA00004.txt", b"no title")
             f.writestr("misc/CUSA0000X.keystone", b"not a title ID")
+        usb = self.root / "mnt/usb0/PS4"
+        for d in ("APOLLO/1a2b3c4d_CUSA00006_SLUS-20001/sce_sys", "APOLLO/CUSA0000Y_not_a_title",
+                  "SAVEDATA/8877665544332211/CUSA00007", "SAVEDATA/8877665544332211/CUSA03492"):
+            (usb / d).mkdir(parents=True)
 
     def scan(self, user: str = "10000001", stop: int = 0, now: int = NOW) -> tuple[dict, list[str], list[str]]:
         out = subprocess.run([str(self.exe), str(self.root), "ps5", self.SAVES, user, str(stop), "-", "-", "prescan"],
@@ -389,11 +394,14 @@ class SaveScan(SaveRaceBase):
 
     def test_every_candidate_is_asked_once_with_progress(self) -> None:
         r, asked, progress = self.scan()
-        self.assertEqual(sorted(asked), [f"CUSA0000{i}" for i in range(1, 6)])
-        self.assertEqual(progress, [f"progress {i}/5" for i in range(6)])     # the total first, then each title
+        # Jak X (an exploit title, not the host) and the USB save folders' titles; never SWRR's (the host's)
+        self.assertEqual(sorted(asked), [f"CUSA0000{i}" for i in range(1, 8)] + ["CUSA07992"])
+        self.assertEqual(progress, [f"progress {i}/8" for i in range(9)])     # the total first, then each title
         self.assertEqual(r["with"], "2")
-        self.assertEqual(self.cache(), sorted(f"10000001 CUSA0000{i} {h} {self.NOW}"
-                                              for i, h in ((1, 2), (2, 0), (3, 1), (4, 0), (5, 0))))
+        self.assertEqual(self.cache(), sorted(f"10000001 {t} {h} {self.NOW}"
+                                              for t, h in (("CUSA00001", 2), ("CUSA00002", 0), ("CUSA00003", 1),
+                                                           ("CUSA00004", 0), ("CUSA00005", 0), ("CUSA00006", 0),
+                                                           ("CUSA00007", 0), ("CUSA07992", 0))))
 
     def test_a_cached_scan_asks_nothing_and_shows_no_progress(self) -> None:
         self.scan()
@@ -403,24 +411,25 @@ class SaveScan(SaveRaceBase):
     def test_each_user_has_its_own_answers(self) -> None:
         self.scan()
         r, asked, _ = self.scan(user="10000002")
-        self.assertEqual(len(asked), 5)
-        self.assertEqual(len(self.cache()), 10)
+        self.assertEqual(len(asked), 8)
+        self.assertEqual(len(self.cache()), 16)
         r, asked, _ = self.scan(user="10000001")
         self.assertEqual(asked, [])
 
     def test_a_stopped_scan_keeps_what_it_found(self) -> None:
         r, asked, progress = self.scan(stop=2)
-        self.assertEqual((len(asked), progress[-1]), (2, "progress 2/5"))
+        self.assertEqual((len(asked), progress[-1]), (2, "progress 2/8"))
         self.assertEqual(len(self.cache()), 2)
         r, asked, progress = self.scan()
-        self.assertEqual((len(asked), progress[0], r["with"]), (3, "progress 0/3", "2"))
+        self.assertEqual((len(asked), progress[0], r["with"]), (6, "progress 0/6", "2"))
 
     def test_titles_without_saves_are_asked_again_after_a_week(self) -> None:
         self.scan()
         _, asked, _ = self.scan(now=self.NOW + 6 * 86400)
         self.assertEqual(asked, [])
         _, asked, _ = self.scan(now=self.NOW + 8 * 86400)
-        self.assertEqual(sorted(asked), ["CUSA00002", "CUSA00004", "CUSA00005"])   # not the two with saves
+        self.assertEqual(sorted(asked), ["CUSA00002", "CUSA00004", "CUSA00005", "CUSA00006", "CUSA00007",
+                                         "CUSA07992"])   # not the two with saves
 
 
 if __name__ == "__main__":

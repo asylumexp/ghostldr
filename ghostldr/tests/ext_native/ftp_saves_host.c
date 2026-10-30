@@ -170,6 +170,7 @@ void ftps_cmd(const char *op, const char *arg)
         K.close = (void *)os_real("sceKernelClose");
         K.stat = (void *)os_real("sceKernelStat");
         K.write = (void *)os_real("sceKernelWrite");
+        K.pread = (void *)os_real("sceKernelPread");
     }
     /* ftp_sys.c sends a path here only when ftps_owns says it is /saves's */
     if (arg[0] == '/' && strcmp(op, "owns") != 0 && !ftps_owns(arg)) {

@@ -159,6 +159,12 @@ static int64_t k_read(int fd, void *b, uint64_t n)
     return r < 0 ? SCE(errno) : r;
 }
 
+static int64_t k_pread(int fd, void *b, uint64_t n, int64_t off)
+{
+    int64_t r = pread(fd, b, n, off);
+    return r < 0 ? SCE(errno) : r;
+}
+
 static int64_t k_write(int fd, const void *b, uint64_t n)
 {
     int64_t r = write(fd, b, n);
@@ -536,6 +542,7 @@ static const struct {
     {"sceKernelRead", (void *)k_read},
     {"sceKernelStat", (void *)k_stat},
     {"sceKernelWrite", (void *)k_write},
+    {"sceKernelPread", (void *)k_pread},
     {"sceKernelMkdir", (void *)k_mkdir},
     {"sceKernelRmdir", (void *)k_rmdir},
     {"sceKernelUnlink", (void *)k_unlink},

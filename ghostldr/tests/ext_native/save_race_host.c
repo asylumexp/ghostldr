@@ -164,6 +164,8 @@ s32 savedata_foreign_search(s32 user, const char *tid, char (*dirs)[32], struct 
 {
     if (!g_saves)
         return (s32)0x809F0008;
+    if (!savedata_is_foreign(tid)) /* the host's own: refused unasked, as hle_savedata.c does */
+        return (s32)0x809F0000;
     hlog("search %08x %s", (u32)user, tid);
     u32 n = 0;
     const char *at = strstr(g_saves, tid);

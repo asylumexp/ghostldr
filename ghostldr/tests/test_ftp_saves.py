@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -33,6 +34,19 @@ FP = KEYSTONE[0x20:0x40].hex()
 
 
 @unittest.skipUnless(x86_64_cc(), "no way to build and run x86-64 code here")
+def catalog(title: str, entries: list[tuple[str, int, int]]) -> bytes:
+    """hle_savedata.c's catalog.bin: (dirName, container number, flags) per save"""
+    head = b"GSDC" + struct.pack("<III", 1, len(entries), 1) + title.encode().ljust(16, b"\0") + bytes(32)
+    body = b""
+    for name, cid, flags in entries:
+        e = bytearray(0x600)
+        e[0:len(name)] = name.encode()
+        struct.pack_into("<II", e, 0x20, flags, cid)
+        struct.pack_into("<q", e, 0x40, 1700000000 + cid)
+        body += bytes(e)
+    return head + body
+
+
 class FtpSaves(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -84,6 +98,11 @@ class FtpSaves(unittest.TestCase):
         self.put(f"saves/{ALICE}/CUSA00001/SAVE0/data.bin", b"nokey")
         self.put("fp/CUSA00001", ("ab" * 32).encode())
         self.put("ghostldr_usb/PS4/SAVEDATA/0123456789abcdef/CUSA00001/sdimg_SAVE0", b"")
+        # Bloodborne run under ghostldr (prefix G00900): its catalogue in G00900SAVE, its saves in G00900D<nnn>SAVE
+        self.put(f"saves/{ALICE}/{HOST}/G00900SAVE/catalog.bin",
+                 catalog("CUSA00900", [("SAVEDATA00", 1, 1), ("SAVEDATA01", 2, 1), ("GONE", 3, 0)]))
+        self.put(f"saves/{ALICE}/{HOST}/G00900D001SAVE/userdata0000", b"hunter")
+        self.put(f"saves/{ALICE}/{HOST}/G00900D002SAVE/userdata0001", b"second")
         # a game nothing names
         self.put(f"saves/{ALICE}/CUSA00009/HIDDEN/data.bin", b"hidden")
         self.put("fp/CUSA00009", FP.encode())
@@ -112,6 +131,38 @@ class FtpSaves(unittest.TestCase):
                 res[m.group(1)] = m.group(2)
         return res, lines
 
+    def test_games_run_under_ghostldr_show_their_saves_by_their_own_names(self) -> None:
+        r, lines = self.run_script("ls /saves/Alice", "ls /saves/Alice/CUSA00900",
+                                   "stat /saves/Alice/CUSA00900/SAVEDATA00",
+                                   "cat /saves/Alice/CUSA00900/SAVEDATA00/userdata0000",
+                                   "cat /saves/Alice/CUSA00900/SAVEDATA01/userdata0001",
+                                   "put /saves/Alice/CUSA00900/SAVEDATA00/userdata0000 x",
+                                   "ls /saves/Bob")
+        self.assertIn("CUSA00900", r["ls /saves/Alice"].split())
+        self.assertEqual(r["ls /saves/Alice/CUSA00900"].split(), ["SAVEDATA00", "SAVEDATA01"])  # not the deleted one
+        self.assertTrue(r["stat /saves/Alice/CUSA00900/SAVEDATA00"].startswith("dir 0 mode 555 mtime 1700000001"))
+        self.assertEqual(r["cat /saves/Alice/CUSA00900/SAVEDATA00/userdata0000"], "hunter")
+        self.assertEqual(r["cat /saves/Alice/CUSA00900/SAVEDATA01/userdata0001"], "second")
+        self.assertEqual(r["put /saves/Alice/CUSA00900/SAVEDATA00/userdata0000"], "error 30")
+        self.assertNotIn("CUSA00900", r["ls /saves/Bob"].split())  # Alice's containers
+        self.assertTrue(any("2 saves of 1 games run under ghostldr" in ln for ln in lines), "\n".join(lines))
+
+    def test_a_ghostldr_save_named_like_the_consoles_own(self) -> None:
+        self.put(f"saves/{ALICE}/CUSA00900/SAVEDATA00/native.bin", b"native")
+        self.put("fp/CUSA00900", FP.encode())
+        self.put("ghostldr_usb/ghostldr/keystones/CUSA00900.keystone", KEYSTONE)
+        r, _ = self.run_script("ls /saves/Alice/CUSA00900", "cat /saves/Alice/CUSA00900/SAVEDATA00/native.bin",
+                               "cat /saves/Alice/CUSA00900/SAVEDATA00~ghostldr/userdata0000")
+        self.assertEqual(r["ls /saves/Alice/CUSA00900"].split(), ["SAVEDATA00", "SAVEDATA00~ghostldr", "SAVEDATA01"])
+        self.assertEqual(r["cat /saves/Alice/CUSA00900/SAVEDATA00/native.bin"], "native")
+        self.assertEqual(r["cat /saves/Alice/CUSA00900/SAVEDATA00~ghostldr/userdata0000"], "hunter")
+
+    def test_the_running_games_ghostldr_saves_are_refused(self) -> None:
+        r, _ = self.run_script("title G00900", "ls /saves/Alice", "cat /saves/Alice/CUSA00900/SAVEDATA00/userdata0000")
+        # its catalogue isn't read while it runs: not listed, and a path to it finds nothing
+        self.assertNotIn("CUSA00900", r["ls /saves/Alice"].split())
+        self.assertEqual(r["cat /saves/Alice/CUSA00900/SAVEDATA00/userdata0000"], "error 2")
+
     def test_off_there_is_no_saves_folder(self) -> None:
         r, _ = self.run_script("owns /saves", flag=False)
         self.assertEqual(r["owns /saves"], "0 root -")
@@ -121,14 +172,18 @@ class FtpSaves(unittest.TestCase):
                                    f"ls /saves/Alice/{HOST}", "stat /saves/Alice/CUSA07992/SCUS-97429")
         self.assertEqual(r["owns /saves"], "1 root saves")
         self.assertEqual(r["ls /saves"].split(), ["Alice", "Bob"])
-        self.assertEqual(sorted(r["ls /saves/Alice"].split()), sorted([HOST, "CUSA03492", "CUSA07992", "CUSA00001"]))
+        self.assertEqual(sorted(r["ls /saves/Alice"].split()),
+                         sorted([HOST, "CUSA03492", "CUSA07992", "CUSA00001", "CUSA00900"]))
         self.assertEqual(r["ls /saves/Alice/CUSA07992"].split(), ["GHOSTSAVE", "SCUS-97429"])  # no install data
         self.assertEqual(r["ls /saves/Bob"].split(), [HOST])
         # ghostldr's install data and settings are no saves
-        self.assertEqual(r[f"ls /saves/Alice/{HOST}"].split(), ["GHOSTD001SAVE", "GHOSTSAVE", "SLUS-20268"])
+        self.assertEqual(r[f"ls /saves/Alice/{HOST}"].split(),
+                         ["G00900D001SAVE", "G00900D002SAVE", "G00900SAVE", "GHOSTD001SAVE", "GHOSTSAVE", "SLUS-20268"])
         self.assertTrue(r["stat /saves/Alice/CUSA07992/SCUS-97429"].startswith("dir 0 mode 555"))
-        # listing a title or stat-ing its saves mounts nothing; nothing named CUSA00009
-        self.assertIn("peak 0", lines)
+        # listing a title or stat-ing its saves mounts no save (the scan reads a ghostldr game's catalogue, one at a
+        # time); nothing named CUSA00009
+        self.assertFalse(any("read-only ->" in ln for ln in lines), "\n".join(lines))
+        self.assertIn("peak 1", lines)
         self.assertFalse(any("search" in ln and "CUSA00009" in ln for ln in lines))
 
     def test_reading_the_hosts_and_another_titles_save(self) -> None:
@@ -148,7 +203,7 @@ class FtpSaves(unittest.TestCase):
         self.assertEqual(r["cat /saves/Alice/CUSA00001/SAVE0/data.bin"], "nokey")
         self.assertTrue(r["stat /saves/Alice/CUSA00001/SAVE0/data.bin"].startswith("file 5 mode 555"))
         self.assertEqual(len([ln for ln in lines if ln.startswith("race_copy")]), 1, "\n".join(lines))
-        self.assertIn("peak 0", lines)  # nothing stays mounted for it
+        self.assertFalse(any("read-only ->" in ln for ln in lines))  # nothing mounted for it
 
     def test_another_accounts_save_reads_through_a_race_copy(self) -> None:
         self.put(f"saves/{ALICE}/CUSA07992/SCUS-97429/.other_account", b"")

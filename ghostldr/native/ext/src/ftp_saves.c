@@ -14,7 +14,12 @@
  * What a game may do decides what shows (hle_savedata.c, "other titles'
  * saves"):
  *   - SWRR's own saves (Luac0re's, ghostldr's titles' <prefix>...SAVE
- *     containers) are listed and mounted as SWRR's.  ghostldr's other
+ *     containers) are listed and mounted as SWRR's.
+ *   - The saves of the games ghostldr runs are listed under those games'
+ *     title IDs too, by the names the games gave them: each game's
+ *     catalogue (<prefix>SAVE/catalog.bin, hle_savedata.c) names its saves
+ *     and the <prefix>D<nnn>SAVE container of SWRR's each one is in.  Read
+ *     only.  ghostldr's other
  *     containers (a title's install data and index, GLDRCONF, GLDRCACHE,
  *     ...) are no saves and are left out: the core mounts them as a game is
  *     picked, and one held here would stop it.  While a title runs, its own
@@ -193,10 +198,23 @@ struct listing {
     u32 n;
     struct {
         char dir[33];
+        char cont[24]; /* a ghostldr game's save: SWRR's container it is in; "" the console's own save */
         long mtime;
     } e[DIRS];
 };
 static struct listing *g_cache[CACHE];
+
+/* the saves of the games ghostldr runs, from their catalogues (scan_user) */
+#define GSAVES 512
+struct gsave {
+    s32 user;
+    char tid[10];
+    char dir[33];
+    char cont[24];
+    long mtime;
+};
+static struct gsave *g_gs;
+static u32 g_ngs;
 
 static char g_host[16];      /* SWRR's title ID */
 static char g_busy_prefix[16]; /* the running title's containers' prefix: "" none */
@@ -304,7 +322,9 @@ static bool alloc_tables(void)
         g_hint = page_alloc(sizeof(*g_hint) * HINTS);
     if (!g_fp)
         g_fp = page_alloc(sizeof(*g_fp) * FPS);
-    return g_title && g_hint && g_fp;
+    if (!g_gs)
+        g_gs = page_alloc(sizeof(*g_gs) * GSAVES);
+    return g_title && g_hint && g_fp && g_gs;
 }
 
 /* lock held */
@@ -385,13 +405,119 @@ static s32 list_title(s32 user, const char *tid, bool own, struct listing *l)
             continue;
         if ((own || exploit_title(tid)) && d[0] == 'G' && (len < 4 || strcmp(d + len - 4, "SAVE") != 0))
             continue; /* ghostldr's install data, index, settings, cache: no saves */
+        l->e[l->n].cont[0] = 0;
         l->e[l->n++].mtime = params ? params[i].mtime : 0;
     }
     if (dirs)
         page_free(dirs, 32 * DIRS);
     if (params)
         page_free(params, sizeof(struct sd_param) * DIRS);
-    return rc;
+    /* the game's saves made under ghostldr; one named like a save of the console's own is set apart */
+    u32 had = l->n;
+    lock();
+    for (u32 i = 0; !own && i < g_ngs && l->n < DIRS; i++) {
+        const struct gsave *g = &g_gs[i];
+        if (g->user != user || memcmp(g->tid, tid, 9) != 0)
+            continue;
+        bool clash = false;
+        for (u32 k = 0; k < had && !clash; k++)
+            clash = strcmp(l->e[k].dir, g->dir) == 0;
+        if (clash)
+            fmt(l->e[l->n].dir, sizeof(l->e[l->n].dir), "%.23s~ghostldr", g->dir);
+        else
+            strlcpy(l->e[l->n].dir, g->dir, sizeof(l->e[l->n].dir));
+        strlcpy(l->e[l->n].cont, g->cont, sizeof(l->e[l->n].cont));
+        l->e[l->n++].mtime = g->mtime;
+    }
+    unlock();
+    return l->n > had ? 0 : rc;
+}
+
+static bool digits(const char *s, u32 n)
+{
+    for (u32 i = 0; i < n; i++)
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+    return true;
+}
+
+/* The games ghostldr ran for user and kept saves of: each <prefix>SAVE among SWRR's saves (own) is mounted
+ * read-only for a moment and its catalogue read (hle_savedata.c: a 0x40-byte header, "GSDC", version 1, the
+ * count at 8 and the title ID at 0x10; 0x600-byte entries, the dirName at 0, flags at 0x20 (1: it exists), the
+ * container number at 0x24 and the time at 0x40).  Their title IDs become hints, so the scan lists them. */
+static void catalogs(s32 user, const struct listing *own)
+{
+    u32 games = 0, saves = 0;
+    lock();
+    for (u32 i = 0; i < g_ngs;) /* this user's are read again */
+        if (g_gs[i].user == user)
+            g_gs[i] = g_gs[--g_ngs];
+        else
+            i++;
+    unlock();
+    for (u32 i = 0; i < own->n && !g_stop; i++) {
+        const char *d = own->e[i].dir;
+        size_t len = strlen(d), pl = len - 4;
+        if (len <= 4 || d[0] != 'G' || strcmp(d + pl, "SAVE") != 0 || pl + 1 > 16)
+            continue;
+        if ((pl > 4 && d[pl - 4] == 'D' && digits(d + pl - 3, 3)) || (pl > 3 && d[pl - 3] == 'M' && digits(d + pl - 2, 2)))
+            continue; /* a save's container, save data memory: not the game's own <prefix>SAVE */
+        char prefix[16];
+        memcpy(prefix, d, pl), prefix[pl] = 0;
+        if (g_title_runs && g_busy_prefix[0] && strcmp(prefix, g_busy_prefix) == 0)
+            continue; /* the running game's: mounted for it */
+        char mp[16], p[64];
+        if (gfs_slot_reserve() != 0)
+            break;
+        s32 rc = gfs_mount_user(user, d, MODE_RDONLY, 0, mp, NULL);
+        if (rc != 0) {
+            gfs_slot_release();
+            logf("ftp: saves: %s of user %08x (a game's catalogue) -> %x", d, (u32)user, (u32)rc);
+            continue;
+        }
+        fmt(p, sizeof(p), "%s/catalog.bin", mp);
+        int fd = K.open(p, 0, 0);
+        u8 h[0x40], e[0x48];
+        char tid[10];
+        u32 count = 0;
+        if (fd >= 0 && K.pread(fd, h, sizeof(h), 0) == sizeof(h) && memcmp(h, "GSDC", 4) == 0 && *(u32 *)(h + 4) == 1 &&
+            strlen((const char *)h + 0x10) == 9 && title_like((const char *)h + 0x10)) {
+            count = *(u32 *)(h + 8);
+            memcpy(tid, h + 0x10, 9), tid[9] = 0;
+        }
+        u32 n0 = saves;
+        for (u32 k = 0; fd >= 0 && k < count && k < 256; k++) {
+            if (K.pread(fd, e, sizeof(e), 0x40 + (s64)k * 0x600) != sizeof(e))
+                break;
+            e[31] = 0;
+            u32 flags = *(u32 *)(e + 0x20), id = *(u32 *)(e + 0x24);
+            if (!(flags & 1) || !e[0] || strncmp((const char *)e, "sce_", 4) == 0 || strrchr_c((const char *)e, '/') ||
+                id > 999)
+                continue;
+            lock();
+            if (g_ngs < GSAVES) {
+                struct gsave *g = &g_gs[g_ngs++];
+                g->user = user, g->mtime = *(s64 *)(e + 0x40);
+                memcpy(g->tid, tid, 10);
+                strlcpy(g->dir, (const char *)e, sizeof(g->dir));
+                fmt(g->cont, sizeof(g->cont), "%sD%03uSAVE", prefix, id);
+                saves++;
+            }
+            unlock();
+        }
+        if (fd >= 0)
+            K.close(fd);
+        R.umount(mp);
+        gfs_slot_release();
+        if (saves > n0) {
+            games++;
+            lock();
+            hint_add(user, tid);
+            unlock();
+        }
+    }
+    if (games)
+        logf("ftp: saves: user %08x: %u saves of %u games run under ghostldr", (u32)user, saves, games);
 }
 
 /* user's entry for tid with what a listing found (lock held) */
@@ -674,6 +800,7 @@ static void scan_user(u32 slot, s32 user)
         title_note(user, host_title(), true, l);
         unlock();
         with += l->n > 0;
+        catalogs(user, l);
     }
     for (u32 i = 0; !g_stop; i++) {
         char id[10];
@@ -969,7 +1096,7 @@ static int copy_find(const struct where *w)
 static bool view_rw(int k) { return k >= MOUNTS && g_c[k - MOUNTS].rw; }
 
 /* the save mounted read-only: the view, or -errno (lock held) */
-static int mount_save(const struct where *w, bool own, const char *fp)
+static int mount_save(const struct where *w, bool own, const char *fp, const char *cont)
 {
     s32 k = -1;
     for (u32 i = 0; i < MOUNTS && k < 0; i++)
@@ -987,7 +1114,7 @@ static int mount_save(const struct where *w, bool own, const char *fp)
     char mp[16];
     s32 rc;
     if (own) {
-        rc = gfs_mount_user(w->user, w->dir, MODE_RDONLY, 0, mp, NULL);
+        rc = gfs_mount_user(w->user, cont ? cont : w->dir, MODE_RDONLY, 0, mp, NULL);
     } else {
         char tid[16], dir[32];
         struct {
@@ -1083,10 +1210,21 @@ static int acquire(const struct where *w, bool write)
             continue;
         struct title *t = title_find(w->user, w->tid);
         bool found = false;
+        char cont[24] = "";
         for (u32 i = 0; l && i < l->n && !found; i++)
-            found = strcmp(l->e[i].dir, w->dir) == 0;
+            if ((found = strcmp(l->e[i].dir, w->dir) == 0))
+                strlcpy(cont, l->e[i].cont, sizeof(cont));
         if (!t || !found)
             return -FV_ENOENT;
+        if (cont[0]) { /* a ghostldr game's save, in a container of SWRR's */
+            if (write)
+                return -FV_EROFS;
+            if (g_title_runs && g_busy_prefix[0] && strncmp(cont, g_busy_prefix, strlen(g_busy_prefix)) == 0) {
+                logf("ftp: saves: %s/%s (%s) is the running game's: not while it runs", w->tid, w->dir, cont);
+                return -FV_EBUSY;
+            }
+            return mount_save(w, true, NULL, cont);
+        }
         if (t->own) {
             if (write)
                 return -FV_EROFS; /* SWRR's own: never written */
@@ -1094,7 +1232,7 @@ static int acquire(const struct where *w, bool write)
                 logf("ftp: saves: %s/%s is the running game's: not while it runs", w->tid, w->dir);
                 return -FV_EBUSY;
             }
-            return mount_save(w, true, NULL);
+            return mount_save(w, true, NULL, NULL);
         }
         const char *fp = fp_of(w->tid);
         if (write && swrr_title(w->tid))
@@ -1120,7 +1258,7 @@ static int acquire(const struct where *w, bool write)
         if (c >= 0 && g_c[c].state == C_FAILED && !g_c[c].rw) /* a race that failed: not again this session */
             return g_c[c].err;
         if (fp && (c < 0 || !g_c[c].rw)) {
-            int m = mount_save(w, false, fp);
+            int m = mount_save(w, false, fp, NULL);
             if (m != -FV_EACCES)
                 return m;
         }
@@ -1560,7 +1698,9 @@ HIDDEN int ftps_stop(void)
         page_free(g_hint, sizeof(*g_hint) * HINTS), g_hint = NULL;
     if (g_fp)
         page_free(g_fp, sizeof(*g_fp) * FPS), g_fp = NULL;
-    g_ntitle = g_nhint = g_nfp = g_nusers = 0;
+    if (g_gs)
+        page_free(g_gs, sizeof(*g_gs) * GSAVES), g_gs = NULL;
+    g_ntitle = g_nhint = g_nfp = g_nusers = g_ngs = 0;
     g_scanned = 0, g_hints_read = false, g_users_at = -1, g_title_runs = false, g_busy_prefix[0] = 0;
     memset(g_fds, 0, sizeof(g_fds));
     unlock();

@@ -20,9 +20,9 @@
  *     game creates gets the creator's keystone, so the real game would refuse
  *     it.
  *   - savedata.db reads as a SQLite file made from the real service's lists
- *     (DirNameSearch for every title a keystone or cheat file, or
- *     /data/ghostldr/titles.txt, names: the service answers only for exact
- *     title IDs), in the
+ *     (DirNameSearch for every title a keystone or cheat file,
+ *     /data/ghostldr/titles.txt, a save folder on USB or an exploit names:
+ *     the service answers only for exact title IDs), in the
  *     title's /temp0 directory; what the tool writes to it is thrown away at
  *     the next read.
  *     Without a keystone, or when the system refuses the save (another
@@ -866,11 +866,80 @@ static u32 mark(struct tlist *t, u8 *ask, u32 user, s64 older_than, bool with_sa
     return n;
 }
 
-/* the candidates: the persistent /data's, and a save tool's bundled lists */
+/* title IDs named by save folders on the USB drives: PS4/APOLLO/<user>_<TITLE>_<DIR> (decrypted saves a save
+ * tool exported) and PS4/SAVEDATA/<account>/<TITLE> (the system's copies): a game the user has saves of, though
+ * no keystone or cheat file names it */
+static void titles_on_usb(struct tlist *t)
+{
+    u8 *dents = page_alloc(8192);
+    u32 n0 = t->n;
+    for (u32 usb = 0; usb < 2 && dents; usb++) {
+        char dir[64], b[320];
+        fmt(dir, sizeof(dir), "/mnt/usb%u/PS4/APOLLO", usb);
+        int fd = vfs_open(title_path(dir, b, sizeof(b)), 0x20000 /* O_DIRECTORY */, 0);
+        for (int got; fd >= 0 && (got = vfs_getdents(fd, dents, 8192)) > 0;)
+            for (int off = 0; off + 8 <= got;) {
+                u16 reclen = *(u16 *)(dents + off + 4);
+                u8 type = dents[off + 6], nlen = dents[off + 7];
+                const char *name = (const char *)dents + off + 8;
+                if (!reclen)
+                    break;
+                off += reclen;
+                for (u32 k = 0; type == 4 && k + 10 <= nlen; k++)
+                    if (name[k] == '_' && title_like(name + k + 1, 9) && (k + 10 == nlen || name[k + 10] == '_')) {
+                        add_title(t, name + k + 1, false);
+                        break;
+                    }
+            }
+        if (fd >= 0)
+            vfs_close(fd);
+        fmt(dir, sizeof(dir), "/mnt/usb%u/PS4/SAVEDATA", usb);
+        fd = vfs_open(title_path(dir, b, sizeof(b)), 0x20000 /* O_DIRECTORY */, 0);
+        char accts[8][24];
+        u32 na = 0;
+        for (int got; fd >= 0 && (got = vfs_getdents(fd, dents, 8192)) > 0;)
+            for (int off = 0; off + 8 <= got;) {
+                u16 reclen = *(u16 *)(dents + off + 4);
+                u8 type = dents[off + 6], nlen = dents[off + 7];
+                if (!reclen)
+                    break;
+                if (type == 4 && nlen == 16 && na < ARRAY_SIZE(accts))
+                    memcpy(accts[na], dents + off + 8, 16), accts[na++][16] = 0;
+                off += reclen;
+            }
+        if (fd >= 0)
+            vfs_close(fd);
+        for (u32 a = 0; a < na; a++) {
+            char sub[96];
+            fmt(sub, sizeof(sub), "%s/%s", dir, accts[a]);
+            titles_in(t, sub, true, false);
+        }
+    }
+    for (u32 i = n0; i < t->n;) /* the host's own saves are never listed: not asked about */
+        if (!savedata_is_foreign(t->id[i])) {
+            t->n--;
+            memcpy(t->id[i], t->id[t->n], 10);
+            t->always[i] = t->always[t->n];
+        } else
+            i++;
+    if (dents)
+        page_free(dents, 8192);
+    if (t->n > n0)
+        logf("fsvsh: save folders on USB name %u more titles", t->n - n0);
+}
+
+/* the candidates: the persistent /data's, the exploit titles' (Jak X and
+ * SWRR: hle_savedata.c's host_kind, but for the host's own),
+ * save folders on USB and a save tool's bundled lists */
 static bool candidates(struct tlist *t, u32 user)
 {
+    static const char *const k_exploits[] = {"CUSA07992", "CUSA03474", "CUSA03492"};
     if (!collect(t, user))
         return false;
+    for (u32 i = 0; i < ARRAY_SIZE(k_exploits); i++)
+        if (savedata_is_foreign(k_exploits[i]))
+            add_title(t, k_exploits[i], false);
+    titles_on_usb(t);
     titles_in_zip(t, "/app0/assets/misc/appdata.zip"); /* Apollo */
     titles_in_zip(t, "/app0/appdata.zip");
     return true;
@@ -1038,7 +1107,7 @@ static bool make_db(s32 user, const char *out)
         ok = fd >= 0 && k_write(fd, db_buf, size) == (s64)size;
         if (fd >= 0)
             k_close(fd);
-        logf("fsvsh: savedata.db for user %08x: %u saves of %u titles (of %u titles with a keystone or cheat file; "
+        logf("fsvsh: savedata.db for user %08x: %u saves of %u titles (of %u candidate titles; "
              "%u asked in %ld s, the rest had none when last asked) -> %s",
              (u32)user, rows, titles_with, t.n, asked, now_s() - t0, ok ? out : "not written");
     }
