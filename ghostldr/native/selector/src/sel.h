@@ -140,6 +140,7 @@ struct sel_switch {
 #define CONF_LOG_USB 0      /* the switch for the log on the USB drive (rel-diag's CTX_FLAG_NO_USB_LOG) */
 #define CONF_SHARE_MEM 4    /* share learned memory plans (CTX_FLAG_SHARE_MEM) */
 #define CONF_COMMUNITY_MEM 5 /* use community memory plans (CTX_FLAG_NO_COMMUNITY_MEM when Off) */
+#define CONF_FTP_SAVES 6    /* the FTP server's /saves (CTX_FLAG_FTP_SAVES) */
 struct sel_info {
     struct sel_switch sw[SEL_MAX_SWITCHES];
     int nsw;

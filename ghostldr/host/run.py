@@ -28,9 +28,11 @@ installed ones' are.  ghostldr.py (the repository's top folder) wraps this
 for everyday use: ghostldr.py boot [GAME].
 
 While the title runs, the console serves FTP on TCP 1212 (--ftp-port; 0:
-none; docs/ftp.md): any FTP client, any user and password.  Clients start on
-the USB drive when one is plugged in, so titles can go onto it over the
-network while a game is running.
+none; docs/ftp.md): any FTP client, any user and password.  Clients start in
+"/", SWRR's sandbox, with every USB drive in it (/ghostldr_usb, /ghostldr_usb2,
+...), so titles can go onto a drive over the network while a game is
+running; --ftp-saves (or the Settings switch) adds /saves, every logged-in
+user's saves.
 
 run.py elfldr boots no title: the console serves an ELF loader on TCP 9021
 (--elfldr-port) until a client sends "quit" (docs/elfldr.md).  Send payloads
@@ -599,6 +601,7 @@ def boot_flags(args) -> int:
         | (16384 if args.diag else 0) | (65536 if args.no_auto_memory else 0) \
         | (131072 if args.auto_memory else 0) | (524288 if args.forget_memory else 0) \
         | (0x8000000 if args.share_memory else 0) | (0x10000000 if args.no_community_memory else 0) \
+        | (0x40000000 if args.ftp_saves else 0) \
         | (args.ftp_port << 48 if args.mode == "boot" else 0)
 
 
@@ -695,6 +698,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ftp-port", type=int, default=FTP_PORT,
                         help=f"the console's FTP server while the title runs (default {FTP_PORT}; 0: none; "
                              "docs/ftp.md)")
+    parser.add_argument("--ftp-saves", action="store_true",
+                        help="list every logged-in user's saves in the FTP server's /saves, as the "
+                             "Settings switch does (docs/ftp.md#saves)")
     parser.add_argument("--elfldr-port", type=int, default=ELFLDR_PORT,
                         help=f"elfldr: the console's TCP port for payloads (default {ELFLDR_PORT}; docs/elfldr.md)")
     parser.add_argument("--file", type=Path, help="raw Lua file for mode=lua")

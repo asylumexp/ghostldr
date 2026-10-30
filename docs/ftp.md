@@ -1,6 +1,6 @@
 # FTP server
 
-While a title runs, ghostldr serves FTP from inside SWRR on TCP 1212. It needs no jailbreak. The main use is the USB drive: copy titles onto it, or take files off it, over the network without unplugging it, even while a game is running from it.
+While the game selector shows and a title runs, ghostldr serves FTP from inside SWRR on TCP 1212. It needs no jailbreak. Clients see everything SWRR can reach: its sandbox, every USB drive and, with a switch in Settings, every logged-in user's saves. The main use is the USB drive: copy titles onto it, or take files off it, over the network without unplugging it, even while a game is running from it.
 
 ## Connecting
 
@@ -25,7 +25,7 @@ The server starts as the title's main thread is created, so it's up shortly afte
 ```
 ftp: listening socket buffers: send 2048 KiB (had 32), receive 2048 KiB (had 64)
 ftp: listening on TCP 1212 (10 clients at once, 128 KiB each)
-ftp 1: 192.168.1.123 connected; starting in /ghostldr_usb
+ftp 1: 192.168.1.123 connected; starting in /
 ftp 1: STOR /ghostldr_usb/ghostldr-ftp-test/d.bin: 67108864 bytes in 2466 ms (26575 KiB/s; the file took 497 ms)
 ```
 
@@ -33,11 +33,48 @@ ftp 1: STOR /ghostldr_usb/ghostldr-ftp-test/d.bin: 67108864 bytes in 2466 ms (26
 
 ## What you see
 
-Paths are SWRR's own. The USB drive is at `/ghostldr_usb`, and a client starts there when a drive is plugged in; a second drive is at `/ghostldr_usb2` (a third and fourth at `/ghostldr_usb3` and `4`). Without one, it starts in `/`, SWRR's sandbox: `app0`, `savedata0`, `temp0`, `dev` and a few system folders. A drive plugged in after the title started is mounted the next time a client logs in.
+A client starts in `/`, SWRR's sandbox, and paths are SWRR's own:
+
+| Path | What it is |
+|---|---|
+| `/ghostldr_usb` | the first USB drive, read-write |
+| `/ghostldr_usb2`, `3`, `4` | the second, third and fourth drive |
+| `/saves` | every logged-in user's saves, when **Saves in FTP** is on ([below](#saves)) |
+| `/app0`, `/savedata0`, `/temp0`, `/dev`, ... | SWRR's own folders and a few system ones |
+
+Every drive plugged in is mounted, up to four; one plugged in later is mounted the next time a client logs in. On a jailbroken console, what its tools put in SWRR's sandbox shows too (`/mnt/usb0`, `/data`).
 
 Leave SWRR's own folders alone. `/app0` is SWRR itself, and `/savedata0` can be SWRR's save data, which holds Luac0re.
 
-The drive is read-write, through the PS5's own exFAT (or FAT32) driver: upload, download, resume (REST), append, rename, delete, make and remove folders.
+The drives are read-write, through the PS5's own exFAT (or FAT32) driver: upload, download, resume (REST), append, rename, delete, make and remove folders.
+
+Before this, a client started on the first drive (`/ghostldr_usb`). Tools that name the drive in their address (`ghostldr.py copy`, `gfs_pack.py --usb ftp://PS5:1212/ghostldr_usb`, `usb_drive.py`) work as before.
+
+## Saves
+
+With **Settings > Advanced > Saves in FTP** on (`run.py boot --ftp-saves` from a computer), `/saves` holds the saves of every user logged in to the console:
+
+```
+/saves/<user>/<TITLE>/<save folder>/...
+/saves/Alice/CUSA03474/SLUS-20268/VMC0.card     (SWRR's own: Luac0re's memory card)
+/saves/Alice/CUSA07992/SCUS-97429/...           (Jak X's)
+```
+
+`<user>` is the user's name on the console (their user ID in hex when the name has characters other than letters, digits, `-`, `_` and `.`). The switch counts at once: the server reads it at each request, while the selector shows and in the game.
+
+Download a save with any client (`curl -O ftp://PS5:1212/saves/Alice/CUSA07992/SCUS-97429/...`, or a whole folder with FileZilla). What a stock console lets a game do decides what shows:
+
+- **SWRR's own saves** are listed and open: Luac0re's memory card, and the saves of the games ghostldr runs (`<prefix>SAVE`, `<prefix>D001SAVE`, ...; a save tool's `/data` is `<prefix>D000SAVE`). ghostldr's other containers are no saves and are left out: a game's install data and index (`GHOST000`, `GFSINDEX`, ...), `GLDRCONF`, `GLDRCACHE`; the console mounts those as a game is picked, and one held by the FTP server would stop it. While a game runs, its own saves answer `550 ... Busy`: a mount held by the FTP server would make the game's own fail.
+- **Another game's saves** are listed only for title IDs something names, because the system answers only for an exact title ID (about 0.4 s each): the other titles ghostldr runs from (SWRR's other region, Jak X), save folders on a USB drive (`PS4/APOLLO/...`, the system's copies in `PS4/SAVEDATA/<account>/<TITLE>`), and what a save tool run under ghostldr kept (its save scan's answers, `ghostldr/titles.txt` and keystones in its `/data`). A path straight to any title (`cd /saves/Alice/CUSA12345`) asks the system about it, and `mkdir /saves/Alice/CUSA12345` lists it in the user's folder for the rest of the session.
+- **Another game's saves are read and written the way a save tool under ghostldr does it** ([compatibility.md](compatibility.md), "Save tools"; [save-resign.md](save-resign.md)):
+  - **With that game's keystone** (in `PS4/APOLLO/<folder>/sce_sys/keystone` or `ghostldr/keystones/<TITLE>.keystone` on a drive, or one a save tool kept), the save is mounted read-only with the game's fingerprint, as a game may.
+  - **Without one, or when the system refuses the save** (another account's), it is read through a **race copy**: ShellCore binds the save into SWRR before it checks it, and files opened in that moment are copied to `/temp0/ghostldr/ftp/race/`. Each race copy leaves a mount point behind until SWRR closes, so there are six a session at most (the seventh save answers `550 ... Busy`), and a save is copied once, when a client first goes into it.
+  - **Writing** (upload, delete, rename, make a folder) needs the keystone. The first change makes a writable copy of the save (`/temp0/ghostldr/ftp/rw/`), which the client sees from then on; 3 seconds after the last change, with none of its files open, the copy is written into the save through a read-write mount the system binds and then refuses (`save_race_write`, the resign without a jailbreak). The save keeps its owner and keystone. **Close SWRR afterwards**: the system commits the save when SWRR closes (the log says so, and a banner in a running game). Before writing, the save's files are kept in `<copy>.before`. A save's `sce_sys` is the system's and is never written (`550 ... Permission denied`), and saves can't be made or removed, only what is in them. Another account's save, and one without a keystone, stay read-only.
+  - Native PS5 saves are out of reach.
+- **SWRR's own saves are never written**, nor the other region's SWRR saves (they hold the exploit): `550 ... Read-only file system`.
+- The other titles ghostldr runs from (SWRR's other region, Jak X) show their saves, not ghostldr's install data from when they ran it.
+
+Each save is mounted only while a client uses it (a listing, a download), at most three at once, and unmounted 10 seconds after its last use (SWRR's own after 1.5 seconds, so a game picked next finds its saves free): SWRR, ghostfs and the game share the console's 16 save mounts. Listing a game's folder mounts nothing. The first listing of `/saves` asks the system about every named title in the background, so a user's folder can take a few seconds to show the first time. Changes not yet written when the server stops (back to the game selector, Close ghostldr) are written then.
 
 ## Putting a title on the drive
 
@@ -71,11 +108,12 @@ Measured on a stock 13.60 PS5 with Ghost of Tsushima running from the drive (a U
 ## Options
 
 - `run.py boot --ftp-port PORT` serves on another port (1–65535). The default, 1212, stays clear of the ports console tools usually take: a jailbroken console's ftpsrv has 2121. If the port is taken anyway, the log says so and the title runs without FTP; pick another.
+- `run.py boot --ftp-saves` adds `/saves`, as **Saves in FTP** in Settings does ([Saves](#saves)).
 - `run.py boot --ftp-port 0` turns the server off. Then ghostldr doesn't open the USB storage session for it either, and a title's own `sceUsbStorageInit` and `Term` reach the library as before.
 
 ## Security
 
-There's no password and no encryption: while the selector shows or a title runs, anyone on your network can read and write the USB drive and SWRR's sandbox. Use it on a network you trust, or turn it off with `--ftp-port 0`.
+There's no password and no encryption: while the selector shows or a title runs, anyone on your network can read and write the USB drive and SWRR's sandbox, and with **Saves in FTP** on, read every logged-in user's saves and change those of games whose keystone is known. Use it on a network you trust, or turn it off with `--ftp-port 0`.
 
 ## Limits
 
@@ -98,6 +136,7 @@ There's no password and no encryption: while the selector shows or a title runs,
 - **Stop.** Before the core gives the extension's code back (Close ghostldr, the selector beside the ELF loader handing over to the title's call, a boot that stops before its title), `ftp_stop` shuts every client's control and data connections, waits for their threads and the listener's (at most 15 s), and frees the slots. A thread that doesn't end in time keeps the code where it is, so nothing runs in freed memory. The title's call starts the server again.
 - **The drives.** Before the title's code runs, `approot.c` opens the session to the system's AutoMounter and mounts the plugged-in drives at `/ghostldr_usb`, `/ghostldr_usb2`, ..., as it does for a title on a drive ([usb.md](usb.md#how-the-console-reaches-the-drive)). The title's own `sceUsbStorageInit` and `Term` are then kept off that session (`hle_usbstorage.c`). When a client logs in, a drive that has gone away is forgotten and a newly plugged-in one is mounted (the drive a title runs from is mounted again by `usb_live.c` instead: [usb.md](usb.md#pulling-the-drive-out-rest-mode)).
 - **Rest mode.** After rest mode the listening socket is checked (`poll`, `SO_ERROR`, `getsockname`); one that stopped working is made again on the same port, with new passive ports for the idle slots, from the JIT compiler as at the start (`ftp_relisten`). Clients connected before rest mode reconnect.
+- **Saves.** `ext/src/ftp_saves.c` answers for `/saves` (`ftp_sys.c` sends it every path under it while `CTX_FLAG_FTP_SAVES` is set). The users come from `sceUserServiceGetLoginUserIdList`, their saves from the real `sceSaveDataDirNameSearch` (one at a time with every other caller in the extension: eight at once froze SWRR on a 13.60 PS5). SWRR's own saves mount through the core's `gfs_mount_user`, another title's through the real `sceSaveDataMount` with its fingerprint (bytes 0x20-0x3f of its keystone, in hex), read-only, each taking one of ghostfs's spare mount slots (`gfs_slot_reserve`); without a fingerprint, or refused, through `save_race_copy`; changes through `save_fp_copy` and `save_race_write` (`save_race.c`, as `hle_fsvsh.c` does for save tools). A file or directory a client opened in a save keeps its view until it is closed; the listener's tick unmounts idle mounts and writes changed copies. Before the extension's code goes (`ftp_early_stop`), the background scan is stopped, changed copies are written and every save unmounted.
 - **Memory.** Ten client slots, each with a 128 KiB transfer buffer, about 1.4 MiB in all, are allocated once at start, before the title's memory is planned (or as the title starts, without the selector); memory taken later would come out of what it was promised. Each client gets a thread with a 64 KiB stack.
 - **Speed** comes from connections: each client has its own thread on the console, so `gfs_pack.py --usb` sends eight files at once (`--jobs`). Most of a dump is small files, and each costs a few round trips.
 - **Uploads** are written in 128 KiB pieces, which a USB drive takes much faster than the network's small ones.
@@ -115,6 +154,8 @@ There's no password and no encryption: while the selector shows or a title runs,
 - ten clients at once and an eleventh turned away;
 - a client that drops its connection mid-upload;
 - `usb_drive.py` putting a title on, checking and removing it, asking for more connections than the server takes (it carries on with what it gets).
+
+`test_ftp_saves.py` builds `ftp_saves.c` against a fake console (`tests/ext_native/ftp_saves_os.c`: the save and user services over a temporary folder) and checks the users, titles and saves listed (ghostldr's install data and settings left out), reading SWRR's and another title's saves, race copies for a save without a keystone and another account's (once each, six a session), writing through a writable copy (written into the save once, after the last change; `sce_sys` refused; an unchanged copy not written; changes left at the stop written), SWRR's own saves never written, a path or folder named after a title, idle saves unmounted while held ones stay, no more than three mounts, the running game's containers refused, and the titles and keystones a save tool's `/data` names.
 
 `test_usb.py` covers the drive side: the mount for the FTP server on a boot from elsewhere, a drive plugged in later, a drive pulled out, and no session at all with `--ftp-port 0`.
 

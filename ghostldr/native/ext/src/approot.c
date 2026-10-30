@@ -305,6 +305,36 @@ static u32 usb_mount_all(void)
     return k;
 }
 
+/* Drives plugged in since, mounted in the free slots; the ones mounted stay
+ * as they are.  Not while the title's own drive is away: it is usb_live.c's
+ * to mount again, and may come back with a new id. */
+static void usb_mount_new(void)
+{
+    u32 ids[16];
+    s32 n = 0;
+    if ((g_ident.slot >= 0 && !U.mounted[g_ident.slot]) || !U.inited || !U.list)
+        return;
+    memset(ids, 0, sizeof(ids));
+    if (U.list(ids, &n) != 0 || n > (s32)ARRAY_SIZE(ids)) /* not usb_drives: no drive is no failure here */
+        return;
+    char root[2] = "/", mp[24];
+    for (s32 i = 0; i < n; i++) {
+        bool have = false;
+        for (u32 k = 0; k < USB_SLOTS; k++)
+            have |= U.mounted[k] && U.id[k] == ids[i];
+        u32 k = 0;
+        while (k < USB_SLOTS && U.mounted[k])
+            k++;
+        if (have || k == USB_SLOTS)
+            continue;
+        U.unmap(ids[i], root); /* a mount left by an earlier boot */
+        s32 rc = U.map2(ids[i], root, slot_mp(k, mp));
+        logf("approot: USB drive %x plugged in since: mounted at %s: %x", ids[i], mp, rc);
+        if (rc == 0)
+            U.id[k] = ids[i], U.mounted[k] = true;
+    }
+}
+
 /* hle_usbstorage.c: the session this file opened, which the title must not end */
 HIDDEN bool usb_session_open(void) { return U.inited || (g_ctx->flags & CTX_FLAG_USB_SESSION); }
 
@@ -319,9 +349,9 @@ HIDDEN void usb_ftp_prepare(void)
     spin_unlock(&g_mount_lock);
 }
 
-/* ftp_sys.c, as a client logs in: where it starts.  A drive that went away
- * is forgotten, and one plugged in since is mounted; the title's own drive
- * is usb_live.c's to mount again. */
+/* ftp_sys.c, as a client logs in: the first drive's mount point, or "/".  A
+ * drive that went away is forgotten, and those plugged in since are mounted;
+ * the title's own drive is usb_live.c's to mount again. */
 HIDDEN const char *usb_ftp_home(void)
 {
     char mp[24];
@@ -333,6 +363,8 @@ HIDDEN const char *usb_ftp_home(void)
         }
     if (!any_mounted() && usb_session_open() && g_ident.slot < 0)
         usb_mount_all();
+    else
+        usb_mount_new();
     bool m = U.mounted[0];
     spin_unlock(&g_mount_lock);
     return m ? usb_slot_mp(0) : "/";

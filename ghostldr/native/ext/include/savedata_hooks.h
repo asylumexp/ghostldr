@@ -75,6 +75,9 @@ s32 savedata_umount(const char *mp);
  * of params and blocks may be NULL); *hits how many were filled. */
 s32 savedata_foreign_search(s32 user, const char *tid, char (*dirs)[32], struct sd_param *params, u64 *blocks,
                             u32 max, u32 *hits);
+/* Around every real sceSaveDataDirNameSearch: one at a time. */
+void savedata_search_lock(void);
+void savedata_search_unlock(void);
 /* tid's fingerprint, from a keystone file where save tools keep them
  * (/data/ghostldr/keystones/<tid>.keystone, Apollo's /data/apollo/... ones). */
 bool savedata_fingerprint(s32 user, const char *tid, char out[65]);

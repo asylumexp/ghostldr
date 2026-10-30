@@ -1324,6 +1324,17 @@ s32 savedata_foreign_mount(s32 user, const char *tid, const char *dir, const cha
     return rc;
 }
 
+/* one question at a time, whoever asks (a save tool's list, the background
+ * refresh, the sealed-key files, the FTP server's /saves): the service
+ * answers them in turn anyway, and eight at once froze SWRR on a 13.60 PS5 */
+static volatile int g_search_one;
+void savedata_search_lock(void)
+{
+    while (__atomic_exchange_n(&g_search_one, 1, __ATOMIC_ACQUIRE))
+        K.usleep(2000);
+}
+void savedata_search_unlock(void) { __atomic_store_n(&g_search_one, 0, __ATOMIC_RELEASE); }
+
 s32 savedata_foreign_search(s32 user, const char *tid, char (*dirs)[32], struct sd_param *params, u64 *blocks,
                             u32 max, u32 *hits)
 {
@@ -1339,14 +1350,9 @@ s32 savedata_foreign_search(s32 user, const char *tid, char (*dirs)[32], struct 
     memset(&c, 0, sizeof(c)), memset(&r, 0, sizeof(r));
     c.user = user, c.title_id = t;
     r.dirs = (char *)dirs, r.dirs_num = max, r.params = params, r.infos = infos;
-    /* one question at a time, whoever asks (a save tool's list, the
-     * background refresh, the sealed-key files): the service answers them
-     * in turn anyway, and eight at once froze SWRR on a 13.60 PS5 */
-    static volatile int one;
-    while (__atomic_exchange_n(&one, 1, __ATOMIC_ACQUIRE))
-        K.usleep(2000);
+    savedata_search_lock();
     s32 rc = search(&c, &r);
-    __atomic_store_n(&one, 0, __ATOMIC_RELEASE);
+    savedata_search_unlock();
     u32 n = rc == 0 ? MIN(MIN(r.set_num, r.hit_num), max) : 0, kept = 0;
     for (u32 i = 0; i < n; i++) {
         /* an exploit title's saves: only the PS2 game's own (named after its product code, SLUS-20268 and the

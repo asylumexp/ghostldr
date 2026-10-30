@@ -659,7 +659,8 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
  * emulator buffer, 67108864 the reclaim forced (bigexec.c), 134217728
  * share learned memory plans, 268435456 no community memory plan (automem.c,
  * docs/community-plans.md), 536870912 back to the game selector when the
- * title ends (CTX_FLAG_RETURN); bits 32-47
+ * title ends (CTX_FLAG_RETURN), 1073741824 the FTP server's /saves
+ * (CTX_FLAG_FTP_SAVES); bits 32-47
  * hold the ELF loader's port, bits 48-63 the FTP server's (CTX_FTP_PORT) */
 #define CTX_FLAG_NO_AUTO_MEM 65536      /* plan-free titles keep the plain budget (run.py --no-auto-memory) */
 #define CTX_FLAG_AUTO_MEM 131072        /* the automatic plan instead of a profile's manual one (run.py --auto-memory) */
@@ -676,6 +677,7 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 #define CTX_FLAG_NO_USB_LOG 16777216   /* Settings: the log is not written to a USB drive (docs/logs.md; the selector may set it live) */
 #define CTX_FLAG_SHARE_MEM 134217728   /* Settings/run.py --share-memory: log each saved learned plan for the computer to share */
 #define CTX_FLAG_NO_COMMUNITY_MEM 268435456 /* Settings, the game's Information panel, run.py --no-community-memory: no REC_SEED start */
+#define CTX_FLAG_FTP_SAVES 1073741824  /* Settings/run.py --ftp-saves: the FTP server lists every logged-in user's saves in /saves (ftp_saves.c; the selector may set it live) */
 /* Back to the game selector (ghostldr.lua's listen mode on a PS5 with the
  * bundle cached; docs/selector.md "Back to the game selector"): ghost_boot
  * does not return once the title runs, but when it ends (it quits or

@@ -94,6 +94,14 @@ int conf_switch(int i, struct sel_switch *w)
         str_copy(w->off, "Off: every game learns its own from scratch", sizeof(w->off));
         w->flag = CTX_FLAG_NO_COMMUNITY_MEM, w->on_sets = 0, w->def = 1; /* run.py --no-community-memory */
         return 0;
+    case CONF_FTP_SAVES: /* the FTP server reads the flag at each request: it takes effect at once */
+        str_copy(w->key, "ftp_saves", sizeof(w->key));
+        str_copy(w->label, "Saves in FTP", sizeof(w->label));
+        str_copy(w->on, "On: the FTP server's saves folder has every logged-in user's saves",
+                 sizeof(w->on));
+        str_copy(w->off, "Off: the FTP server shows no saves folder", sizeof(w->off));
+        w->flag = CTX_FLAG_FTP_SAVES, w->on_sets = 1, w->def = 0; /* run.py --ftp-saves */
+        return 0;
     }
     return -1;
 }

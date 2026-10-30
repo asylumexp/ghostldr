@@ -136,7 +136,7 @@ The selector shows every game it found, on the USB drives in the PS5 and install
 - **USB drives:** each drive the PS5 has, its file system (exFAT or FAT32, with FAT32's 4 GiB limit), size and free space, the games found on it and the folders that can't start. **Look again** reads the drives again after you plug one in.
 - **Network:** the PS5's address, the ports ghostldr uses, and **Install over network** ([below](#no-drive-install-over-the-network)).
 - **Logs:** **Write logs to the USB drive** (on by default), and where the log goes ([logs.md](logs.md)).
-- **Advanced:** what were developer options, as switches: **Show the system's dialogs**, **Plan memory automatically**, **Keep Remote Play on**, and **Reset to defaults**. A change counts at once, for the game you pick next, and is kept in SWRR's saved data (`GLDRCONF`).
+- **Advanced:** what were developer options, as switches: **Show the system's dialogs**, **Plan memory automatically**, **Keep Remote Play on**, **Saves in FTP** (the FTP server's `saves` folder: every logged-in user's saves; [ftp.md](ftp.md#saves)), and **Reset to defaults**. A change counts at once, for the game you pick next, and is kept in SWRR's saved data (`GLDRCONF`).
 - **Safe mode:** if a boot with Advanced's switches stops before the selector comes up, the next boot leaves them out once, and the TV says "Settings > Advanced is left out of this boot", so a switch can't lock you out. Change it there, or **Reset to defaults**.
 - **About:** ghostldr's version and build, the bundle cache, the console and its firmware, SWRR's region, and **Close ghostldr**: after a Yes, SWRR is back at Luac0re's loader ("Closed in Settings"), which takes `ghostldr.lua` again.
 

@@ -275,6 +275,7 @@ void fv_sclose(int fd)
 }
 
 const char *fv_home(void) { return g_home; }
+void fv_idle(void) {}
 
 #ifndef FTP_HOST_NO_MAIN /* elfldr_host.c takes the environment only */
 int main(int argc, char **argv)

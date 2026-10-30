@@ -225,8 +225,9 @@ A user of a release has no `run.py`, so what its flags did that a user may need 
 | Keep Remote Play on | Advanced | `CTX_FLAG_KEEP_REMOTE_PLAY` set when On | Off | `--keep-remote-play` |
 | Share learned memory plans | Advanced | `CTX_FLAG_SHARE_MEM` set when On | Off | `--share-memory` |
 | Use community memory plans | Advanced | `CTX_FLAG_NO_COMMUNITY_MEM` set when Off | On | `--no-community-memory` |
+| Saves in FTP | Advanced | `CTX_FLAG_FTP_SAVES` set when On | Off | `--ftp-saves` |
 
-**Share learned memory plans** only makes the console log each plan it saves (`automem: plan`); the ghostldr app or `run.py`, when it started the boot, sends those lines to ghostldr's collection. The console never connects anywhere for it. **Use community memory plans** lets a game with no plan of its own on this console start from the one in its profile, and keep learning; a game's Information panel can turn it off for that game alone.
+**Share learned memory plans** only makes the console log each plan it saves (`automem: plan`); the ghostldr app or `run.py`, when it started the boot, sends those lines to ghostldr's collection. The console never connects anywhere for it. **Use community memory plans** lets a game with no plan of its own on this console start from the one in its profile, and keep learning; a game's Information panel can turn it off for that game alone. **Saves in FTP** adds `/saves` to the FTP server, every logged-in user's saves, read and written as a save tool under ghostldr does ([ftp.md](ftp.md#saves)); the server reads the switch at each request, so it counts at once, and in the game too.
 
 They are kept in a save container of ghostldr's own, `GLDRCONF/settings.txt` (96 blocks, made the first time a switch changes), which only the selector writes (`selector/src/conf.c`):
 

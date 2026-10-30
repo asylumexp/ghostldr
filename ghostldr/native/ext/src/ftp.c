@@ -861,6 +861,7 @@ static void *listener(void *arg)
     while (!g_stop) {
         unsigned a = 0;
         unsigned short p = 0;
+        fv_idle();
         int c = fv_accept(g_lfd, 500, &a, &p);
         if (c == -FV_ETIMEDOUT || g_stop) {
             if (c >= 0)

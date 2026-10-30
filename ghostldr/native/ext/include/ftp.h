@@ -46,6 +46,7 @@ int fv_rename(const char *from, const char *to);
 struct fv_dir {
     long h;
     unsigned pos, len;
+    int virt; /* the environment's own: names that aren't in the directory itself */
     unsigned char buf[4096];
 };
 int fv_opendir(const char *path, struct fv_dir *d);
@@ -66,8 +67,10 @@ long fv_recv(int fd, void *buf, unsigned long n);       /* 0: the peer closed it
 void fv_sclose(int fd);
 void fv_shutdown(int fd); /* both directions: wakes a thread waiting on it, without closing it */
 
-/* the directory a client starts in: the USB drive when one is mounted */
+/* the directory a client starts in */
 const char *fv_home(void);
+/* the listener's tick, about twice a second */
+void fv_idle(void);
 
 #define FV_O_RDONLY 0
 #define FV_O_WRONLY 1
