@@ -1019,8 +1019,10 @@ end
 -- nothing runs any more: say so, close the connection (so nc ends), back to Luac0re's loader
 local function back(what, code, ctx)
     if ctx then write64(ctx + LOG_FD, -1) end   -- the connection is ours again
-    event(string.format("%s: back to Luac0re's loader on TCP %d (the core returned %s; its log says why)",
-        what, ULTRA and 8888 or 9026, code < 0 and tostring(code) or string.format("0x%x", code)),
+    -- closed in Settings (-20) is the user's choice: no result to look into
+    event(string.format("%s: back to Luac0re's loader on TCP %d%s", what, ULTRA and 8888 or 9026, code == -20 and ""
+        or string.format(" (the core returned %s; its log says why)", code < 0 and tostring(code)
+        or string.format("0x%x", code))),
         string.format("%s%s.\nBack to Luac0re's loader.\n\n%s", what:sub(1, 1):upper(), what:sub(2), loader_text()))
     if conn >= 0 then syscall.close(conn) end
     conn = -1

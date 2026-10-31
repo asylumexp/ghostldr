@@ -30,8 +30,10 @@ The save replaces SWRR's save (Luac0re's) on that account. Copy your current one
 ### A jailbroken PS4: Apollo Save Tool
 
 1. Unzip the region's zip onto the root of a USB drive (FAT32 or exFAT), so that `PS4/APOLLO/00000000_CUSA0347x_.../` is on it, and plug it into the PS4.
-2. Delete SWRR's save on the PS4 if it has one (**Settings → Application Saved Data Management**). Apollo then makes a new one, of the size the autoloader's save needs.
-3. In Apollo: **USB Saves**, pick the SWRR save, **Copy save game to HDD**. If SWRR later reports the save as corrupted, open it in Apollo's **HDD Saves** and apply **Resign** (it writes your account ID).
+2. Delete SWRR's Luac0re save in Apollo: **HDD Saves**, the SWRR save (`SLES-50366` or `SLUS-20268`), **Delete**. Use Apollo rather than the PS4's Settings: there every save SWRR holds, ghostldr's containers included, is listed as SWRR's "Saved Data". Apollo then makes a new save of the size the autoloader's needs.
+3. In Apollo: **USB Saves**, pick the ghostldr save, **Copy save game to HDD**. Apollo writes your account into it as it copies: no resign is needed.
+
+Tested on a 12.50 PS4 with GoldHEN and Apollo 2.4.0 (EU): the 800-block save was made, and HALL OF FAME opened the game selector. Apollo also lists saves in `/data/fakeusb/PS4/APOLLO/` (the console's own storage) as USB saves, for a PS4 without a drive.
 
 ### A PS5 (no jailbreak)
 
