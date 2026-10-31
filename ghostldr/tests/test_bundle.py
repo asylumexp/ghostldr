@@ -899,5 +899,132 @@ class BundleCache(FakeConsole):
         self.assertEqual(r["ctx"][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE | SELECT | 8192)
 
 
+@unittest.skipUnless(BUILT, NEED_BUILD)
+@unittest.skipUnless(find_lua(), "needs a desktop Lua 5.3 or 5.4")
+class Autoloader(FakeConsole):
+    """ghostldr/lua/auto.lua in Luac0re's save (docs/autoload.md): Luac0re
+    runs it instead of its loader; it runs the save's ghostldr.lua with the
+    save's ghostldr-ext.bin, then Luac0re's loader on 9026 whatever happens."""
+
+    AUTO = ROOT / "ghostldr/lua/auto.lua"
+    cache, cached, boot, pins, assert_ext_is = (BundleCache.cache, BundleCache.cached, BundleCache.boot,
+                                                BundleCache.pins, BundleCache.assert_ext_is)
+
+    def setUp(self) -> None:
+        BundleCache.setUp(self)
+        self.save = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        (self.save / "lua").mkdir()
+        shutil.copy(self.AUTO, self.save / "lua/auto.lua")
+        (self.save / "ghostldr").mkdir()
+        shutil.copy(self.lua, self.save / "ghostldr/ghostldr.lua")
+        shutil.copy(self.full, self.save / "ghostldr/ghostldr-ext.bin")
+
+    def auto(self, *opts: str, **kw) -> dict:
+        r = self.boot(f"savedata0={self.save}", *opts, payload=self.save / "lua/auto.lua", **kw)
+        self.assertEqual(re.findall(r"^luac0re-loader (\d+)$", r["out"], re.M), ["9026"])   # always, once
+        self.assertGreater(r["out"].index("luac0re-loader"), r["out"].rfind("core-call"))   # after ghostldr
+        return r
+
+    def test_first_boot_takes_the_saves_bundle_and_caches_it(self) -> None:
+        """Nothing cached, nothing sent: the save's ghostldr-ext.bin is cached, the game selector opens beside
+        the ELF loader, the pick boots from the cache; no prompt, no bundle port waited on."""
+        r = self.auto("elfldr=pick:0:CUSA00900")
+        self.assertEqual(self.cached(), self.full.read_bytes())
+        self.assertEqual(len(r["ctxs"]), 2)
+        self.assertEqual(r["ctxs"][0][FLAGS], CTX_FLAG_ELFLDR | ELFLDR_SELECT | 9021 << 32 | SELECT | 2 | 4096
+                         | CTX_FLAG_BUNDLE)
+        self.assert_ext_is(r["ctxs"][0], 1)
+        self.assertEqual(r["ctxs"][1][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE | RETURN)
+        self.assertEqual(r["accepts"], [])
+        self.assertFalse([t for t in r["tv"] if "Send ghostldr-ext.bin" in t], r["tv"])
+        self.assertIn("ghostldr: the save's ghostldr-ext.bin (build " + lua_build(self.lua) + "): the game selector, "
+                      "with the ELF loader on TCP 9021 beside it until a game is picked", r["notes"])
+        self.assertLess(r["out"].index("save-umount GLDRCACHE"), r["out"].index("core-call"))
+        self.assertEqual(r["clock"], 0)
+
+    def test_later_boots_use_the_cache(self) -> None:
+        self.cache()
+        r = self.auto("elfldr=pick:0:CUSA00900")
+        self.assertIn("ghostldr: the cached ghostldr-ext.bin (build " + lua_build(self.lua) + "): the game selector, "
+                      "with the ELF loader on TCP 9021 beside it until a game is picked", r["notes"])
+        self.assertNotIn(("mount", "GLDRCACHE 6 512 0"), r["saves"])           # not written again
+        self.assertEqual(len(r["ctxs"]), 2)
+
+    def test_another_releases_cache_is_replaced_by_the_saves(self) -> None:
+        self.cache(self.other.read_bytes())
+        r = self.auto("elfldr=pick:0:CUSA00900")
+        self.assertEqual(self.cached(), self.full.read_bytes())
+        self.assertEqual(len(r["ctxs"]), 2)
+        self.assertEqual(r["accepts"], [])
+
+    def test_a_saves_bundle_of_another_release_asks_for_one(self) -> None:
+        shutil.copy(self.other, self.save / "ghostldr/ghostldr-ext.bin")
+        r = self.auto(f"client={self.full}", "elfldr=pick:0:CUSA00900")
+        self.assertTrue([t for t in r["tv"] if "Version mismatch: the save's ghostldr-ext.bin" in t
+                         and "Send ghostldr-ext.bin" in t], r["tv"])
+        self.assertEqual(self.cached(), self.full.read_bytes())               # the one sent
+        self.assertEqual(len(r["ctxs"]), 2)
+
+    def test_a_damaged_saves_bundle_asks_for_one(self) -> None:
+        data = bytearray(self.full.read_bytes())
+        (self.save / "ghostldr/ghostldr-ext.bin").write_bytes(bytes(data[:-1000]))
+        r = self.auto()
+        self.assertTrue([t for t in r["tv"] if "The save's ghostldr-ext.bin is damaged" in t], r["tv"])
+        self.assertIsNone(self.cached())
+        self.assertFalse(r["called"])
+        data[-5] ^= 1                                                       # the selector's CRC-32
+        (self.save / "ghostldr/ghostldr-ext.bin").write_bytes(bytes(data))
+        r = self.auto()
+        self.assertTrue([t for t in r["tv"] if "The save's ghostldr-ext.bin is damaged" in t], r["tv"])
+        self.assertFalse(r["called"])
+
+    def test_no_bundle_in_the_save_asks_for_one(self) -> None:
+        (self.save / "ghostldr/ghostldr-ext.bin").unlink()
+        r = self.auto(f"client={self.full}", "elfldr=pick:0:CUSA00900")
+        self.assertEqual(len(r["accepts"]), 1)
+        self.assertEqual(self.cached(), self.full.read_bytes())
+
+    def test_l1_r1_held_skips_ghostldr(self) -> None:
+        r = self.auto("pad=c00")
+        self.assertFalse(r["called"])
+        self.assertEqual(r["saves"], [])
+        self.assertIn("ghostldr autoloader: L1+R1 held: Luac0re's loader on TCP 9026", r["notes"])
+        r = self.auto("pad=400", "elfldr=pick:0:CUSA00900")                  # L1 alone: no
+        self.assertEqual(len(r["ctxs"]), 2)
+
+    def test_no_ghostldr_lua_in_the_save(self) -> None:
+        (self.save / "ghostldr/ghostldr.lua").unlink()
+        r = self.auto()
+        self.assertFalse(r["called"])
+        self.assertIn("ghostldr autoloader: /savedata0/ghostldr/ghostldr.lua is not in the save: Luac0re's loader "
+                      "on TCP 9026", r["notes"])
+
+    def test_close_ghostldr_gives_luac0re_its_loader(self) -> None:
+        self.cache()
+        r = self.auto("elfldr=close")
+        self.assertIn("Closed in Settings.", r["tv"][-1])
+        self.assertIn("ghostldr autoloader: ghostldr returned: Luac0re's loader on TCP 9026", r["notes"])
+
+    def test_a_ghostldr_failure_gives_luac0re_its_loader(self) -> None:
+        """ghostldr's own failure is on the TV already: no second dialog over it."""
+        r = self.auto("noflex")
+        self.assertFalse(r["called"])
+        self.assertTrue(r["tv"][-1].startswith("ghostldr " + lua_build(self.lua) + " |  | Stopped: no memory"), r["tv"])
+        self.assertIn("ghostldr autoloader: ghostldr stopped: Luac0re's loader on TCP 9026", r["notes"])
+
+    def test_ps4_boots_the_saves_bundle(self) -> None:
+        r = self.auto(platform="PS4", fw="12.02")
+        self.assertEqual(self.cached(), self.full.read_bytes())
+        self.assertEqual(r["ctx"][FLAGS], BOOT_FLAGS | CTX_FLAG_BUNDLE | SELECT | 8192)
+        self.assertEqual(r["elfldr"], [])
+
+    def test_ghostldr_lua_alone_ignores_a_bundle_file_left_set(self) -> None:
+        """GHOSTLDR_BUNDLE_FILE is the autoloader's: ghostldr.lua clears it, so the next script sent to
+        Luac0re's loader does not see it."""
+        text = self.lua.read_text()
+        self.assertIn("GHOSTLDR_BUNDLE_FILE = nil", text)
+        self.assertNotIn("GHOSTLDR_BUNDLE_FILE", (ROOT / "ghostldr/tools/mkbundle.py").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

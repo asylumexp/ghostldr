@@ -24,6 +24,15 @@ reported corrupted; make an EU save on EU SWRR.
     python3 ghostldr/host/resign_save.py usb --account 1234567890123456789 --name SomeUser
     python3 ghostldr/host/resign_save.py lua delete
 
+With --save ZIP (tools/make_save.py's zip for this region) the copy
+gets that save's files instead of the console's Luac0re save's, and its size
+(SAVEDATA_BLOCKS): the autoloader's encrypted save (docs/autoload.md).
+--anyone makes it no one's: ACCOUNT_ID 0, and the PARAMS user ID and the
+console's PSID HMAC zeroed, for Save Wizard to resign:
+
+    python3 ghostldr/host/resign_save.py lua copy --anyone --save build/saves/ghostldr-v1.0.0-save-EU-CUSA03492.zip
+    python3 ghostldr/host/resign_save.py usb --anyone --name eu      # build/resigned/eu-CUSA03492-SLES-50366.zip
+
 The account ID is the 64-bit PSN account ID: decimal (as psn.flipscreen.games
 shows it) or hex with a 0x prefix.  Only SWRR's save is read; the copy is a
 separate container.
@@ -37,6 +46,7 @@ import io
 import shutil
 import socket
 import struct
+import sys
 import time
 import zipfile
 from pathlib import Path
@@ -52,6 +62,26 @@ LOG_PORT = 18196
 REGION = REGIONS["us"]
 
 
+def save_files(path: Path) -> dict[str, bytes]:
+    """A make_save zip's files, by path in the save (sce_sys is the system's but for the keystone)."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import make_save
+    files = make_save.read_save(path)
+    sfo = files["sce_sys/param.sfo"]
+    if make_save.sfo_str(sfo, "TITLE_ID") != REGION["title"]:
+        raise SystemExit(f"{path} is a save for {make_save.sfo_str(sfo, 'TITLE_ID')}; SWRR {REGION['title']} runs")
+    return files
+
+
+def sfo_blocks(sfo: bytes) -> int:
+    kt, dt, n = struct.unpack_from("<III", sfo, 8)
+    for i in range(n):
+        ko, _, _, _, do = struct.unpack_from("<HHIII", sfo, 20 + 16 * i)
+        if sfo[kt + ko:sfo.index(0, kt + ko)] == b"SAVEDATA_BLOCKS":
+            return struct.unpack_from("<Q", sfo, dt + do)[0]
+    raise SystemExit("the save's param.sfo has no SAVEDATA_BLOCKS")
+
+
 def account_id(text: str) -> int:
     v = int(text, 16) if text.lower().startswith("0x") else int(text)
     if not 0 < v < 1 << 64:
@@ -59,8 +89,9 @@ def account_id(text: str) -> int:
     return v
 
 
-def patch_sfo(data: bytes, acct: int, directory: str) -> bytes:
-    """ACCOUNT_ID (u64, little endian) and SAVEDATA_DIRECTORY of a param.sfo."""
+def patch_sfo(data: bytes, acct: int, directory: str, anyone: bool = False) -> bytes:
+    """ACCOUNT_ID (u64, little endian) and SAVEDATA_DIRECTORY of a param.sfo;
+    anyone: the PARAMS user ID and the console's PSID HMAC (PARAMS+4..+0x28) zeroed too."""
     out = bytearray(data)
     if out[:4] != b"\0PSF":
         raise ValueError("not a param.sfo")
@@ -77,6 +108,8 @@ def patch_sfo(data: bytes, acct: int, directory: str) -> bytes:
             out[dt + do:dt + do + mx] = value.ljust(mx, b"\0")
             struct.pack_into("<I", out, 20 + 16 * i + 4, len(value))
             found.add(key)
+        elif key == "PARAMS" and anyone and ln >= 0x28:
+            out[dt + do + 4:dt + do + 0x28] = bytes(0x24)
     if found != {"ACCOUNT_ID", "SAVEDATA_DIRECTORY"}:
         raise ValueError(f"param.sfo lacks {({'ACCOUNT_ID', 'SAVEDATA_DIRECTORY'} - found)}")
     return bytes(out)
@@ -90,11 +123,25 @@ def ftp() -> ftplib.FTP:
     return f
 
 
-def host_patch(mount_point: str, acct: int, directory: str) -> None:
-    """Patch the mounted copy's param.sfo as root (ftpsrv, jailbreak)."""
+def host_patch(mount_point: str, acct: int, directory: str, files: dict[str, bytes] | None = None,
+               anyone: bool = False) -> None:
+    """Patch the mounted copy's param.sfo as root (ftpsrv, jailbreak), after
+    writing files (a make_save save's, but its sce_sys) into it."""
     title = REGION["title"]
     remote = f"/mnt/sandbox/{title}_000{mount_point}/sce_sys/param.sfo"
     f = ftp()
+    top = f"/mnt/sandbox/{title}_000{mount_point}"
+    for rel in sorted(files or {}):      # before the param: patching it ends the hold
+        if rel.startswith("sce_sys/"):
+            continue
+        parts = rel.split("/")
+        for i in range(1, len(parts)):
+            try:
+                f.mkd(f"{top}/{'/'.join(parts[:i])}")
+            except ftplib.error_perm:
+                pass                     # there already
+        f.storbinary(f"STOR {top}/{rel}", io.BytesIO(files[rel]))
+        print(f"host: wrote {rel} ({len(files[rel])} bytes)", flush=True)
     icon = io.BytesIO()                 # the save list's icon, before the param (that ends the hold)
     try:
         f.retrbinary(f"RETR /mnt/sandbox/{title}_000/savedata0/sce_sys/icon0.png", icon.write)
@@ -103,13 +150,14 @@ def host_patch(mount_point: str, acct: int, directory: str) -> None:
         print(f"host: icon0.png not copied ({e})", flush=True)
     data = io.BytesIO()
     f.retrbinary(f"RETR {remote}", data.write)
-    patched = patch_sfo(data.getvalue(), acct, directory)
+    patched = patch_sfo(data.getvalue(), acct, directory, anyone)
     f.storbinary(f"STOR {remote}", io.BytesIO(patched))
     f.quit()
     print(f"host: patched {remote} ({len(patched)} bytes)", flush=True)
 
 
-def run_lua(host: str, mode: str, acct: int, wait: float, temp: str, patch_dir: bool = True) -> int:
+def run_lua(host: str, mode: str, acct: int, wait: float, temp: str, patch_dir: bool = True,
+            files: dict[str, bytes] | None = None, anyone: bool = False) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
         probe.connect((host, 9))
         local_ip = probe.getsockname()[0]
@@ -120,6 +168,7 @@ def run_lua(host: str, mode: str, acct: int, wait: float, temp: str, patch_dir: 
     lua = (f'MODE = "{mode}"\nTEMP_DIR = "{temp}"\nORIGINAL_DIR = "{REGION["dir"]}"\n'
            f'ACCOUNT_ID_BYTES = {{{acct_bytes}}}\n'
            f'PATCH_DIR = {"true" if patch_dir else "false"}\n'
+           + (f'BLOCKS = {sfo_blocks(files["sce_sys/param.sfo"])}\n' if files else "") +
            f'PROBE_LOG_IP = "{local_ip}"\nPROBE_LOG_PORT = {LOG_PORT}\n' + LUA.read_text())
     with socket.create_connection((host, 9026), timeout=10) as s:
         s.sendall(lua.encode())
@@ -134,7 +183,7 @@ def run_lua(host: str, mode: str, acct: int, wait: float, temp: str, patch_dir: 
         print(line, flush=True)
         if ": hold /savedata" in line:
             try:
-                host_patch(line.rsplit(" ", 1)[1], acct, REGION["dir"] if patch_dir else temp)
+                host_patch(line.rsplit(" ", 1)[1], acct, REGION["dir"] if patch_dir else temp, files, anyone)
             except (OSError, ftplib.Error, ValueError) as e:
                 print(f"host: cannot patch over FTP ({e}); is ftpsrv running (jailbreak)?", flush=True)
         if line.endswith("done"):
@@ -197,6 +246,9 @@ def main() -> int:
     ap.add_argument("step", choices=["lua", "usb"])
     ap.add_argument("mode", nargs="?", default="show", choices=["copy", "patch", "show", "delete"])
     ap.add_argument("--account", help="PSN account ID (decimal, or hex with 0x)")
+    ap.add_argument("--anyone", action="store_true",
+                    help="no account: ACCOUNT_ID 0, no PARAMS user ID or console PSID HMAC (for Save Wizard)")
+    ap.add_argument("--save", type=Path, help="lua copy: the files of this tools/make_save.py zip, and its size")
     ap.add_argument("--uid", help="local user id of the PS5 user running SWRR (8 hex; default: found over FTP)")
     ap.add_argument("--name", default="resigned", help="output folder name under build/resigned/")
     ap.add_argument("--wait", type=float, default=120)
@@ -208,9 +260,9 @@ def main() -> int:
     args = ap.parse_args()
     host = console_ip()
     needs_account = args.step == "usb" or args.mode in ("copy", "patch")
-    if needs_account and not args.account:
-        raise SystemExit("--account is required")
-    acct = account_id(args.account) if args.account else 0
+    if needs_account and not (args.account or args.anyone):
+        raise SystemExit("--account (or --anyone) is required")
+    acct = account_id(args.account) if args.account and not args.anyone else 0
     global REGION
     if args.region:
         REGION = REGIONS[args.region]
@@ -223,7 +275,8 @@ def main() -> int:
     print(f"SWRR {REGION['title']} (save {REGION['dir']})", flush=True)
     temp = args.temp or REGION["temp"]
     if args.step == "lua":
-        return run_lua(host, args.mode, acct, args.wait, temp, not args.keep_dir)
+        files = save_files(args.save) if args.save else None
+        return run_lua(host, args.mode, acct, args.wait, temp, not args.keep_dir, files, args.anyone)
     make_usb(host, acct, args.uid, args.name, temp)
     return 0
 

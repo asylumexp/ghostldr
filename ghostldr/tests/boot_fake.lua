@@ -33,6 +33,10 @@
 -- saved data and the TV:
 --   saves=DIR       the save containers, one directory each (default: a new
 --                   empty one, removed at the end)
+--   savedata0=DIR   Luac0re's own save, mounted read-only at /savedata0 (the
+--                   autoloader's files: Lua's io and loadfile see it too)
+--   pad=HEX         the buttons held on the controller (scePadReadState);
+--                   without it libScePad does not load
 --   disk=BYTES      free space on the console's storage (default: plenty)
 --   no-savedata     libSceSaveData does not load
 -- It prints what it saw: "bind <fd> <port> <rc>", "accept <fd>",
@@ -42,7 +46,8 @@
 -- PS5), "core-call", "core-ext ok|crc", "elfldr port <p> can-boot <0|1>[ selecting]",
 -- "elfldr listening <port>" or "elfldr-bind <port> held by
 -- <who>", "save-mount <name> <mode> <blocks> <rc>", "save-umount <name>",
--- "save-delete <name> <rc>", and at the end "leak"/"jit-leak"/"listen-leak"/
+-- "save-delete <name> <rc>", "luac0re-loader <port>" (Luac0re's
+-- remote_lua_loader started), and at the end "leak"/"jit-leak"/"listen-leak"/
 -- "save-leak"/"file-leak" lines for what is still held and "clock <seconds>".
 
 local payload_path, platform, fw = arg[1], arg[2], arg[3]
@@ -318,6 +323,8 @@ local function exists(path)
 end
 local function container(name) return saves .. "/" .. name end
 local function real_path(path)
+    local own = opts.savedata0 and path:match("^/savedata0/(.*)$")
+    if own and not own:find("%.%.") then return opts.savedata0 .. "/" .. own, {rw = false} end
     local mp, rest = path:match("^(/savedata%d+)/(.*)$")
     if mp and mounts[mp] and not rest:find("%.%.") then return container(mounts[mp].name) .. "/" .. rest, mounts[mp] end
 end
@@ -390,6 +397,7 @@ local SAVE = {
         if name == "libSceSaveData.sprx" then return opts["no-savedata"] and 0x80020002 or 0x50 end
         if name == "libSceUserService.sprx" then return 0x51 end
         if name == "libSceMsgDialog.sprx" then return 0x52 end
+        if name == "libScePad.sprx" then return opts.pad and 0x53 or 0x80020002 end
         return 0x80020002
     end,
     sceKernelOpen = function(path_ptr, flags)
@@ -432,6 +440,11 @@ local SAVE = {
         if not size then return 0x80020002 end
         write64(st + 0x48, size)
         return 0
+    end,
+    scePadGetHandle = function(user, type, index) return user == 0x10000001 and 3 or 0x80920003 end,
+    scePadReadState = function(h, data)
+        write32(data, tonumber(opts.pad or "0", 16))
+        return h == 3 and 0 or 0x80920003
     end,
     sceKernelUsleep = function(us)
         clock_us = clock_us + us
@@ -620,6 +633,20 @@ function func_wrap(addr)
         return 0   -- the rest
     end
 end
+
+-- Luac0re's own save at /savedata0, for Lua's io too
+if opts.savedata0 then
+    local io_open, lua_loadfile = io.open, loadfile
+    local function own(path) return path:gsub("^/savedata0/", opts.savedata0 .. "/") end
+    io.open = function(path, mode) return io_open(own(path), mode) end
+    loadfile = function(path, ...) return lua_loadfile(own(path), ...) end
+end
+function file_exists(path)
+    local f = io.open(path, "r")
+    if f then f:close() return true end
+    return false
+end
+function remote_lua_loader(port) print(string.format("luac0re-loader %d", port)) end
 
 for p, bytes in pairs(mem_init or {}) do write_buffer(p, bytes) end
 write64(EBOOT_BASE + 0x3893F0, SAVE_MOUNT)

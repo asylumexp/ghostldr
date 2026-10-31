@@ -25,6 +25,10 @@
 --              touched before a bundle is in hand.  The prompt and every
 --              outcome show on the TV, in Luac0re's message dialog, as well
 --              as in a notification and on the bundle's connection.
+--              The autoloader (auto.lua, in Luac0re's save) runs this from
+--              the save with GHOSTLDR_BUNDLE_FILE set: with nothing of this
+--              build cached, that file is the bundle (and is cached), with
+--              no computer (docs/autoload.md).
 --   "clear-cache"  run.py clear-cache: delete the cache, nothing else.
 --              GHOSTLDR_CLEAR_CACHE = true before the release's ghostldr.lua
 --              does the same, then carries on without one.
@@ -646,6 +650,70 @@ local function cache_store(b)
     return true, string.format("%s save container %s, %s", CACHE_DIR, mib(blocks * 32768), mib(total))
 end
 
+-- ---------------------------------------------------------------- listen mode: the autoloader's bundle
+-- The autoloader (ghostldr/lua/auto.lua, in Luac0re's save) sets
+-- GHOSTLDR_BUNDLE_FILE to the release's ghostldr-ext.bin beside this script
+-- in the save.  It is read, with nothing of this build in the cache, as
+-- cache_read reads the cache, and then cached: the bundle, or nil, what to
+-- say and what the TV shows (another release's or a damaged file; none
+-- there says nothing)
+local bundle_file = GHOSTLDR_BUNDLE_FILE
+GHOSTLDR_BUNDLE_FILE = nil
+local function file_bundle(path)
+    local kopen, kpread = kfn("sceKernelOpen"), kfn("sceKernelPread")
+    local p, st = malloc(#path + 1), malloc(0x100)
+    write_string(p, path)
+    if s32(kfn("sceKernelStat")(p, st)) ~= 0 then return nil end
+    local size = read64(st + 0x48)
+    local fd = s32(kopen(p, 0, 0))
+    if fd < 0 then
+        return nil, string.format("%s does not open (%x)", path, fd & 0xFFFFFFFF),
+            "The save's ghostldr-ext.bin does not open."
+    end
+    local b, line, tv
+    if kpread(fd, scratch, BUNDLE_HEADER, 0) ~= BUNDLE_HEADER then
+        line = "its header is missing"
+    else
+        b = check_header(read_buffer(scratch, BUNDLE_HEADER))
+        local total = BUNDLE_HEADER + b.ext_size + b.sel_size
+        if b.bad then
+            line, tv = header_problem(b, "the save's " .. b.file, "Put ghostldr.lua and ghostldr-ext.bin\nfrom the "
+                .. "same release in the save.")
+        elseif size ~= total then
+            line = string.format("it holds %d of the bundle's %d bytes", size, total)
+        elseif b.kind == 2 and not HAS_ELFLDR then
+            line = "it is ghostldr-elfldr.bin, and the ELF loader runs on a PS5 only"
+        else
+            local ext = map_flex(b.ext_size)
+            local sel = ext and b.sel_size > 0 and map_flex(b.sel_size)
+            if not ext or (b.sel_size > 0 and not sel) then
+                if ext then unmap(ext, b.ext_size) end
+                kfn("sceKernelClose")(fd)
+                fail(string.format("no memory for the save's %s (%d bytes): restart SWRR and try again", b.file,
+                    total))
+            end
+            b.ext, b.sel = ext, sel or -1
+            if kpread(fd, b.ext, b.ext_size, BUNDLE_HEADER) ~= b.ext_size or (b.sel_size > 0 and
+                    (kpread(fd, b.sel, b.sel_size, BUNDLE_HEADER + b.ext_size) ~= b.sel_size
+                     or crc32(b.sel, b.sel_size) ~= b.pin.sel_crc)) then
+                line = b.sel_size > 0 and "it did not read, or its selector's CRC-32 is wrong" or "it did not read"
+                unmap(b.ext, b.ext_size)
+                if b.sel_size > 0 then unmap(b.sel, b.sel_size) end
+            end
+        end
+    end
+    kfn("sceKernelClose")(fd)
+    if line then
+        if not tv then
+            line = string.format("the save's %s is damaged (%s)", path, line)
+            tv = "The save's ghostldr-ext.bin is damaged.\nPut the release's copy in the save again."
+        end
+        return nil, line, tv
+    end
+    b.saved = true
+    return b
+end
+
 -- ---------------------------------------------------------------- listen mode: waiting for a bundle
 -- a listener on the bundle port: 9021, else 9022, the first time; the same port after
 local function bundle_listener()
@@ -984,17 +1052,18 @@ local function store(b)
     local ok, what = cache_store(b)
     b.cached = ok       -- what is in the cache now
     if ok then
-        event(string.format("cached %s in this console's saved data (%s): from now on send ghostldr.lua alone",
-            b.file, what))
+        event(string.format("cached %s in this console's saved data (%s)%s", b.file, what,
+            b.saved and "" or ": from now on send ghostldr.lua alone"))
     else
         event(string.format("%s not cached: %s; ghostldr goes on without it", b.file, what))
     end
 end
 
 -- what the TV and the log say when games boot from the cache
-local function booting_cached()
-    event(string.format("booting the cached ghostldr-ext.bin (build %s): a game on a USB drive, else an installed one",
-        GHOSTLDR_BUILD), "Booting: a game on a USB drive in the console,\nelse an installed one")
+local function booting_cached(saved)
+    event(string.format("booting the %s ghostldr-ext.bin (build %s): a game on a USB drive, else an installed one",
+        saved and "save's" or "cached", GHOSTLDR_BUILD), "Booting: a game on a USB drive in the console,\nelse an "
+        .. "installed one")
 end
 
 -- A bundle the ELF loader took (nb, its parts in memory): cached for the
@@ -1061,8 +1130,24 @@ local function listen_main()
         event(string.format("the cached bundle is damaged (%s): it is deleted; send the bundle again", detail))
         note = "The cached bundle is damaged: deleted.\nSend the bundle again."
     end
-    -- a cached ghostldr-ext.bin: the game selector at once, with the ELF loader beside it on a PS5
-    local mode = not b and "prompt" or b.kind == 2 and "elfldr" or HAS_ELFLDR and "select" or "boot"
+    -- the autoloader: nothing of this build cached, so the save's ghostldr-ext.bin, cached for the next boot
+    local saved
+    if not b and bundle_file then
+        local line, tv
+        b, line, tv = file_bundle(bundle_file)
+        if b then
+            saved = b.saved
+            say(string.format("read %s from the save (%d bytes, build %s)", b.file,
+                BUNDLE_HEADER + b.ext_size + b.sel_size, GHOSTLDR_BUILD))
+            store(b)
+        elseif line then
+            event(line .. ": send the bundle")
+            note = tv
+        end
+    end
+    -- a cached ghostldr-ext.bin: the game selector at once, with the ELF loader beside it on a PS5 (a bundle
+    -- from the save that could not be cached boots as it is, as a sent one does)
+    local mode = not b and "prompt" or b.kind == 2 and "elfldr" or (HAS_ELFLDR and b.cached) and "select" or "boot"
     local picked    -- the second call boots the game picked beside the ELF loader
     if mode ~= "prompt" then
         hold(b)
@@ -1070,12 +1155,12 @@ local function listen_main()
             syscall.close(bundle_listener())
         end
         if mode == "boot" then
-            booting_cached()
+            booting_cached(saved)
         elseif mode == "select" then
-            selecting("the cached ghostldr-ext.bin")
+            selecting(saved and "the save's ghostldr-ext.bin" or "the cached ghostldr-ext.bin")
         else
-            event(string.format("the cached %s (build %s): the ELF loader on TCP %d; a ghostldr-ext.bin sent "
-                .. "there is kept for the next boot", b.file, GHOSTLDR_BUILD, port))
+            event(string.format("the %s %s (build %s): the ELF loader on TCP %d; a ghostldr-ext.bin sent "
+                .. "there is kept for the next boot", saved and "save's" or "cached", b.file, GHOSTLDR_BUILD, port))
         end
     end
     while true do

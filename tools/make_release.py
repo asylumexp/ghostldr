@@ -3,6 +3,8 @@
 
     python3 tools/make_release.py [--out DIR] [--version VERSION] [--no-make]
                                   [--deny WORD ...] [--deny-file FILE]
+                                  [--save LUAC0RE_SAVE [--keystone-us FILE] [--keystone-eu FILE]
+                                   [--encrypted-us ZIP] [--encrypted-eu ZIP]]
 
 Builds the loader (make -s in ghostldr/native) unless --no-make, then writes
 into DIR (default build/release):
@@ -10,10 +12,14 @@ into DIR (default build/release):
     ghostldr.lua, ghostldr-ext.bin, ghostldr-elfldr.bin   from build/ghostldr
     manager.lua                                           from ghostldr/lua
     README.txt                                            tools/release-README.txt, with the version
-    SHA256SUMS.txt                                        the five above and the zip
+    SHA256SUMS.txt                                        the five above, the zip and the saves
     ghostldr-<version>.zip                                the five above and their SHA256SUMS.txt, flat
+    ghostldr-<version>-save-<US|EU>-<TITLE>.zip           with --save: the autoloader's saves, one zip per
+                                                          region: decrypted (Apollo) and, given, encrypted
+                                                          (tools/make_save.py, docs/autoload.md)
 
-The release page gets the zip, the five files one by one and SHA256SUMS.txt.
+The release page gets the zip, the five files one by one, the saves and
+SHA256SUMS.txt.
 No Python and no source go in: developers take the repository.  The zip is
 reproducible: entries sorted, fixed times and permissions, the same bytes for
 the same inputs.
@@ -155,8 +161,9 @@ def collect(version: str, built: Path = REPO / "build/ghostldr", lua: Path = REP
     return files
 
 
-def make(out: Path, version: str, files: dict[str, bytes], words: list[str]) -> list[Path]:
-    """Check the files, then write them, the sums and the zip into out."""
+def make(out: Path, version: str, files: dict[str, bytes], words: list[str],
+         saves: dict[str, bytes] | None = None) -> list[Path]:
+    """Check the files, then write them, the sums, the zip and the saves (checked by make_save) into out."""
     bad = [b for n in sorted(files) for b in find_personal(n, files[n], words)]
     if bad:
         die("not releasing: personal data in the files:\n  " + "\n  ".join(bad[:30]))
@@ -173,7 +180,10 @@ def make(out: Path, version: str, files: dict[str, bytes], words: list[str]) -> 
         written.append(out / n)
     (out / zname).write_bytes(zdata)
     written.append(out / zname)
-    (out / SUMS).write_bytes(sums_text({**files, zname: zdata}))
+    for n in sorted(saves or {}):
+        (out / n).write_bytes(saves[n])
+        written.append(out / n)
+    (out / SUMS).write_bytes(sums_text({**files, zname: zdata, **(saves or {})}))
     written.append(out / SUMS)
     return written
 
@@ -185,6 +195,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-make", action="store_true", help="use build/ghostldr as it is")
     ap.add_argument("--deny", action="append", default=[], help="a word that must not be in the release")
     ap.add_argument("--deny-file", type=Path, help="more such words, one per line")
+    ap.add_argument("--save", type=Path, help="a decrypted Luac0re save (folder or zip): the autoloader's saves too")
+    ap.add_argument("--keystone-us", type=Path, help="with --save: CUSA03474's keystone, when the save is EU's")
+    ap.add_argument("--keystone-eu", type=Path, help="with --save: CUSA03492's keystone, when the save is US's")
+    ap.add_argument("--encrypted-us", type=Path, help="with --save: resign_save.py's zip of the US encrypted save")
+    ap.add_argument("--encrypted-eu", type=Path, help="with --save: resign_save.py's zip of the EU encrypted save")
     args = ap.parse_args(argv)
     version = args.version or git_version()
     if not re.fullmatch(r"[A-Za-z0-9._+-]+", version):
@@ -193,7 +208,13 @@ def main(argv: list[str] | None = None) -> int:
         subprocess.run(["make", "-s", "-C", str(REPO / "ghostldr/native")], check=True)
     extra = list(args.deny) + (read_deny_file(args.deny_file) if args.deny_file else [])
     files = collect(version)
-    written = make(args.out.resolve(), version, files, personal_words(extra))
+    words = personal_words(extra)
+    saves = None
+    if args.save:
+        import make_save
+        saves = make_save.save_zips(args.save, version, keystones={"us": args.keystone_us, "eu": args.keystone_eu},
+                                    words=words, encrypted={"us": args.encrypted_us, "eu": args.encrypted_eu})
+    written = make(args.out.resolve(), version, files, words, saves)
     for p in written:
         print(f"{sha256(p.read_bytes())}  {p.stat().st_size:>10}  {p.name}")
     print(f"make_release: {version} in {args.out}")

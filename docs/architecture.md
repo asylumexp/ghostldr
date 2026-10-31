@@ -8,7 +8,7 @@ A map of the repository, for reading or changing the code. To run ghostldr, star
 |---|---|
 | `ghostldr/native/` | **The loader core** (C). It runs inside SWRR from the PS2 emulator's JIT buffer. Two runtime modules sit next to it. The extension (`ext/`, see [its README](../ghostldr/native/ext/README.md)) carries the NID table and more HLE code, and is fetched from the computer at boot. The game selector (`selector/`, see [selector.md](selector.md)) picks the title to boot and is gone before the title loads. The installer's pump (`pump/`) is a separate small blob the ghostfs receiver runs ([ghostfs-catalogue.md](ghostfs-catalogue.md#the-receivers-operations)). |
 | `ghostldr/host/` | **Computer-side tools** (Python), below. |
-| `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the web manager, the save resigner, and the sandbox and save probes. |
+| `ghostldr/lua/` | **Scripts sent to Luac0re's loader:** the bootstrap, the ghostfs receiver, the web manager, the save resigner, and the sandbox and save probes; and `auto.lua`, the autoloader that Luac0re runs from its save ([autoload.md](autoload.md)). |
 | `ghostldr/tools/` | **Build and analysis helpers:** ELF and NID parsing, the extension packer and its offline checker (`mkext.py`, `check_ext.py`), the two-file boot's files (`mkbundle.py`), the import coverage report (`import_report.py`), the code fit check (`exec_fit.py`), the stub report (`stub_report.py`), a disassembler, cross-references, the Luac0re bundler, and the UltraC0re bootstrap patch for Jak X (`ultrac0re_patch.py`). |
 | `ghostldr/data/` | Title profiles (`titles/<TITLE>.json` over `titles/default.json`), Ghost's file open order (file names only), and the system modules a PS4 app can load on a 13.60 PS5. |
 | `ghostldr/tests/` | Offline tests, below. |
@@ -39,7 +39,7 @@ In `ghostldr/host/`:
 - **`ghostldr.py`** (the repository's top folder): the everyday commands, `doctor`, `copy`, `check`, `boot`, `logs` and `install`, over the tools above ([host-tooling.md](host-tooling.md#ghostldrpy)).
 - **`profiles.py`:** check and inspect title profiles. **`capture_order.py`:** turn a boot log into a title's file open order.
 - **`manager.py`:** start the web manager on the PS5 ([manager.md](manager.md)).
-- **`resign_save.py`:** make a Luac0re save for another PSN account, for the SWRR region it runs on (US or EU). It patches the save over FTP, so it needs a jailbroken console.
+- **`resign_save.py`:** make a Luac0re save for another PSN account, for the SWRR region it runs on (US or EU). It patches the save over FTP, so it needs a jailbroken console. With `--save` and `--anyone` it makes the autoloader's encrypted save ([autoload.md](autoload.md#the-encrypted-save)).
 - **`recorder.py`:** crash and klog recorder.
 - **`console.py`:** finds the console on the network ([ghost-on-stock-ps5.md](ghost-on-stock-ps5.md#2-point-the-scripts-at-your-ps5)).
 
@@ -116,6 +116,7 @@ GitHub Actions builds and runs them on macOS for every push to main and every pu
 - the import report against a synthetic title;
 - the ELF loader: its payload formats, relocations and refusals, and its service over real sockets with a fake loader (`test_elfldr.py`, [elfldr.md](elfldr.md#tests));
 - the two-file boot: the bundles against their parts and `ghostldr.lua`'s pins, `ext-elfldr.bin`'s families against the full extension's, the core's log on a connection (`native_host/log_host.c`), and `ghostldr.lua`'s listen mode under a fake Luac0re (`boot_fake.lua`): the context it hands the core, the ports, each refusal, the timeout and what it gives back; the bundle cache with save containers in a directory (a full disk, a damaged or half-written file, another release's), an instant clock, sockets that SWRR and the JIT compiler each hold (9021 must be free in both before the ELF loader binds it), and a scripted core and ELF loader (`test_bundle.py`); the ELF loader's commands and bundles (CRC-32s against their header, any build) over real sockets (`test_elfldr.py`); the core taking the parts from memory (`test_ext.py`, `test_selector.py`);
+- the autoloader: `auto.lua` under the same fake, with Luac0re's save in a directory: the save's bundle cached and booted, the cache winning later, another release's or a damaged bundle in the save, L1 + R1 held, Luac0re's loader after every ending, a PS4 (`test_bundle.py`, `Autoloader`); the save it goes in, made from a made-up Luac0re save (`test_make_save.py`);
 - the game selector: screenshots of its UI, and the built `selector.bin` against a fake console.
 
 `ghostldr/tests/homebrew/` is a small test homebrew; building it needs the OpenOrbis toolchain. `ghostldr/tests/elfldr/` holds the ELF loader's sample payloads.

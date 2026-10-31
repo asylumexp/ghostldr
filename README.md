@@ -18,6 +18,7 @@ You need a PS5 on firmware 13.60 or later with SWRR (US CUSA03474 or EU CUSA0349
 - **An FTP server on the PS5** while a game runs, to put more games onto the drive in it ([docs/ftp.md](docs/ftp.md)).
 - **An ELF loader** without a game: send OpenOrbis or freestanding ELF payloads to it with `nc`, and their output comes back on the connection. Userland only, no kernel exploit ([docs/elfldr.md](docs/elfldr.md)).
 - **A boot with no computer:** two files sent with `nc` or a payload-sender app start a game or the ELF loader, with nothing on the computer serving files ([below](#getting-started)).
+- **The autoloader:** a Luac0re save with ghostldr in it. HALL OF FAME opens the game selector by itself, with nothing sent at all; hold L1 + R1 for Luac0re's loader ([docs/autoload.md](docs/autoload.md)).
 - **The game selector** with **Settings**: what's wrong with a game or a drive, installing over the network, logs, and the options that were `run.py` flags ([docs/selector.md](docs/selector.md)).
 - **Install over network:** a game goes into SWRR's saved data from a browser on a computer or phone ([docs/manager.md](docs/manager.md#install-a-game)).
 - **Every failure explained on the TV,** and each boot's log on the USB drive ([docs/failures.md](docs/failures.md), [docs/logs.md](docs/logs.md)).
@@ -43,11 +44,14 @@ Download `ghostldr-<version>.zip` from the [latest release](https://github.com/a
 
 The three files must come from the same release. Send `ghostldr-elfldr.bin` instead of `ghostldr-ext.bin` for the ELF loader alone.
 
+**Or skip steps 3 and the computer:** the release's autoloader save (`ghostldr-<version>-save-*.zip`, resigned to your account like Luac0re's own) starts ghostldr at HALL OF FAME by itself ([docs/autoload.md](docs/autoload.md)).
+
 The Python tools (`ghostldr.py`, `run.py`) stay in the repository for developers: [docs/host-tooling.md](docs/host-tooling.md).
 
 ## Documentation
 
 - [Using the release](docs/using-the-release.md): download to gameplay, step by step, with no Python.
+- [The autoloader](docs/autoload.md): ghostldr in Luac0re's save, started by HALL OF FAME with no computer; the Apollo and encrypted saves, and how they are made.
 - [USB drives](docs/usb.md): games on a USB drive, the recommended way: what goes on the drive, copying, checking.
 - [Ghost on a stock PS5](docs/ghost-on-stock-ps5.md): the same from source with the Python tools, with more troubleshooting.
 - [Compatibility](docs/compatibility.md): other games, homebrew, profiles, reading the log.
@@ -78,7 +82,23 @@ Build the core, extension and selector. The default is Homebrew's `llvm@18`; add
 make -C ghostldr/native
 ```
 
-`run.py boot` without `--no-build` runs this itself. The tests are described in [docs/architecture.md](docs/architecture.md#tests).
+`run.py boot` without `--no-build` runs this itself. It writes `build/ghostldr/`; the two-file boot's files are `ghostldr.lua`, `ghostldr-ext.bin` and `ghostldr-elfldr.bin` there.
+
+Run the tests (a desktop Lua 5.3 or 5.4 runs `ghostldr.lua` and `auto.lua` under a fake Luac0re; tests that need it, or the build, skip without it):
+
+```bash
+python3 -m unittest discover -s ghostldr/tests
+```
+
+[docs/architecture.md](docs/architecture.md#tests) describes them.
+
+Make a release: the five files, their checksums and the flat zip in `build/release/`, and, given a decrypted Luac0re 2.4b save, the autoloader's Apollo saves for US and EU beside them ([docs/host-tooling.md](docs/host-tooling.md#making-a-release), [docs/autoload.md](docs/autoload.md#making-the-saves)):
+
+```bash
+python3 tools/make_release.py --version v1.0.0 --save LUAC0RE_SAVE --keystone-us CUSA03474.keystone
+```
+
+The encrypted save is made on a jailbroken console with `ghostldr/host/resign_save.py` ([docs/autoload.md](docs/autoload.md#the-encrypted-save)).
 
 ## License and credits
 

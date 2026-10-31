@@ -40,7 +40,7 @@ The same files are attached to the release page one by one too (handy on a phone
 shasum -a 256 --ignore-missing -c SHA256SUMS.txt
 ```
 
-`ghostldr.lua` only takes a `.bin` from the same release: keep them together. The release page's `ghostldr-dev-payloads-<version>.zip` is for developers with a jailbroken console only. The Python tools and the source are in the [repository](https://github.com/asylumexp/ghostldr) ([For developers](#for-developers)).
+`ghostldr.lua` only takes a `.bin` from the same release: keep them together. The release page's `ghostldr-<version>-save-*.zip` files are the [autoloader](autoload.md): a Luac0re save with ghostldr in it, so that HALL OF FAME opens the game selector with nothing sent (steps 3 and 4 then happen by themselves). `ghostldr-dev-payloads-<version>.zip` is for developers with a jailbroken console only. The Python tools and the source are in the [repository](https://github.com/asylumexp/ghostldr) ([For developers](#for-developers)).
 
 ## 2. Put the game on a USB drive
 

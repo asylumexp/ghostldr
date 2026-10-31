@@ -98,6 +98,8 @@ corrupt blob, and so on).
 ## Making a release
 
     python3 tools/make_release.py --version v1.0.0 [--out DIR] [--no-make] [--deny WORD ...] [--deny-file FILE]
+                                  [--save LUAC0RE_SAVE [--keystone-us FILE] [--keystone-eu FILE]
+                                   [--encrypted-us ZIP] [--encrypted-eu ZIP]]
 
 For maintainers. It runs `make -s` in `ghostldr/native` (not with
 `--no-make`), then writes into `DIR` (default `build/release`, emptied
@@ -109,10 +111,13 @@ first):
 | `manager.lua` | `ghostldr/lua` ([manager.md](manager.md)) |
 | `README.txt` | `tools/release-README.txt`, with `@VERSION@` replaced |
 | `ghostldr-<version>.zip` | the five above and their `SHA256SUMS.txt`, flat: no folders, no Python, no source |
-| `SHA256SUMS.txt` | the five above and the zip |
+| `SHA256SUMS.txt` | the five above, the zip and the saves |
+| `ghostldr-<version>-save-US-CUSA03474.zip`, `...-EU-CUSA03492.zip` | with `--save`: the autoloader's saves, one zip per region, decrypted (for Apollo) from that Luac0re save and, with `--encrypted-us`/`--encrypted-eu`, encrypted (for Save Wizard; made on a console) (`tools/make_save.py`, [autoload.md](autoload.md#making-the-saves)) |
 
-The release page gets the zip, the five files one by one and the outer
-`SHA256SUMS.txt` ([using-the-release.md](using-the-release.md#1-download)).
+The release page gets the zip, the five files one by one, the saves and the
+outer `SHA256SUMS.txt` ([using-the-release.md](using-the-release.md#1-download)).
+The encrypted saves are made on a jailbroken console first
+([autoload.md](autoload.md#the-encrypted-save)).
 `ghostldr-dev-payloads-<version>.zip` (jailbroken consoles) stays a separate
 asset, made apart from this.
 

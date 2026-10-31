@@ -32,6 +32,11 @@ The files
    address to open in a browser on a phone or computer), the logs, Advanced,
    and Close ghostldr.
 
+No computer at all: the release page's ghostldr-<version>-save-*.zip files
+are a Luac0re save with ghostldr in it (resign it to your account as
+Luac0re's own). Then HALL OF FAME opens the game selector by itself; hold
+L1+R1 for Luac0re's loader. See docs/autoload.md.
+
 Every failure is explained on the TV. Each boot's log is a file in
 ghostldr/logs on the USB drive.
 

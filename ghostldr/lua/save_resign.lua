@@ -3,7 +3,8 @@
 -- which prepends MODE, TEMP_DIR, ORIGINAL_DIR (the save's directory:
 -- SLUS-20268 on US SWRR, SLES-50366 on EU), ACCOUNT_ID_BYTES (8 bytes, little endian as
 -- param.sfo stores them), PATCH_DIR (false keeps TEMP_DIR as the directory
--- name: a control), PROBE_LOG_IP and PROBE_LOG_PORT.
+-- name: a control), PROBE_LOG_IP and PROBE_LOG_PORT; BLOCKS (optional) is
+-- the copy's size when the host writes another save's files into it.
 --
 -- The image of a save can only be re-encrypted by the console, so the copy is
 -- made by the system itself: a new container TEMP_DIR (same size as the
@@ -279,7 +280,7 @@ elseif MODE == "copy" then
     elseif sfo_read(SOURCE) then
         sfo_show(buf, "original")
         local _, bv = sfo_find(buf, "SAVEDATA_BLOCKS")
-        local blocks = bv and read64(bv) or 0
+        local blocks = BLOCKS or (bv and read64(bv) or 0)   -- BLOCKS: the size of the save that goes in
         set_dir(TEMP_DIR)
         do_delete()
         local rc, mp = do_mount(6, blocks)       -- CREATE | RDWR
