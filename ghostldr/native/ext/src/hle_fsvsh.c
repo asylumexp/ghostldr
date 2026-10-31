@@ -25,14 +25,14 @@
  *     the service answers only for exact title IDs), in the
  *     title's /temp0 directory; what the tool writes to it is thrown away at
  *     the next read.
- *     Without a keystone, or when the system refuses the save (another
- *     account's), the tool's mount path is a read-only copy made through a
- *     mount ShellCore binds before refusing it (save_race.c), once per save
- *     and session.
+ *     Without a keystone, the tool's mount path is a writable copy made
+ *     through a mount ShellCore binds before refusing it (save_race.c), once
+ *     per save and session.  A fingerprint mount refused for another account
+ *     remains a read-only race copy.
  *   - Writing (a tool's "apply cheats", "import decrypted files", "copy
- *     to HDD" into an existing save, "resign"): with the title's keystone,
- *     the tool's mount path is a writable copy of the save, made through the
- *     read-only fingerprint mount.  At its unmount, if the tool changed it,
+ *     to HDD" into an existing save, "resign"): the tool's mount path is a
+ *     writable copy of the save, made through the read-only fingerprint mount
+ *     or, without a keystone, the H-RACE.  At its unmount, if the tool changed it,
  *     the copy is written into the save through a read-write mount the
  *     service binds and then refuses (save_race_write): the save keeps its
  *     owner and keystone, and the system commits it when SWRR closes.
@@ -60,7 +60,7 @@ static struct {
     bool used;
     char path[160]; /* the tool's mount path, no trailing '/' */
     char mp[16];    /* "/savedataN", or */
-    char host[128]; /* a read-only copy (save_race.c): a host path, or */
+    char host[128]; /* a working copy (save_race.c): a host path, or */
     bool rw;        /* a writable copy, written into the save at the unmount when it changed: */
     u64 digest;     /* its files when the tool got it (save_tree_digest) */
     s32 user;
@@ -273,7 +273,7 @@ static bool keystone_from_usb(const char *tid)
 }
 
 /* once per title and session: what is missing */
-static void say_no_keystone(const char *tid)
+static void say_race_write(const char *tid)
 {
     static char said[8][10];
     static volatile int lock;
@@ -288,9 +288,9 @@ static void say_no_keystone(const char *tid)
     if (!now)
         return;
     char line[256];
-    fmt(line, sizeof(line), "No keystone for %.9s: its saves open read-only, changes can't be saved.\n"
-                            "A decrypted save of it with sce_sys/keystone in PS4/APOLLO on USB adds it,\n"
-                            "or %.9s.keystone in /data/ghostldr/keystones (ghostldr's FTP).", tid, tid);
+    fmt(line, sizeof(line), "No keystone for %.9s: changes use the save mount race.\n"
+                            "Close SWRR from the PS button menu after saving so the system commits them.\n"
+                            "Files already in the save but absent from the new copy are kept.", tid);
     ov_banner(line, 30);
 }
 
@@ -353,8 +353,29 @@ static s32 vsh_mount(const void *opt, const char *volume, const char *mount_path
         rw = host[0] != 0;
         rc = rw ? 0 : savedata_foreign_mount(user, tid, dir, fp, mp);
     }
+    if (!fp_known) { /* no fingerprint: make the working copy through H-RACE and commit it the same way */
+        for (u32 c = 0; c < NRW && !host[0]; c++)
+            if (strcmp(g_rw[c].key, ckey) == 0)
+                strlcpy(host, g_rw[c].host, sizeof(host));
+        if (!host[0]) {
+            char dst[128];
+            fmt(dst, sizeof(dst), "/temp0/ghostldr/%s/rw/%08x_%s_%s", title_ident(), (u32)user, tid, dir);
+            s32 rc2 = save_race_rw_copy(user, tid, dir, dst);
+            if (rc2 != 0)
+                return rc2;
+            strlcpy(host, dst, sizeof(host));
+            for (u32 c = 0; c < NRW; c++)
+                if (!g_rw[c].key[0]) {
+                    strlcpy(g_rw[c].key, ckey, sizeof(g_rw[c].key));
+                    strlcpy(g_rw[c].host, dst, sizeof(g_rw[c].host));
+                    break;
+                }
+        }
+        rw = true, rc = 0;
+        say_race_write(tid);
+    }
     if (rc != 0) {
-        /* no keystone, or the system refused the save (another account's): a read-only copy made through a
+        /* the fingerprint mount was refused (the known other-account case): a read-only copy made through a
          * refused mount, once per session (save_race.c) */
         for (u32 c = 0; c < NCOPY && !host[0]; c++)
             if (strcmp(g_copy[c].key, ckey) == 0)
@@ -362,11 +383,9 @@ static s32 vsh_mount(const void *opt, const char *volume, const char *mount_path
         if (!host[0]) {
             char dst[128];
             fmt(dst, sizeof(dst), "/temp0/ghostldr/%s/race/%08x_%s_%s", title_ident(), (u32)user, tid, dir);
-            logf("fsvsh: %s:%s: %s; trying a read-only copy through a refused mount", tid, dir,
-                 fp_known ? "the fingerprint mount was refused" : "no keystone for its title");
+            logf("fsvsh: %s:%s: the fingerprint mount was refused; trying a read-only copy through a refused mount",
+                 tid, dir);
             s32 rc2 = save_race_copy(user, tid, dir, dst);
-            if (!fp_known)
-                say_no_keystone(tid);
             if (rc2 == 0) {
                 strlcpy(host, dst, sizeof(host));
                 for (u32 c = 0; c < NCOPY; c++)
@@ -375,10 +394,6 @@ static s32 vsh_mount(const void *opt, const char *volume, const char *mount_path
                         strlcpy(g_copy[c].host, dst, sizeof(g_copy[c].host));
                         break;
                     }
-            } else if (!fp_known) {
-                logf("fsvsh: %s:%s: no copy either (%x): put %s.keystone in /data/ghostldr/keystones", tid, dir,
-                     (u32)rc2, tid);
-                return rc2;
             } else {
                 return rc;
             }
@@ -436,8 +451,8 @@ static s32 vsh_umount(const void *opt, const char *mount_path, s32 handle, u32 i
             char backup[160];
             fmt(backup, sizeof(backup), "%s.before", g_alias[i].host);
             struct save_race_result r;
-            rc = save_race_write(g_alias[i].user, g_alias[i].tid, g_alias[i].dir, g_alias[i].host, g_alias[i].fp,
-                                 backup, &r);
+            rc = save_race_write(g_alias[i].user, g_alias[i].tid, g_alias[i].dir, g_alias[i].host,
+                                 g_alias[i].fp[0] ? g_alias[i].fp : NULL, backup, &r);
             if (rc == 0)
                 g_alias[i].digest = save_tree_digest(g_alias[i].host);
             logf("fsvsh: %s:%s: the tool's changes -> %x%s", g_alias[i].tid, g_alias[i].dir, (u32)rc,

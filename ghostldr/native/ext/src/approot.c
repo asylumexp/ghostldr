@@ -170,12 +170,29 @@ __attribute__((noinline, minsize)) static void NOTE(u32 kind, const char *what)
         D->note = kind, strlcpy(D->note_path, what, sizeof(D->note_path));
 }
 
+/* SWRR has libSceUsbStorage loaded; Jak X neither has it nor loads it by
+ * its bare name (0x80020002): the system's path, then its sysmodule (0xd5) */
+static int usb_lib_load(u32 *h)
+{
+    if (host_module_handle("libSceUsbStorage", h) == 0)
+        return 0;
+    int res = 0;
+    s32 r = K.load_start_module ? (s32)call_gadget6((u64)K.load_start_module,
+                                                    (u64)"/system/common/lib/libSceUsbStorage.sprx", 0, 0, 0, 0,
+                                                    (u64)&res)
+                                : -1;
+    s32 (*load)(u32) = r > 0 ? NULL : (s32(*)(u32))host_real("sceSysmoduleLoadModule");
+    s32 r2 = load ? load(0xd5) : 0;
+    logf("approot: libSceUsbStorage by path -> %x, by sysmodule -> %x", (u32)r, (u32)r2);
+    return host_module_handle("libSceUsbStorage", h);
+}
+
 static int usb_lib(void)
 {
     u32 h = 0;
     if (U.map2)
         return 0;
-    if (host_module_handle("libSceUsbStorage", &h) != 0) {
+    if (usb_lib_load(&h) != 0) {
         logf("approot: libSceUsbStorage is not loadable");
         return -1;
     }

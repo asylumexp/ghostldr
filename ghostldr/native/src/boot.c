@@ -50,11 +50,11 @@ static int boot_root(const char **rootp, int *choose_out, bool *library_out)
     bool library = false, decided = false; /* decided: "auto" found the title on a USB drive */
     if (strcmp(root, "auto") == 0) {
         /* the games on a USB drive, else the installed ones (run.py's
-         * default); drives are untested on a PS4 and in Jak X */
-        if (is_ps4() || is_jakx() || (choose = ext_approot_init(&root)) == 2) {
+         * default); drives are untested on a PS4 */
+        if (is_ps4() || (choose = ext_approot_init(&root)) == 2) {
             if (choose == 2)
                 ext_unplace();
-            logf("boot: %s: the installed titles", is_ps4() || is_jakx() ? "no USB drives here" : "no game on a USB drive");
+            logf("boot: %s: the installed titles", is_ps4() ? "no USB drives here" : "no game on a USB drive");
             root = "ghostfs";
             g_ctx->app_root = (u64)root; /* what the game selector reads */
             choose = 0;
@@ -170,7 +170,7 @@ static int elfldr_select(struct el_select *s)
     /* the FTP server beside it: the release's port (these flags' port bits
      * hold the ELF loader's); it goes with the extension below, and the
      * title's boot starts it again */
-    if (!is_ps4() && !is_jakx())
+    if (!is_ps4())
         ext_ftp_early(CTX_SELECTOR_FTP_PORT(g_ctx->flags));
     int picked = sel_run(true, title);
     __atomic_store_n(&s->stop, 1, __ATOMIC_RELEASE);
@@ -205,6 +205,7 @@ int ghost_elfldr(void)
         return elfldr_select(s);
     int rc = arena_init() != 0 || ext_start() != 0 ? -8 : ext_elfldr();
     g_payload_fault = NULL;
+    g_swap_fault = NULL;
     ext_abandon();
     logf("elfldr: back to the Lua loader (%d)", rc);
     return rc;
@@ -285,7 +286,7 @@ int ghost_boot(void)
               * --title the selector shows one title too, or none, with its Settings */
         bool show = choose || (g_ctx->flags & CTX_FLAG_SELECT) || profile_has(PF_SAVE_TOOL) ||
                     (settings && !profile_requested());
-        if (show && !is_ps4() && !is_jakx()) /* the FTP server while games are picked, on into the title */
+        if (show && !is_ps4()) /* the FTP server while games are picked, on into the title */
             ext_ftp_early(CTX_FTP_PORT(g_ctx->flags));
         picked = sel_run(show, title);
     }

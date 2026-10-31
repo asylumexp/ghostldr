@@ -68,13 +68,13 @@ To undo: run step 3 with the backup folder as the source.
 
 ### With Apollo Save Tool under ghostldr
 
-Apollo running under ghostldr gets the same writes: when Apollo changes a save
-of a game whose keystone it has (its 117 built-in ones, or
-`/data/ghostldr/keystones/<TITLE>.keystone`, which ghostldr fills by itself
-from any decrypted save of that game on the USB drive that carries
-`sce_sys/keystone`, e.g. one exported on a jailbroken console), the change is written into the
-save when Apollo is done with it, and a box at the bottom of the screen says to
-close SWRR from the PS button menu to finish saving (it stays until SWRR
+Apollo running under ghostldr gets the same writes with or without the game's
+keystone. With one (its built-in files, `/data/ghostldr/keystones/<TITLE>.keystone`,
+or one ghostldr learns from a decrypted save on USB), the initial copy uses a
+normal read-only fingerprint mount. Without one it uses the H-RACE, and files
+the working copy lacks stay in the save. In either case the change is written
+into the save when Apollo is done with it, and a box at the bottom of the screen
+says to close SWRR from the PS button menu to finish saving (it stays until SWRR
 closes; Apollo's own "success" message is not the end). That covers
 Apollo's **Apply cheats**, **Import decrypted save files**, **Copy save game
 to HDD** (into a save that exists) and **resign**; what Apollo writes into

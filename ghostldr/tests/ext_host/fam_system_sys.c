@@ -150,3 +150,7 @@ long fs_file_size(const char *path)
     struct stat st;
     return stat(path, &st) == 0 ? (long)st.st_size : -1;
 }
+
+/* the core's hle.c (not linked here): ext_unplace drops host_real's cached names that point into the
+ * extension; this harness keeps no such cache */
+void host_real_diag_ext_unplace(unsigned long long lo, unsigned long long hi) { (void)lo, (void)hi; }

@@ -267,10 +267,15 @@ class FtpSaves(unittest.TestCase):
         self.assertEqual((save / "sce_sys/param.sfo").read_bytes(), b"sfo")
         self.assertTrue(any("CLOSE SWRR" in ln for ln in lines))
 
-    def test_no_keystone_no_writes(self) -> None:
-        r, lines = self.run_script("put /saves/Alice/CUSA00001/SAVE0/data.bin x")
-        self.assertEqual(r["put /saves/Alice/CUSA00001/SAVE0/data.bin"], "error 13")
-        self.assertEqual((self.root / f"saves/{ALICE}/CUSA00001/SAVE0/data.bin").read_bytes(), b"nokey")
+    def test_no_keystone_writes_through_the_race(self) -> None:
+        r, lines = self.run_script("put /saves/Alice/CUSA00001/SAVE0/data.bin x",
+                                   "put /saves/Alice/CUSA00001/SAVE0/new.bin new")
+        self.assertEqual(r["put /saves/Alice/CUSA00001/SAVE0/data.bin"], "error 0")
+        self.assertEqual(r["put /saves/Alice/CUSA00001/SAVE0/new.bin"], "error 0")
+        self.assertEqual((self.root / f"saves/{ALICE}/CUSA00001/SAVE0/data.bin").read_bytes(), b"x")
+        self.assertEqual((self.root / f"saves/{ALICE}/CUSA00001/SAVE0/new.bin").read_bytes(), b"new")
+        self.assertEqual(len([ln for ln in lines if ln.startswith("race_copy")]), 1, "\n".join(lines))
+        self.assertEqual(len([ln for ln in lines if ln.startswith("race_write")]), 1, "\n".join(lines))
 
     def test_changes_left_when_the_server_stops_are_written(self) -> None:
         _, lines = self.run_script("put /saves/Alice/CUSA07992/SCUS-97429/lua/a.lua late")

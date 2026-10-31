@@ -154,6 +154,26 @@ static int k_map_direct(void **addr, size_t len, int prot, int flags, off_t phys
     return 0;
 }
 
+/* two direct allocations of the title in one 4 MiB mapping, for the crash
+ * screen's census of written memory (failure.c): the first written, from
+ * 1 MiB of the second on */
+static struct dm_usage g_usage[32] = {{.phys = 0x10000000, .len = 2 << 20, .mapped = 2 << 20, .from = 0x1234},
+                                      {.phys = 0x10200000, .len = 2 << 20, .mapped = 2 << 20, .from = 0x5678, .type = 3}};
+static u32 g_nusage = 2;
+static u8 *g_heap;
+static int k_virtual_query(const void *addr, int flags, void *info, size_t size)
+{
+    struct {
+        u64 start, end, offset;
+        s32 prot, type;
+        u8 flags;
+    } __attribute__((packed)) q = {(u64)g_heap, (u64)g_heap + (4 << 20), 0x10000000, 3, 0, 2};
+    if (!g_heap || (u64)addr >= q.end)
+        return -1;
+    memcpy(info, &q, sizeof(q));
+    return 0;
+}
+
 /* macOS dirent: ino u64, seekoff u64, reclen u16, namlen u16, type u8, name */
 static int k_getdents(int fd, void *buf, int size)
 {
@@ -349,6 +369,10 @@ void ov_banner(const char *text, u32 seconds) { printf("banner: %s\n", text); }
 void harness_family(const struct ext_family *f) { (void)f; } /* the scenarios call what init would */
 struct ghost_diag *log_diag(void); /* log.c */
 
+/* swap.c's stats, which a crash report ends with (none here) */
+void swap_log(void) { logf("swap: the harness backs no heap in part"); }
+
+static char *slurp(const char *p, long *size);
 static int g_usleeps;
 static int k_usleep(u32 us)
 {
@@ -356,6 +380,13 @@ static int k_usleep(u32 us)
         printf("crash page kept: %s\n", g_page);
         expect(strstr(g_page, "The game crashed.") != NULL, "crash: the page says so");
         expect(strstr(g_page, "eboot.bin+0x1234") != NULL, "crash: where, for a report");
+        char *log = slurp("/temp0/ghostldr.log", NULL);
+        expect(strstr(log, "(2 MiB, prot 3, phys 10000000, allocated from eboot+1234 type 0): 2 MiB written, the last "
+                           "at +2 MiB") != NULL &&
+                   strstr(log, "(2 MiB, prot 3, phys 10200000, allocated from eboot+5678 type 3): 1 MiB written, the "
+                               "last at +2 MiB") != NULL,
+               "crash: how full the title's memory was");
+        expect(strstr(log, "swap: the harness backs no heap in part") != NULL, "crash: the swap file's stats");
         exit(g_failed);
     }
     if (strcmp(g_mode, "hang") == 0)
@@ -563,7 +594,8 @@ int main(int argc, char **argv)
     put("/dev/notification0", ""); /* the device is there */
     K = (struct kfuncs){.usleep = k_usleep, .getpid = k_getpid, .open = k_open, .read = k_read, .pread = k_pread,
                         .write = k_write, .close = k_close, .lseek = k_lseek, .map_flex = k_map_flex,
-                        .direct_size = k_direct_size, .alloc_direct = k_alloc_direct, .map_direct = k_map_direct};
+                        .direct_size = k_direct_size, .alloc_direct = k_alloc_direct, .map_direct = k_map_direct,
+                        .virtual_query = k_virtual_query};
     g_ctx = &g_ctx_v;
     g_ctx_v.log_fd = (u64)-1;
     static struct module eboot = {.name = "eboot.bin", .base = 0x400000, .image_size = 0x100000};
@@ -574,7 +606,8 @@ int main(int argc, char **argv)
                                .host_dlsym = host_dlsym_, .host_module_handle = module_handle,
                                .page_alloc = page_alloc_, .page_free = page_free_, .spin_lock = spin_lock_,
                                .spin_unlock = spin_unlock_, .vfs_stat = vstat, .hle_lookup = hle_lookup_,
-                               .gfs_mount = gfs_mount_, .gfs_umount = gfs_umount_, .diag = log_diag};
+                               .gfs_mount = gfs_mount_, .gfs_umount = gfs_umount_, .diag = log_diag,
+                               .dm_usage = g_usage, .dm_nusage = &g_nusage};
     G = &g_api;
     logf("first line");
     if (strcmp(g_mode, "log") == 0)
@@ -593,6 +626,9 @@ int main(int argc, char **argv)
         struct ghost_diag *D = log_diag();
         D->title = 1; /* (no monitor thread: its sleeps would end the scenario) */
         D->sig = 11, D->rip = 0x401234, D->crashed = 1;
+        g_heap = calloc(1, 4 << 20);
+        memset(g_heap, 1, 2 << 20);
+        memset(g_heap + (3 << 20), 1, 1 << 20);
         D->show(FAIL_CRASH, 11); /* does not return: k_usleep ends it */
         expect(false, "the crash page returned");
     } else if (strcmp(g_mode, "exit") == 0) {

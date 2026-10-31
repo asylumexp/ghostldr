@@ -347,6 +347,8 @@ static void *f_host_real_in(const char *mod, const char *name)
         return (void *)f_initial_user;
     return NULL;
 }
+/* host_real: nothing here (no sceSysmoduleLoadModule: libSceUsbStorage stays as the fake has it) */
+static void *f_host_real(const char *name) { return NULL; }
 
 /* a path under a mount is its drive folder's */
 static const char *mnt(const char *path, char *buf, size_t size)
@@ -661,6 +663,7 @@ int main(int argc, char **argv)
     g_api.k = &g_k;
     g_api.logf = f_logf;
     g_api.host_real_in = f_host_real_in;
+    g_api.host_real = f_host_real;
     g_api.host_module_handle = f_module_handle;
     g_api.host_dlsym = f_dlsym;
     g_k.module_info = f_module_info;

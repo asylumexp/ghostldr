@@ -88,6 +88,9 @@ bool savedata_keystone(s32 user, const char *tid, u8 out[0x60]);
  * mount the save service binds and then refuses (no keystone match, perhaps
  * another account's): save_race.c.  0, or an error. */
 s32 save_race_copy(s32 user, const char *tid, const char *dir, const char *dst);
+/* The same H-RACE copy, left writable as a working tree.  Changes are not in
+ * the save until save_race_write is called; that call may use a NULL fp. */
+s32 save_race_rw_copy(s32 user, const char *tid, const char *dir, const char *dst);
 
 /* ---- writing a save the service mounts and then refuses (save_race.c) ----
  * The resign without a jailbreak: tid's save dir of user gets the files of src

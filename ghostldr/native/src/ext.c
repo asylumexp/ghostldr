@@ -512,7 +512,7 @@ int ext_reclaim(struct bx_reclaim *r)
 }
 
 /* The FTP server while the game selector shows (struct ext_early.ftp_start):
- * port 0, or a PS4 or Jak X, where a drive isn't read either: none.  It
+ * port 0, or a PS4, where a drive isn't read either: none.  It
  * goes in ftp_gone() before the code does. */
 static bool g_ftp;
 void ext_ftp_early(u32 port)

@@ -287,13 +287,23 @@ static NOINLINE u64 h_rename(u64 from, u64 to, u64 c, u64 d, u64 e, u32 i)
 
 /* ---- fds ---- */
 
+/* a buffer in a heap the swap file backs: resident and pinned while the
+ * kernel uses it, which can't fault a page in (swap.c; none in the ELF
+ * loader's extension) */
+void swap_pin(const void *buf, u64 len) HIDDEN __attribute__((weak));
+void swap_unpin(const void *buf, u64 len) HIDDEN __attribute__((weak));
+
 /* read(fd, buf, n) and pread(fd, buf, n, off) */
 static NOINLINE u64 h_read(u64 fd, u64 buf, u64 n, u64 off, u64 e, u32 i)
 {
     bool at = (i & 0xFF) == R_sceKernelPread || (i & 0xFF) == R_pread;
     if (gfs_owns((int)fd))
         return ret(i, at ? gfs_pread((int)fd, (void *)buf, n, (s64)off) : gfs_read((int)fd, (void *)buf, n));
+    if (swap_pin)
+        swap_pin((void *)buf, n);
     u64 r = pass_usb(i, NULL, fd, buf, n, off);
+    if (swap_unpin)
+        swap_unpin((void *)buf, n);
     if (watched((s32)fd))
         logf("%sread(fd %x, %lx @ %lx) -> %lx", at ? "p" : "", (u32)fd, n, at ? off : 0, r);
     return r;
@@ -303,8 +313,15 @@ static NOINLINE u64 h_read(u64 fd, u64 buf, u64 n, u64 off, u64 e, u32 i)
 static NOINLINE u64 h_readv(u64 fd, u64 iov, u64 n, u64 off, u64 e, u32 i)
 {
     bool at = (i & 0xFF) == R_sceKernelPreadv || (i & 0xFF) == R_preadv;
-    if (!gfs_owns((int)fd))
-        return pass_usb(i, NULL, fd, iov, n, off);
+    if (!gfs_owns((int)fd)) {
+        const u64 *v = (const u64 *)iov;
+        for (u64 k = 0; swap_pin && k < (u64)(s32)n; k++)
+            swap_pin((void *)v[2 * k], v[2 * k + 1]);
+        u64 r = pass_usb(i, NULL, fd, iov, n, off);
+        for (u64 k = 0; swap_unpin && k < (u64)(s32)n; k++)
+            swap_unpin((void *)v[2 * k], v[2 * k + 1]);
+        return r;
+    }
     if (at && (s64)off < 0)
         return ret(i, E_INVAL);
     const u64 *v = (const u64 *)iov;
@@ -407,8 +424,14 @@ static NOINLINE u64 h_write(u64 fd, u64 buf, u64 len, u64 d, u64 e, u32 i)
 {
     if (gfs_owns((int)fd))
         return ret(i, E_BADF);
-    if (fd != 1 && fd != 2)
-        return pass_usb(i, NULL, fd, buf, len, 0);
+    if (fd != 1 && fd != 2) {
+        if (swap_pin)
+            swap_pin((void *)buf, len);
+        u64 r = pass_usb(i, NULL, fd, buf, len, 0);
+        if (swap_unpin)
+            swap_unpin((void *)buf, len);
+        return r;
+    }
     const char *c = (const char *)buf;
     unsigned payload = elfldr_output((int)fd, c, len);
     spin_lock(&g_out_lock);

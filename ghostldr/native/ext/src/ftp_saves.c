@@ -1017,12 +1017,13 @@ static struct listing *listing(s32 user, const char *tid, long max_age)
  *   - a mount: SWRR's own saves, and another title's read-only with its
  *     fingerprint; at most MOUNTS, unmounted when idle;
  *   - a race copy: another title's save without a keystone, or one the
- *     system refuses (another account's): a read-only copy in /temp0 made
+ *     system refuses (another account's): a copy in /temp0 made
  *     through a mount ShellCore binds before refusing it (save_race_copy).
  *     Each leaves a mount point behind until SWRR closes, six per session at
  *     most, so it is made only when a client goes into the save, once;
- *   - a writable copy: another title's save with its keystone, once a client
- *     writes into it (save_fp_copy).  From then on the client sees the copy;
+ *   - a writable copy: another title's save once a client writes into it,
+ *     made with save_fp_copy when its keystone is known or the H-RACE when it
+ *     is not.  From then on the client sees the copy;
  *     COMMIT_MS after the last change with no file of it open, the copy is
  *     written into the save through a read-write mount the service binds and
  *     then refuses (save_race_write): the save keeps its owner and keystone,
@@ -1148,7 +1149,8 @@ static int mount_save(const struct where *w, bool own, const char *fp, const cha
     return k;
 }
 
-/* a copy of the save in /temp0, made with the lock let go: rw a writable one (save_fp_copy, with fp), else a
+/* a copy of the save in /temp0, made with the lock let go: rw a writable one (save_fp_copy with fp, otherwise
+ * save_race_rw_copy), else a
  * read-only one through a refused mount (save_race_copy).  c: its entry, or -1 for a new one.  The view, or
  * -errno (lock held) */
 static int make_copy(const struct where *w, int c, bool rw, const char *fp)
@@ -1170,7 +1172,9 @@ static int make_copy(const struct where *w, int c, bool rw, const char *fp)
     if (!rw)
         logf("ftp: saves: %s/%s of user %08x: %s; a read-only copy through a refused mount (each leaves a mount "
              "point until SWRR closes)", w->tid, w->dir, (u32)w->user, fpc[0] ? "the system refused it" : "no keystone");
-    s32 rc = rw ? save_fp_copy(w->user, w->tid, w->dir, fpc, host) : save_race_copy(w->user, w->tid, w->dir, host);
+    s32 rc = rw ? (fpc[0] ? save_fp_copy(w->user, w->tid, w->dir, fpc, host)
+                              : save_race_rw_copy(w->user, w->tid, w->dir, host))
+                : save_race_copy(w->user, w->tid, w->dir, host);
     u64 digest = rc == 0 && rw ? save_tree_digest(host) : 0;
     logf("ftp: saves: %s/%s of user %08x: %s copy in %s -> %x", w->tid, w->dir, (u32)w->user,
          rw ? "a writable" : "a read-only", host, (u32)rc);
@@ -1238,12 +1242,6 @@ static int acquire(const struct where *w, bool write)
         if (write && swrr_title(w->tid))
             return -FV_EROFS; /* the other region's SWRR: its saves hold the exploit */
         if (write) {
-            if (!fp) {
-                logf("ftp: saves: no keystone for %s: its saves can be read, not written (a decrypted save of it "
-                     "with sce_sys/keystone in PS4/APOLLO on a USB drive, or ghostldr/keystones/%s.keystone on it, "
-                     "adds one)", w->tid, w->tid);
-                return -FV_EACCES;
-            }
             if (c >= 0 && g_c[c].state == C_READY && g_c[c].refs)
                 return -FV_EBUSY; /* its read-only copy is being read */
             if (k >= 0) {

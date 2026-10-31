@@ -57,6 +57,7 @@ int host_copy(const char *tid, const char *dir, const char *dst);
 static char g_root[1024];
 static const char *g_scenario;
 static int g_errno;
+static int g_mount_internal_calls;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static struct {
@@ -522,6 +523,10 @@ static int32_t k_mount_internal(const struct mount1 *m, char *res, const void *o
 {
     if (!m->title || !save_exists(m->title, m->dir))
         return (int32_t)0x809F0008;
+    if (is("missonce") && g_mount_internal_calls++ == 0) {
+        usleep(80000); /* the first bind window passed without a racer catching it */
+        return (int32_t)0x809F000F;
+    }
     int n = bind(m->title, m->dir, m->mode & 2);
     if (n < 0)
         return (int32_t)0x809F000C;

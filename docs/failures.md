@@ -86,6 +86,7 @@ What to do: press OK, start SWRR again, and send `ghostldr.lua` again. If it hap
 - **Closing SWRR** after a title's exit: `sceSystemServiceLoadExec("exit")`, as an app closes itself. A plain `_exit` is a crash to the system (CE-34878-0 on a PS4).
 - **The monitor.** A thread of the extension's (`ghostldr-monitor`), from the title's start: once a second it syncs the drive's log, attaches the log again after its drive came back, and reads the title's flip count (`sceVideoOutGetFlipStatus`) for the stuck checks.
 - **A crash** is reported by the core's signal handler (`crash.c`, signals 4, 6, 8, 10 and 11): the log first, a notification, then the page on the crashing thread, which stays parked.
+- **How full the game's memory was** comes with every crash, in every build (`ext/src/failure.c` `log_written_memory`, before the page): one `memory:` line per direct allocation of the game, as far as each of its mappings holds it (adjacent heaps share a mapping), with its size, protection, physical offset, the executable offset that allocated it, and how much of it was written (`W MiB written, the last at +X MiB`). A game's memory starts zeroed, so a 64 KiB block that still reads as zeros (sampled every 8 KiB) was never handed out. A heap written to its end ran out; one with room left can give some to it in a memory plan (`data/titles/*.json` set and absorb tables). This is how Bloodborne's crash loading a second map was traced to its GPU heap, cut by its plan. Flexible mappings aren't listed.
 
 ## Tested
 

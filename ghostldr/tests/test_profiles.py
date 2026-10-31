@@ -222,6 +222,29 @@ class ProfileTests(unittest.TestCase):
             self.assertTrue(0x4736dc0 <= off < 0x4736e40, t["what"])
             want = [int(v, 16) for v in t.get("expect", [])]
             self.assertEqual(list(struct.unpack(f"<{len(want)}Q", img.read_vaddr(off, 8 * len(want)))), want)
+        for p in prof["memory"]["plan"]["patches"]:  # the 116 MiB block's size, as immediates
+            self.assertEqual(img.read_vaddr(int(p["at"], 16), 4).hex(), p["expect"], p["what"])
+
+    def test_plan_patches_compile_to_records(self) -> None:
+        blob = profiles.compile_blob(profiles.load("CUSA00900"))
+        at = blob.find(struct.pack("<IB3x", 0x2081a8f, 4)) - 8
+        self.assertGreater(at, 0)
+        self.assertEqual(struct.unpack_from("<H", blob, at)[0], profiles.REC_PATCH)
+        self.assertEqual(blob[at + 16:at + 24].hex(), "0000400700000002")
+        self.assertEqual(blob[at + 24:at + 60], b"first block 116 -> 32 MiB: allocate\0")
+        bad = profiles.load("CUSA00900")
+        bad["memory"]["plan"]["patches"][0]["write"] = "00"
+        self.assertTrue([e for e in profiles.validate(bad) if "as many of each" in e])
+
+    def test_swap_entries_compile_to_records(self) -> None:
+        blob = profiles.compile_blob(profiles.load("CUSA00900"))
+        at = blob.find(struct.pack("<4I", 0x2081ec1, 296, 120, 0)) - 8
+        self.assertGreater(at, 0)
+        self.assertEqual(struct.unpack_from("<H", blob, at)[0], profiles.REC_SWAP)
+        self.assertEqual(blob[at + 24:at + 35], b"HAVOK heap\0")
+        bad = profiles.load("CUSA00900")
+        bad["memory"]["plan"]["swap"][0]["resident_mib"] = 300
+        self.assertTrue([e for e in profiles.validate(bad) if "at most len_mib" in e])
 
     def test_dump_is_detected_by_its_fingerprint(self) -> None:
         src = profiles.DEFAULT_SRC
@@ -340,18 +363,21 @@ class CoreProfileTests(unittest.TestCase):
 
     def test_bloodborne_plan_shrinks_its_second_gpu_heap(self) -> None:
         """Bloodborne's config 1 asks for 4478 MiB of heaps; with Ghost's logged
-        4532 MiB free, GFX_GraphicsPrivateB absorbs the rest (4532 - 4066
-        fixed - 32 reserve - 100 video) and nothing else changes."""
+        4532 MiB free, the first block shrinks to 32 MiB (patched), HAVOK and
+        GFX keep their sizes with 120 and 220 MiB resident (the swap file:
+        what crashes' memory census showed they use, with room), and
+        GFX_GraphicsPrivateB absorbs the rest (4532 - 3750 fixed - 32 reserve -
+        100 video)."""
         lines = self.run_host("bb", BLOODBORNE_FP)
         self.assertIn("title CUSA00900 has plan 2", lines)
-        self.assertIn("budget: 4532 MiB free in 6 holes; GFX_GraphicsPrivateB heap 886 -> 334 MiB; reporting 4400 "
+        self.assertIn("budget: 4532 MiB free in 6 holes; GFX_GraphicsPrivateB heap 886 -> 650 MiB; reporting 4400 "
                       "MiB direct memory", lines)
-        self.assertIn("patch rc 0 reported 4400 MiB; config 1: 524 276 152 2287 334 10 6 0 14 0 5 8 9 296 0 5", lines)
+        self.assertIn("patch rc 0 reported 4400 MiB; config 1: 524 276 152 2287 650 10 6 0 14 0 5 8 9 296 0 5", lines)
 
     def test_bloodborne_gpu_heap_knob_moves_memory_between_its_gpu_heaps(self) -> None:
         lines = self.run_host("bb", BLOODBORNE_FP, env={"GHOSTLDR_TEST_GPU_HEAP": "2087"})
         self.assertIn("budget: GFX_GraphicsPrivate heap 2287 -> 2087 MiB", lines)
-        self.assertIn("patch rc 0 reported 4400 MiB; config 1: 524 276 152 2087 534 10 6 0 14 0 5 8 9 296 0 5", lines)
+        self.assertIn("patch rc 0 reported 4400 MiB; config 1: 524 276 152 2087 850 10 6 0 14 0 5 8 9 296 0 5", lines)
 
     def test_another_build_of_bloodborne_is_left_alone(self) -> None:
         lines = self.run_host("bb", "00" * 20)

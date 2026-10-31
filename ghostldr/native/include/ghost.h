@@ -473,6 +473,8 @@ struct prof_rec {
 #define REC_NEO 7       /* the plan for a Pro-mode host (Jak X): the title's own Pro memory mode */
 #define REC_PREFIX 8    /* the title's save container prefix, A-Z 0-9 + NUL (a USB drive's title without a prefix file: approot.c) */
 #define REC_SEED 9      /* a community memory plan for one build (automem.c; docs/community-plans.md) */
+#define REC_PATCH 10    /* bytes of the main executable's text, replaced with the plan (ext/src/ext_main.c) */
+#define REC_SWAP 11     /* a CPU-only heap backed in part, the rest in a swap file (ext/src/swap.c) */
 struct prof_tls {       /* tools/tls_sites.py: one module's thread-pointer loads, checked before patching */
     struct prof_rec r;
     char module[32];    /* its file name, e.g. "eboot.bin" */
@@ -482,6 +484,17 @@ struct prof_exec {      /* a module's code ranges, instead of the evidence bxpla
     struct prof_rec r;
     char module[32];    /* its file name, e.g. "eboot.bin" */
     u32 count, range[]; /* start, end text offsets of each range */
+};
+struct prof_swap {      /* then the name */
+    struct prof_rec r;
+    u32 site, len_mib;  /* the allocation: its call site in the executable, its size */
+    u32 resident_mib, reserved;
+};
+struct prof_patch {     /* expect[len] then write[len], then the name; checked before patching */
+    struct prof_rec r;
+    u32 offset;
+    u8 len, reserved[3];
+    u8 bytes[];
 };
 struct prof_seed {      /* a learned plan shared by other players: a build without one of its own starts from it */
     struct prof_rec r;
@@ -592,6 +605,7 @@ struct module *tls_owner(void); /* the payload the calling thread belongs to, or
 int payload_thread_start(struct module *owner, void *thr, const void *attr, void *(*fn)(void *), void *arg,
                          const char *name);
 extern void (*g_payload_fault)(struct module *owner, int sig, u64 rip, u64 addr); /* crash.c: a payload thread faulted */
+extern int (*g_swap_fault)(u64 addr); /* crash.c: the extension's swap file pages in a faulting address */
 void rpc_lock(void);          /* one user of the compiler-process RPC at a time (loader.c) */
 void rpc_unlock(void);
 void tls_ensure_thread(void);

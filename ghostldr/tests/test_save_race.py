@@ -290,6 +290,12 @@ class SaveRaceCopy(SaveRaceBase):
         self.assertEqual(r["rc"], "0", "\n".join(lines))
         self.expect_full_copy(got, lines)
 
+    def test_a_completely_missed_mount_window_is_retried(self) -> None:
+        r, lines, got = self.run_copy("missonce")
+        self.assertEqual(r["rc"], "0", "\n".join(lines))
+        self.expect_full_copy(got, lines)
+        self.assertTrue(any("retrying the mount race (2/3)" in ln for ln in lines), "\n".join(lines))
+
     def test_a_race_holds_a_handful_of_descriptors(self) -> None:
         # 3 racers x 2 slots x (one folder + one file), plus the save's files while they are pinned
         r, lines, got = self.run_copy("ps5")
@@ -342,8 +348,21 @@ class SaveToolWrites(SaveRaceBase):
         out = subprocess.run([str(self.exe), str(self.root), "ps5", TITLE, DIR, "-", "-", "-", "fsvsh-learn-ro"],
                              capture_output=True, text=True, timeout=120)
         lines = out.stdout.splitlines()
-        self.assertTrue(any("banner: No keystone for CUSA07992" in ln for ln in lines), "\n".join(lines))
+        self.assertTrue(any("banner: No keystone for CUSA07992: changes use the save mount race" in ln
+                            for ln in lines), "\n".join(lines))
         self.assertFalse((self.root / f"data/ghostldr/keystones/{TITLE}.keystone").exists())
+
+    def test_without_a_keystone_tool_changes_are_written_through_the_race(self) -> None:
+        out = subprocess.run([str(self.exe), str(self.root), "ps5", TITLE, DIR, "-", "-", "-", "fsvsh-learn"],
+                             capture_output=True, text=True, timeout=120)
+        lines = out.stdout.splitlines()
+        self.assertEqual([ln for ln in lines if ln.startswith("VIOLATION")], [], "\n".join(lines))
+        got = tree(self.save)
+        self.assertEqual(got["VMC0.card"], b"\x5A" * 70000)
+        self.assertEqual(got["cheat.txt"], b"infinite boost")
+        self.assertEqual(got["lua/init.lua"], TARGET["lua/init.lua"])
+        self.assert_sce_sys_untouched()
+        self.assertTrue(any("CLOSE SWRR to keep them" in ln for ln in lines), "\n".join(lines))
 
     def test_an_unchanged_copy_writes_nothing(self) -> None:
         r, lines = self.run_tool("fsvsh-same")

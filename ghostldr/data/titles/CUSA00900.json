@@ -3,7 +3,7 @@
  "name": "Bloodborne",
  "version": "01.09",
  "status": "playable",
- "notes": "Its code (44 MiB) runs in two of the emulator's JIT buffers (bigexec.c). Its memory config Master_ps4_GFXMIX (table 0x4736d40: 16 heaps per config, 0x80 bytes each, config 1) asks for 4478 MiB of direct memory in 16 heaps at boot, plus 116 MiB first and 162 MiB of flexible heaps (config 2); SWRR has about 4435 MiB free. Every heap is mapped whole when it is made, so lazy commit saves nothing: the second GPU-private heap (GFX_GraphicsPrivateB, 886 MiB) takes the shortfall. Plan-free, that heap is refused and the title carries on without it.",
+ "notes": "Its code (44 MiB) runs in two of the emulator's JIT buffers (bigexec.c). Its memory config Master_ps4_GFXMIX (table 0x4736d40: 16 heaps per config, 0x80 bytes each, config 1) asks for 4478 MiB of direct memory in 16 heaps at boot, plus 116 MiB first and 162 MiB of flexible heaps (config 2); SWRR has about 4435 MiB free. Every heap is mapped whole when it is made, so lazy commit saves nothing: the second GPU-private heap (GFX_GraphicsPrivateB, 886 MiB) takes the shortfall. Plan-free, that heap is refused and the title carries on without it. B at ~240 MiB ran out loading the second map (m27, out of the clinic's first room: a failed GPU allocation, then a null buffer at eboot+2166b8a); the crash's memory census had both GPU-private heaps written to their ends, HAVOK to 85 of 296 MiB and GFX to 196 of 276, so those give B 160 MiB. With B at 400 MiB m27 loaded and play went on until a texture's allocation failed (eboot+219f874); that census had HAVOK at 85 of 176, GFX at 198 of 236, and the 116 MiB block the engine makes first (eboot+2081aa3, its size an immediate: the plan's patches) at 12: that block 32 MiB (title_fixed_mib 84 lower), and HAVOK and GFX keep their sizes with 120 and 220 MiB of memory behind them, the rest in a swap file (swap entries; title_fixed_mib 232 lower): B ~556 MiB.",
  "eboot": {"fingerprint": "543f03aa757c0ab8edb7db53668f0c436d42b43d"},
  "pack": {"prefix": "G00900"},
  "memory": {
@@ -11,7 +11,7 @@
   "runtime_reserve_mib": 32,
   "video_reserve_mib": 100,
   "plan": {
-   "title_fixed_mib": 4066,
+   "title_fixed_mib": 3750,
    "overcommit_mib": 0,
    "tables": [
     {"table": "0x4736de0", "role": "absorb", "what": "GFX_GraphicsPrivateB heap", "min_mib": 64,
@@ -20,6 +20,19 @@
     {"table": "0x4736dd8", "role": "set", "what": "GFX_GraphicsPrivate heap", "knob": "gpu_heap"},
     {"table": "0x4736dc0", "role": "set", "what": "MAIN heap", "knob": "cpu_heap"},
     {"table": "0x4736e28", "role": "set", "what": "HAVOK heap", "knob": "pool1"}
+   ],
+   "swap": [
+    {"site": "0x2081ec1", "len_mib": 276, "resident_mib": 220, "what": "GFX heap"},
+    {"site": "0x2081ec1", "len_mib": 296, "resident_mib": 120, "what": "HAVOK heap"}
+   ],
+   "patches": [
+    {"at": "0x2081a8f", "expect": "00004007", "write": "00000002", "what": "first block 116 -> 32 MiB: allocate"},
+    {"at": "0x2081ab0", "expect": "00004007", "write": "00000002", "what": "first block: map"},
+    {"at": "0x2081ad3", "expect": "00004007", "write": "00000002", "what": "first block: release"},
+    {"at": "0x2081afb", "expect": "00004007", "write": "00000002", "what": "first block: message"},
+    {"at": "0x2081b18", "expect": "f8ff3f07", "write": "f8ffff01", "what": "first block: its end"},
+    {"at": "0x2081b4f", "expect": "00004007", "write": "00000002", "what": "first block: message 2"},
+    {"at": "0x2081c41", "expect": "00004007", "write": "00000002", "what": "first block: its size"}
    ]
   }
  }

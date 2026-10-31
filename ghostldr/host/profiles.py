@@ -68,7 +68,8 @@ MAGIC = b"GLPF"
 VERSION = 1
 HEADER = struct.Struct("<4sHHII16s20sI5iIiII4x")  # struct prof_hdr, 96 bytes
 REC = struct.Struct("<HHI")                        # struct prof_rec
-REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME, REC_EXEC, REC_NEO, REC_PREFIX, REC_SEED = 1, 2, 3, 4, 5, 6, 7, 8, 9
+REC_PLAN, REC_TABLE, REC_RULE, REC_TLS, REC_NAME, REC_EXEC, REC_NEO, REC_PREFIX, REC_SEED, REC_PATCH, REC_SWAP = \
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
 SEED = struct.Struct("<20sIIII")                   # struct prof_seed after its record header, then the plan
 NAME_MAX = 127                 # bytes of UTF-8 in REC_NAME (the selector's name field is 128)
 TLS_PER_REC = 15000            # offsets per REC_TLS record (its size is a u16)
@@ -423,9 +424,39 @@ def _validate_exec(e: list, p: dict) -> None:
 
 
 def _validate_plan(e: list, plan) -> None:
-    if not _keys(e, "memory.plan", plan, {"title_fixed_mib", "overcommit_mib", "lazy_sites", "tables", "neo"},
-                 {"title_fixed_mib", "tables"}):
+    if not _keys(e, "memory.plan", plan, {"title_fixed_mib", "overcommit_mib", "lazy_sites", "tables", "neo",
+                                          "patches", "swap"}, {"title_fixed_mib", "tables"}):
         return
+    swap = plan.get("swap", [])
+    if not isinstance(swap, list) or len(swap) > 4:
+        e.append("memory.plan.swap must list at most 4 heaps")
+        swap = []
+    for i, t in enumerate(swap):
+        w = f"memory.plan.swap[{i}]"
+        if not _keys(e, w, t, {"site", "len_mib", "resident_mib", "what"}, {"site", "len_mib", "resident_mib"}):
+            continue
+        if _int(t["site"], 0, 2**32 - 1) is None:
+            e.append(f"{w}.site must be the allocation's return address in the eboot (as the log's \"from eboot+\")")
+        size, res = _int(t["len_mib"], 1, 65535), _int(t["resident_mib"], 2, 65535)
+        if size is None or res is None or res % 2 or res > size:
+            e.append(f"{w}: resident_mib is even (2 MiB pieces) and at most len_mib")
+    patches = plan.get("patches", [])
+    if not isinstance(patches, list) or len(patches) > 16:
+        e.append("memory.plan.patches must list at most 16 patches")
+        patches = []
+    for i, t in enumerate(patches):
+        w = f"memory.plan.patches[{i}]"
+        if not _keys(e, w, t, {"at", "expect", "write", "what"}, {"at", "expect", "write"}):
+            continue
+        if _int(t["at"], 0, 2**32 - 1) is None:
+            e.append(f"{w}.at must be an offset in the eboot's text")
+        try:
+            exp, new = bytes.fromhex(t["expect"]), bytes.fromhex(t["write"])
+        except (TypeError, ValueError):
+            e.append(f"{w}.expect and .write are hex bytes")
+            continue
+        if not 1 <= len(exp) <= 16 or len(new) != len(exp):
+            e.append(f"{w}: expect and write are 1-16 bytes, as many of each")
     for k in ("title_fixed_mib", "overcommit_mib"):
         if k in plan and _int(plan[k], 0, 65535) is None:
             e.append(f"memory.plan.{k} must be 0..65535 MiB")
@@ -577,6 +608,13 @@ def compile_blob(prof: dict, src: Path | None = None, flags: int = 0, extra_feat
                                                 KNOBS.get(t.get("knob"), NO_KNOB), len(exp), _int(t.get("mib", 0)),
                                                 _int(t.get("min_mib", 0)))
                          + struct.pack(f"<{len(exp)}Q", *exp) + _cstr(t.get("what", "table")[:40]))
+        for t in plan.get("swap", []):      # CPU-only heaps backed in part (ext/src/swap.c)
+            recs += _rec(REC_SWAP, struct.pack("<4I", _int(t["site"]), _int(t["len_mib"]), _int(t["resident_mib"]), 0)
+                         + _cstr(t.get("what", "heap")[:40]))
+        for t in plan.get("patches", []):   # sizes the executable holds as immediates (ext_main.c)
+            exp, new = bytes.fromhex(t["expect"]), bytes.fromhex(t["write"])
+            recs += _rec(REC_PATCH, struct.pack("<IB3x", _int(t["at"]), len(exp)) + exp + new
+                         + _cstr(t.get("what", "patch")[:40]))
         if plan.get("neo"):     # a Pro-mode host (Jak X) runs the title in this memory mode
             neo = plan["neo"]
             sizes = [0] * 8

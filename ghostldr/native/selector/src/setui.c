@@ -251,8 +251,6 @@ static void build(struct sel *S)
         if (in->usb == USB_PS4) {
             text_row(S, "USB DRIVES", "ghostldr doesn't read USB drives on a PS4: games go in saved data "
                                       "(Network \xE2\x80\xBA Install over network).");
-        } else if (in->usb == USB_JAKX) {
-            text_row(S, "USB DRIVES", "ghostldr doesn't read USB drives in Jak X.");
         } else if (in->usb != USB_READ) {
             text_row(S, "USB DRIVES", "The console's USB storage service didn't answer: no drive could be read. "
                                       "Plug the drive in again and start ghostldr again.");
@@ -293,7 +291,7 @@ static void build(struct sel *S)
         break;
     }
     case SEC_LOGS: {
-        if (in->usb == USB_PS4 || in->usb == USB_JAKX) {
+        if (in->usb == USB_PS4) {
             text_row(S, "LOGS ON THE USB DRIVE", "ghostldr doesn't read USB drives here: the log stays on the console.");
             break;
         }

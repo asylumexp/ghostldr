@@ -261,6 +261,14 @@ int32_t os_race_copy(int32_t user, const char *tid, const char *dir, const char 
     return 0;
 }
 
+int32_t os_race_rw_copy(int32_t user, const char *tid, const char *dir, const char *dst)
+{
+    int32_t rc = os_race_copy(user, tid, dir, NULL, dst);
+    if (rc == 0)
+        sh("chmod -R u+w '%s%s'", g_root, dst);
+    return rc;
+}
+
 /* the copy's files become the save's (sce_sys left alone); prune: what the copy lacks goes too */
 int32_t os_race_write(int32_t user, const char *tid, const char *dir, const char *src, int prune)
 {

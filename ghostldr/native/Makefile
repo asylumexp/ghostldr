@@ -62,6 +62,13 @@ $(OUT)/obj/%.o: src/%.c $(HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# The core's code must end before the 16 KiB page its data would otherwise be
+# pushed past (core.ld; core_info.py checks the image against the IPU buffer's
+# small area).  Cold paths are built for size: crash.c (the crash handler,
+# signals and the watchdog) is about 2 KiB smaller at -Os.
+CORE_OS_SRCS := crash
+$(patsubst %,$(OUT)/obj/%.o,$(CORE_OS_SRCS)): CFLAGS += -Os
+
 # relink when a source file is added or removed, not only when one changes
 $(OUT)/%.objs: FORCE
 	@mkdir -p $(dir $@)

@@ -223,10 +223,6 @@ static void drives(struct plat *P, struct sel_info *in)
         in->usb = USB_PS4;
         return;
     }
-    if (f & CTX_FLAG_JAKX) {
-        in->usb = USB_JAKX;
-        return;
-    }
     u32 h = sys_module(P, "libSceUsbStorage.sprx", 0, NULL);
     if (!h) /* the extension didn't look (an app root given): loaded as it would, and kept */
         h = sys_module(P, "libSceUsbStorage.sprx", 1, &P->mod_usb);

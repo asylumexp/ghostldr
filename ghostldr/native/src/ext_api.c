@@ -104,4 +104,8 @@ const struct ghost_api g_ghost_api = {
     .thread_list = ghost_thread_list,
     .thread_note = thread_note,
     .library_scan = boot_library_scan,
+    .dm_usage = g_dm_usage,
+    .dm_nusage = &g_dm_nusage,
+    .profile_record = profile_record,
+    .swap_fault = &g_swap_fault,
 };

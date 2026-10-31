@@ -116,7 +116,6 @@ struct sel_drive {
 #define USB_UNKNOWN 0 /* not asked */
 #define USB_READ 1    /* drives listed (ndrives may be 0: none plugged in) */
 #define USB_PS4 2     /* not read on a PS4 */
-#define USB_JAKX 3    /* not read in Jak X */
 #define USB_NONE 4    /* libSceUsbStorage unavailable or refused */
 #define SEL_MAX_PORTS 6
 struct sel_port {

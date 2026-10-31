@@ -343,6 +343,51 @@ static void notify(const char *head, const char *what)
     }
 }
 
+/* How full the title's memory was when it crashed: it starts zeroed (hle.c),
+ * so a 64 KiB block that still reads as zeros at every 8 KiB was never
+ * handed out (or never written).  A heap written to its end ran out; one
+ * with room can give some to another (a memory plan's tables).  Each of the
+ * title's direct allocations (hle.c's table), where this process maps it;
+ * GPU-only heaps read uncached: a second or so in all. */
+static void log_written_memory(void)
+{
+    struct {
+        u64 start, end, offset;
+        s32 prot, type;
+        u8 flags;
+        char name[32];
+    } __attribute__((packed)) vq;
+    u32 n = *G->dm_nusage < 32 ? *G->dm_nusage : 32;
+    for (u64 va = 0x10000; K.virtual_query((void *)va, 1, &vq, sizeof(vq)) == 0 && vq.end > va; va = vq.end) {
+        if (!(vq.flags & 2) || !(vq.prot & 1) || vq.end - vq.start < 0x100000)
+            continue;
+        /* one mapping can hold several allocations (adjacent heaps): each its own line */
+        for (u32 i = 0; i < n; i++) {
+            const struct dm_usage *u = &G->dm_usage[i];
+            u64 lo = vq.offset > u->phys ? vq.offset : u->phys;
+            u64 hi = vq.offset + (vq.end - vq.start) < u->phys + u->len ? vq.offset + (vq.end - vq.start)
+                                                                        : u->phys + u->len;
+            if (lo >= hi || hi - lo < 0x100000)
+                continue;
+            u64 start = vq.start + (lo - vq.offset), len = hi - lo, written = 0, top = 0;
+            for (u64 b = 0; b < len; b += 0x10000) {
+                const volatile u64 *p = (const volatile u64 *)(start + b);
+                u64 m = len - b < 0x10000 ? len - b : 0x10000;
+                bool any = false;
+                for (u64 o = 0; o < m && !any; o += 0x2000)
+                    any = p[o / 8] != 0;
+                if (any)
+                    written += m, top = b + m;
+            }
+            logf("memory: %lx-%lx (%lu MiB, prot %x, phys %lx, allocated from eboot+%lx type %d): %lu MiB written, "
+                 "the last at +%lu MiB",
+                 start, start + len, len >> 20, vq.prot, lo, u->from, u->type, written >> 20, top >> 20);
+        }
+    }
+}
+
+void swap_log(void) HIDDEN __attribute__((weak)); /* swap.c: the heaps it backs in part */
+
 /* ---- the screens ---- */
 static void show(u32 kind, s64 code)
 {
@@ -351,6 +396,11 @@ static void show(u32 kind, s64 code)
         return;
     if (kind == FAIL_BOOT)
         kind = boot_kind(code, D->note);
+    if (kind == FAIL_CRASH && g_main_mod) {
+        log_written_memory();
+        if (swap_log)
+            swap_log();
+    }
     if (kind == FAIL_CRASH) {
         u64 base = 0;
         const char *name = "?";

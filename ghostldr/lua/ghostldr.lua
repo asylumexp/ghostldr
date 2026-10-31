@@ -142,6 +142,13 @@ local core_dlsym = SCE_KERNEL_DLSYM
 if ULTRA then
     core_dlsym = dlsym(LIBKERNEL_HANDLE, "sceKernelDlsym")
     if core_dlsym == 0 then fail("dlsym sceKernelDlsym") end
+    -- UltraC0re 1.0.2 reads __error from Jak X's libc.prx GOT at +0xDBC80, which is
+    -- __stack_chk_fail's slot (__error's is +0xDBCB0): its get_error_string(), so why(),
+    -- stopped the game with SYSTEM_STACK_CHECK_FAILURE, e.g. when a jailbroken
+    -- console's ELF loader holds 9021 and the bundle listener's bind fails
+    local errno_fn = dlsym(LIBKERNEL_HANDLE, "__error")
+    if errno_fn == 0 then fail("dlsym __error") end
+    libc_error = func_wrap(errno_fn)
 end
 
 -- Bridge memory (shared with the compiler) for the core's staging buffer and

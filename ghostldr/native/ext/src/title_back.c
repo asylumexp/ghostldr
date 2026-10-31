@@ -353,6 +353,8 @@ static void restore_buffers(void)
 }
 
 /* ---- the extension's export (ext_main.c) ---- */
+void swap_end(void) HIDDEN __attribute__((weak)); /* swap.c */
+
 HIDDEN int title_back(void)
 {
     struct ghost_diag *D = GHOST_DIAG(G);
@@ -364,6 +366,8 @@ HIDDEN int title_back(void)
     if (stop_threads())
         logf("back: some threads are still there: going on anyway");
     close_handles();
+    if (swap_end)
+        swap_end();
     savedata_title_end();
     restore_buffers();
     set_handler(NULL);

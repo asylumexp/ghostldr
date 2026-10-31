@@ -22,6 +22,7 @@ int os_thread(void *(*fn)(void *), void *arg);
 int os_gfs_mount(s32 user, const char *dir, int mode, char mp[16]);
 void os_out(const char *line);
 s32 os_race_copy(s32 user, const char *tid, const char *dir, const char *fp, const char *dst);
+s32 os_race_rw_copy(s32 user, const char *tid, const char *dir, const char *dst);
 s32 os_race_write(s32 user, const char *tid, const char *dir, const char *src, int prune);
 u64 os_digest(const char *dir);
 
@@ -116,6 +117,10 @@ int fv_thread(void *(*fn)(void *), void *arg, const char *name) { return os_thre
 s32 save_race_copy(s32 user, const char *tid, const char *dir, const char *dst)
 {
     return os_race_copy(user, tid, dir, NULL, dst);
+}
+s32 save_race_rw_copy(s32 user, const char *tid, const char *dir, const char *dst)
+{
+    return os_race_rw_copy(user, tid, dir, dst);
 }
 s32 save_fp_copy(s32 user, const char *tid, const char *dir, const char *fp, const char *dst)
 {

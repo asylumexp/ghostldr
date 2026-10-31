@@ -227,6 +227,16 @@ struct ghost_api {
      * count, or < 0 when this boot's games don't come from a folder of
      * games (ghostfs, one title, or once the title is picked). */
     int (*library_scan)(const struct lib_title **list, u32 *ps5, int again);
+    /* the title's direct allocations and flexible mappings (hle.c), for the
+     * crash screen's census of written memory (ext/src/failure.c) */
+    struct dm_usage *dm_usage;
+    u32 *dm_nusage;
+    /* the title profile's records of a kind (profile.c: a plan's only on its
+     * own build), for the plan's text patches (REC_PATCH, ext_main.c) */
+    const void *(*profile_record)(u32 kind, u32 n);
+    /* the core's crash handler asks this first about a fault (crash.c): 1, the
+     * swap file paged the address in (ext/src/swap.c); NULL when none */
+    int (**swap_fault)(u64 addr);
 };
 
 /* A game found under an app root that is a folder of games (a USB drive, or

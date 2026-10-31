@@ -37,6 +37,7 @@
 #define O_TRUNC 0x400
 #define O_DIRECTORY 0x20000
 #define RACE_MAX 6
+#define RACE_ATTEMPTS 3 /* a mount window can be missed completely; retry those misses */
 #define RACERS 3
 #define MAXFD 48
 #define MAXPIN 256 /* files of a save opened while it is bound */
@@ -252,7 +253,7 @@ static s64 copy_file(int src, const char *dst, u64 *bytes)
 }
 
 /* every file below dirfd into dst (a directory that exists); depth-limited */
-static void copy_tree(int dirfd, const char *dst, int depth, u32 *files, u32 *refused, u64 *bytes)
+static void copy_tree(int dirfd, const char *dst, int depth, bool writable, u32 *files, u32 *refused, u64 *bytes)
 {
     u8 *dents = page_alloc(16384);
     if (!dents)
@@ -279,9 +280,9 @@ static void copy_tree(int dirfd, const char *dst, int depth, u32 *files, u32 *re
                     continue;
                 }
                 R.mkdir(out, 0755);
-                copy_tree(sub, out, depth - 1, files, refused, bytes);
+                copy_tree(sub, out, depth - 1, writable, files, refused, bytes);
                 R.close(sub);
-                R.chmod(out, 0555);
+                R.chmod(out, writable ? 0755 : 0555);
             } else if (type == 8) {
                 int f = R.openat(dirfd, name, O_RDONLY, 0);
                 if (f < 0 || copy_file(f, out, bytes) < 0) {
@@ -291,7 +292,7 @@ static void copy_tree(int dirfd, const char *dst, int depth, u32 *files, u32 *re
                     continue;
                 }
                 R.close(f);
-                R.chmod(out, 0444);
+                R.chmod(out, writable ? 0644 : 0444);
                 (*files)++;
             }
         }
@@ -351,11 +352,14 @@ static volatile int g_lock;
 
 static bool rw_ready(void);
 static s32 fp_mount(s32 user, const char *t, const char *d, const char *fp, char mp[16]);
+static bool title_writable(const char *tid);
+static bool tid_ok(const char *t);
+static bool dir_ok(const char *d);
 
 /* fp: NULL, or the title's keystone fingerprint, which asks for the mount with
  * sceSaveDataMount instead (the same refusal for another account's save, by
  * another branch of the service) */
-static s32 race_copy(s32 user, const char *tid, const char *dir, const char *dst, const char *fp)
+static s32 race_copy_once(s32 user, const char *tid, const char *dir, const char *dst, const char *fp, bool writable)
 {
     if (fp && (!fp[0] || !rw_ready()))
         fp = NULL;
@@ -450,19 +454,19 @@ static s32 race_copy(s32 user, const char *tid, const char *dir, const char *dst
             if (cut)
                 *cut = 0, mkdirs(d);
             if (copy_file(g_pin[i].fd, out, &bytes) >= 0)
-                R.chmod(out, 0444), files++;
+                R.chmod(out, writable ? 0644 : 0444), files++;
             else
                 refused++;
             R.close(g_pin[i].fd);
         }
-        R.chmod(dst, 0555);
+        R.chmod(dst, writable ? 0755 : 0555);
         if (root < 0)
             root = -2; /* copied: no root descriptor needed */
     } else if (root >= 0) {
         remove_tree(dst, 8);
         mkdirs(dst);
-        copy_tree(root, dst, 6, &files, &refused, &bytes);
-        R.chmod(dst, 0555);
+        copy_tree(root, dst, 6, writable, &files, &refused, &bytes);
+        R.chmod(dst, writable ? 0755 : 0555);
     }
     for (s32 i = 0; i < nfd; i++)
         R.close(G_r.fd[i]);
@@ -486,9 +490,35 @@ static s32 race_copy(s32 user, const char *tid, const char *dir, const char *dst
     return root != -1 ? 0 : rc ? rc : E_NOENT;
 }
 
+/* A successful catch opens every readable file while the save is bound.  A
+ * whole mount window can still pass between the racers' open calls, so retry
+ * only when no usable root or file was caught.  Successful copies are kept as
+ * one attempt: another mount cannot make sce_sys/keystone readable and would
+ * spend another one of the session's limited race slots. */
+static s32 race_copy(s32 user, const char *tid, const char *dir, const char *dst, const char *fp, bool writable)
+{
+    s32 rc = E_NOENT;
+    for (u32 attempt = 0; attempt < RACE_ATTEMPTS; attempt++) {
+        rc = race_copy_once(user, tid, dir, dst, fp, writable);
+        if (rc == 0)
+            return 0;
+        if (attempt + 1 < RACE_ATTEMPTS)
+            logf("save_race: %s:%s: caught no usable files; retrying the mount race (%u/%u)", tid, dir,
+                 attempt + 2, RACE_ATTEMPTS);
+    }
+    return rc;
+}
+
 s32 save_race_copy(s32 user, const char *tid, const char *dir, const char *dst)
 {
-    return race_copy(user, tid, dir, dst, NULL);
+    return race_copy(user, tid, dir, dst, NULL, false);
+}
+
+s32 save_race_rw_copy(s32 user, const char *tid, const char *dir, const char *dst)
+{
+    if (!tid_ok(tid) || !dir_ok(dir) || !dst || !rw_ready() || !title_writable(tid))
+        return E_INVAL;
+    return race_copy(user, tid, dir, dst, NULL, true);
 }
 
 
@@ -1591,7 +1621,7 @@ static s32 x_copy(s32 user, const char *tid, const char *dir, const char *dst, c
     const char *h = dst && race_ready() ? remap_path(dst, buf, sizeof(buf)) : NULL;
     if (!tid || !dir || !(h ? h : dst))
         return E_INVAL;
-    return race_copy(user, tid, dir, h ? h : dst, fp);
+    return race_copy(user, tid, dir, h ? h : dst, fp, false);
 }
 
 static const struct ext_hle_ent k_hle[] = {

@@ -155,6 +155,24 @@ static void title_starting(void)
 int elfldr_main(void) HIDDEN;
 /* a module's text before it is written (ext_exports.patch_text, hle_rawsys.c) */
 void rawsys_patch_text(struct module *m, u8 *text, u64 size) HIDDEN;
+
+/* A memory plan's text patches (REC_PATCH: a size the executable holds as
+ * an immediate rather than in a table), on the main executable of the
+ * profile's own build: each only where its bytes are as expected. */
+static void patch_text(struct module *m, u8 *text, u64 size)
+{
+    const struct prof_patch *p;
+    for (u32 i = 0; m->is_main && G->profile_record && (p = G->profile_record(REC_PATCH, i)); i++) {
+        const char *what = (const char *)p->bytes + 2 * p->len;
+        if (p->offset + (u64)p->len > size || memcmp(text + p->offset, p->bytes, p->len) != 0) {
+            logf("plan: %s: the text at %x is not as expected; not patched", what, p->offset);
+            continue;
+        }
+        memcpy(text + p->offset, p->bytes + p->len, p->len);
+        logf("plan: %s: %u bytes patched at %x", what, p->len, p->offset);
+    }
+    rawsys_patch_text(m, text, size);
+}
 /* drawn dialogs (dlg_overlay.c); the ELF loader's extension has none */
 void ov_video_buffers(s32 handle, s32 start, const u64 *addrs, s32 num, const void *attr) HIDDEN __attribute__((weak));
 void ov_pad_state(s32 handle, u8 *data) HIDDEN __attribute__((weak));
@@ -210,6 +228,6 @@ const struct ext_exports *ext_init(const struct ghost_api *api)
     }
     g_exports = (struct ext_exports){EXT_EXPORTS_MAGIC, sizeof(g_exports), ext_lookup, lib_policy, g_hle,
                                      g_nhle, nfam, g_nlibs, ext_sysmodule_failed, title_starting, elfldr_main,
-                                     rawsys_patch_text, ov_video_buffers, ov_pad_state, ghost_watch, title_back};
+                                     patch_text, ov_video_buffers, ov_pad_state, ghost_watch, title_back};
     return &g_exports;
 }

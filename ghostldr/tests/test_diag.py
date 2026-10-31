@@ -68,7 +68,9 @@ class LogsAndFailures(unittest.TestCase):
         self.assertIn("ok the failed boot's log is on the drive", lines)
 
     def test_a_crash_keeps_its_page(self) -> None:
-        self.assertIn("ok crash: where, for a report", self.run_host("crash"))
+        lines = self.run_host("crash")
+        self.assertIn("ok crash: where, for a report", lines)
+        self.assertIn("ok crash: how full the title's memory was", lines)
 
     def test_an_exit_closes_swrr_after_its_page(self) -> None:
         lines = self.run_host("exit")

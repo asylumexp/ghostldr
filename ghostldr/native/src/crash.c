@@ -73,8 +73,14 @@ __attribute__((force_align_arg_pointer, noreturn)) static void payload_thread_ab
         K.usleep(1000000);
 }
 
+/* The extension's swap file (ext/src/swap.c): a fault in a heap it backs in
+ * part is its to answer, and the access is tried again. */
+int (*g_swap_fault)(u64 addr);
+
 static void on_signal(int sig, void *info, void *ucv)
 {
+    if (g_swap_fault && (sig == 10 || sig == 11) && g_swap_fault(*(u64 *)((u8 *)info + 0x18)))
+        return;
     u8 *uc = ucv;
     u64 *mc = (u64 *)(uc + 0x40); /* mcontext_t (PS4 ucontext has a 0x40-byte header) */
     static const char *names[] = {"onstack", "rdi", "rsi", "rdx", "rcx", "r8",  "r9",  "rax", "rbx",
