@@ -104,7 +104,7 @@ After the first time, only `ghostldr.lua` is sent: it keeps the last bundle it t
 python3 -m unittest discover -s ghostldr/tests
 ```
 
-GitHub Actions builds and runs them on Linux for every push to main and every pull request (`.github/workflows/tests.yml`). They run offline:
+GitHub Actions builds and runs them on macOS for every push to main and every pull request (`.github/workflows/tests.yml`). They run offline:
 
 - the installer's pump, built for the computer, and its checked-in blob against the source;
 - the installer and the web manager against fake consoles (the manager's tests need a desktop Lua 5.3 or 5.4);

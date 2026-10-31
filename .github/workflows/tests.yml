@@ -1,5 +1,7 @@
 # Builds the core, extension and selector and runs the offline tests
 # (docs/architecture.md#tests) on every push to main and on pull requests.
+# On macOS, as the tests' host harnesses expect (BSD sockets, Homebrew's
+# llvm@18, x86-64 code run under Rosetta).
 name: tests
 
 on:
@@ -14,21 +16,20 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      LLVM: /usr/lib/llvm-18/bin
+    runs-on: macos-15
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Install LLVM 18, Lua and the optional Python modules
+      - name: Install LLVM 18, Lua, Rosetta and the optional Python modules
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18 lua5.4
+          brew install llvm@18 lua
+          sudo softwareupdate --install-rosetta --agree-to-license || true
+          arch -x86_64 /usr/bin/true
           python -m pip install --upgrade pip
           python -m pip install pillow capstone
 
@@ -36,7 +37,7 @@ jobs:
         run: sh tools/fetch_deps.sh
 
       - name: Build
-        run: make -C ghostldr/native -j"$(nproc)" LLVM="$LLVM"
+        run: make -C ghostldr/native -j"$(sysctl -n hw.ncpu)" LLVM="$(brew --prefix llvm@18)/bin"
 
       - name: Test
         run: python -m unittest discover -s ghostldr/tests -v
