@@ -992,6 +992,15 @@ class Autoloader(FakeConsole):
         r = self.auto("pad=400", "elfldr=pick:0:CUSA00900")                  # L1 alone: no
         self.assertEqual(len(r["ctxs"]), 2)
 
+    def test_l1_r1_through_the_systems_reads(self) -> None:
+        """Reads the system intercepts (a dialog or overlay has the controller) carry no buttons: the ones
+        after them count, for half a second; intercepted all along, ghostldr starts."""
+        r = self.auto("pad=c00", "pad-intercepted=3")
+        self.assertFalse(r["called"])
+        self.assertIn("ghostldr autoloader: L1+R1 held: Luac0re's loader on TCP 9026", r["notes"])
+        r = self.auto("pad=c00", "pad-intercepted=9", "elfldr=pick:0:CUSA00900")
+        self.assertEqual(len(r["ctxs"]), 2)
+
     def test_no_ghostldr_lua_in_the_save(self) -> None:
         (self.save / "ghostldr/ghostldr.lua").unlink()
         r = self.auto()

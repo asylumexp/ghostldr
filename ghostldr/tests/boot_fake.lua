@@ -37,6 +37,8 @@
 --                   autoloader's files: Lua's io and loadfile see it too)
 --   pad=HEX         the buttons held on the controller (scePadReadState);
 --                   without it libScePad does not load
+--   pad-intercepted=N  the first N reads have only the system's bit (0x80000000:
+--                   a dialog or overlay has the controller)
 --   disk=BYTES      free space on the console's storage (default: plenty)
 --   no-savedata     libSceSaveData does not load
 -- It prints what it saw: "bind <fd> <port> <rc>", "accept <fd>",
@@ -443,7 +445,9 @@ local SAVE = {
     end,
     scePadGetHandle = function(user, type, index) return user == 0x10000001 and 3 or 0x80920003 end,
     scePadReadState = function(h, data)
-        write32(data, tonumber(opts.pad or "0", 16))
+        pad_reads = (pad_reads or 0) + 1
+        local intercepted = pad_reads <= tonumber(opts["pad-intercepted"] or "0")
+        write32(data, intercepted and 0x80000000 or tonumber(opts.pad or "0", 16))
         return h == 3 and 0 or 0x80920003
     end,
     sceKernelUsleep = function(us)
@@ -454,8 +458,12 @@ local SAVE = {
 
 -- ---------------------------------------------------------------- calls
 local calls, names = {}, {}
-function init_dlsym() end
+-- Luac0re's dlsym answers only after init_dlsym() (func.lua)
+local dlsym_ready = false
+function init_dlsym() dlsym_ready = true end
+function sceKernelUsleep(us) clock_us = clock_us + us return 0 end
 function dlsym(handle, name)
+    if not dlsym_ready then error("dlsym not inited") end
     calls[#calls + 1] = name
     local addr = 0x800100000 + #calls * 0x10
     names[addr] = name

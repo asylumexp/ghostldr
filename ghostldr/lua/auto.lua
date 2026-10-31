@@ -19,12 +19,15 @@
 local DIR = "/savedata0/ghostldr/"
 local LUA, BUNDLE = DIR .. "ghostldr.lua", DIR .. "ghostldr-ext.bin"
 local SKIP = 0x400 | 0x800      -- L1 + R1 in ScePadData's buttons
+local INTERCEPTED = 0x80000000  -- the system has the controller (a dialog, an overlay): no buttons in that read
 local PORT = 9026
 
 local function s32(v) v = v & 0xFFFFFFFF return v >= 0x80000000 and v - 0x100000000 or v end
 
--- the buttons held on the first user's controller now, or 0 (no pad library, no handle)
+-- the buttons held on the first user's controller now, or 0 (no pad library, no handle, or the system
+-- has the controller for the whole half second it is read)
 local function buttons()
+    init_dlsym()                -- Luac0re's dlsym answers only after it (each script calls it)
     local function sym(module, name)
         local load = func_wrap(dlsym(LIBKERNEL_HANDLE, "sceKernelLoadStartModule"))
         local p = malloc(64)
@@ -42,9 +45,13 @@ local function buttons()
     write32(uid, 0)
     if s32(get_user(uid)) ~= 0 then return 0 end
     local h = s32(get_handle(read32(uid), 0, 0))
-    for i = 0, 0xF8, 8 do write64(data + i, 0) end
-    if h < 0 or s32(read_state(h, data)) ~= 0 then return 0 end
-    return read32(data)
+    if h < 0 then return 0 end
+    for _ = 1, 5 do
+        for i = 0, 0xF8, 8 do write64(data + i, 0) end
+        if s32(read_state(h, data)) == 0 and read32(data) & INTERCEPTED == 0 then return read32(data) end
+        sceKernelUsleep(100000)
+    end
+    return 0
 end
 
 local function loader(why)
