@@ -53,7 +53,7 @@ A PS5 imports only an encrypted save that is made out to its own account. There 
    - The first time, ghostldr copies the save's `ghostldr-ext.bin` into its cache (`GLDRCACHE`, 16 MiB). Later boots read the cache.
    - A bundle cached before, from a computer, is used instead when it is this release's.
 
-- **Luac0re's loader instead:** hold **L1 + R1** while the Hall of Fame opens. You get Luac0re's own loader on 9026, as with no autoloader: send it any script, `ghostldr.lua` included.
+- **Luac0re's loader instead:** hold **L1 + R1** from choosing HALL OF FAME until Luac0re's loader shows (the autoloader reads the controller for up to 3 seconds after the exploit, so a boot without them waits that long). You get Luac0re's own loader on 9026, as with no autoloader: send it any script, `ghostldr.lua` included.
 - **After ghostldr:** however it ends (**Settings → Close ghostldr**, a failure shown on the TV), Luac0re's loader listens on 9026 after it.
 - **A newer ghostldr:** import the new release's save. The old `ghostldr.lua` in the save would replace a newer bundle in the cache with its own at the next Hall of Fame. To try a newer release without a new save, hold L1 + R1 and send its two files to the loader, as in [using-the-release.md](using-the-release.md#4-boot).
 - **Something wrong with the save's files:** they come from one release, and ghostldr checks them as it checks a sent bundle. If `ghostldr-ext.bin` is another release's, damaged or missing, the TV says so above the usual prompt, and a `ghostldr-ext.bin` sent to 9021 boots instead. With no `ghostldr.lua` in the save, Luac0re's loader starts at once.
@@ -63,7 +63,7 @@ A PS5 imports only an encrypted save that is made out to its own account. There 
 
 Luac0re's `main.lua` checks for `/savedata0/lua/auto.lua` after its JIT exploit. When the file is there, Luac0re runs it in place of `remote_lua_loader(9026)`. `auto.lua` then:
 
-1. Reads the first user's controller (`scePadReadState`). With L1 and R1 held, it starts Luac0re's loader and stops.
+1. Reads the first user's controller (`scePadReadState`) for up to 3 seconds: its states reach SWRR late once the PS2 game stops reading them (measured on a PS5: 2.4 s). With L1 and R1 held, it starts Luac0re's loader and stops.
 2. Loads `/savedata0/ghostldr/ghostldr.lua` and runs it with `GHOSTLDR_BUNDLE_FILE = "/savedata0/ghostldr/ghostldr-ext.bin"`.
 3. Starts Luac0re's loader on 9026 once ghostldr returns or fails.
 
