@@ -27,11 +27,15 @@ jobs:
 
       - name: Install LLVM 18, Lua, Rosetta and the optional Python modules
         run: |
-          brew install llvm@18 lua
+          brew install llvm@18 lua@5.4
+          echo "$(brew --prefix lua@5.4)/bin" >> "$GITHUB_PATH"
           sudo softwareupdate --install-rosetta --agree-to-license || true
           arch -x86_64 /usr/bin/true
           python -m pip install --upgrade pip
           python -m pip install pillow capstone
+
+      - name: Check the tools
+        run: lua -v && "$(brew --prefix llvm@18)/bin/clang" --version | head -1
 
       - name: Fetch the build inputs
         run: sh tools/fetch_deps.sh
