@@ -1,0 +1,42 @@
+# Builds the core, extension and selector and runs the offline tests
+# (docs/architecture.md#tests) on every push to main and on pull requests.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      LLVM: /usr/lib/llvm-18/bin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install LLVM 18, Lua and the optional Python modules
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18 lua5.4
+          python -m pip install --upgrade pip
+          python -m pip install pillow capstone
+
+      - name: Fetch the build inputs
+        run: sh tools/fetch_deps.sh
+
+      - name: Build
+        run: make -C ghostldr/native -j"$(nproc)" LLVM="$LLVM"
+
+      - name: Test
+        run: python -m unittest discover -s ghostldr/tests -v
