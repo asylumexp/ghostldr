@@ -13,6 +13,7 @@
  *     approot_host FSROOT APP_ROOT [--title T] [--select] [--map PATH] [--other PATH2]
  *                  [--map-fail] [--no-fde] [--inited] [--drive IMAGE] [--pick T|-] [--pick-at N]
  *                  [--profiles FILE] [--ftp [--late|--unplug]] [--live SCENARIO]
+ *                  [--rescan-mv FROM TO]...
  *
  * Prints what approot_init (and approot_pick) decided, the games it found
  * (library(), one "lib" line each), the profile picked, where saves go,
@@ -24,6 +25,10 @@
  * client logs in; --late plugs the drive in between the two, --unplug
  * pulls it out.  It prints whether the title's own Init and Term are kept
  * off the session (usb_session_open) and where a client starts.
+ *
+ * --rescan-mv moves FSROOT/FROM to FSROOT/TO (a game copied onto the drive
+ * or taken off it) after init, then the selector's Refresh asks for the
+ * library again (ext_early.lib_again): "again N ps5 P" and its "lib" lines.
  *
  * Every drive listed is mounted at the mount point approot.c asks for (one
  * mount per drive and per mount point).  --live SCENARIO then runs the
@@ -73,6 +78,7 @@ int *hfs_errno(void);
 int hfs_usleep(unsigned us);
 long hfs_now_s(void);
 int hfs_thread(void *(*fn)(void *), void *arg);
+int hfs_rename(const char *from, const char *to);
 
 int vfmt(char *buf, size_t size, const char *f, __builtin_va_list ap) { return vsnprintf(buf, size, f, ap); }
 int fmt(char *buf, size_t size, const char *f, ...)
@@ -598,7 +604,8 @@ int main(int argc, char **argv)
     hfs_set_root(argv[1]);
     const char *root = argv[2], *pick = NULL, *profiles = NULL;
     int ftp = 0, late = 0, pulled = 0, pick_at = -1;
-    const char *scenario = NULL;
+    const char *scenario = NULL, *mv[8][2];
+    int nmv = 0;
     u64 flags = 0;
     for (int i = 3; i < argc; i++) {
         const char *o = argv[i];
@@ -633,6 +640,8 @@ int main(int argc, char **argv)
             pick_at = (int)(v[0] - '0'), pick = "", i++;
         else if (!strcmp(o, "--profiles") && v)
             profiles = v, i++;
+        else if (!strcmp(o, "--rescan-mv") && v && i + 2 < argc && nmv < 8)
+            mv[nmv][0] = v, mv[nmv++][1] = argv[i + 2], i += 2;
         else {
             say("unknown option %s", o);
             return 2;
@@ -701,6 +710,16 @@ int main(int argc, char **argv)
     for (int i = 0; i < n; i++)
         say("lib %d\t%s\t%u\t%s\t%.*s\t%s", i, list[i].id, list[i].flags, list[i].path, (int)list[i].dir_len,
             list[i].path, list[i].note);
+    if (nmv) { /* Refresh: the drive changed since */
+        for (int i = 0; i < nmv; i++)
+            say("moved %s -> %s: %d", mv[i][0], mv[i][1], hfs_rename(mv[i][0], mv[i][1]));
+        u32 ps5 = 0;
+        n = e->lib_again(&list, &ps5, 1);
+        say("again %d ps5 %u", n, ps5);
+        for (int i = 0; i < n; i++)
+            say("lib %d\t%s\t%u\t%s\t%.*s\t%s", i, list[i].id, list[i].flags, list[i].path, (int)list[i].dir_len,
+                list[i].path, list[i].note);
+    }
     if (rc == 1 && pick) {
         int at = pick_at;
         for (int i = 0; i < n && at < 0 && pick[0] != '-'; i++)

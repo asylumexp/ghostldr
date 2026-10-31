@@ -47,6 +47,8 @@ static inline int surf_y1(const surface *s) { return s->cy1 > 0 && s->cy1 < s->h
 #define ART_GIVEN 2     /* gfs_pack.py / gfs_install.py --icon, --backdrop */
 #define ART_STORE 3     /* --fetch-art: the PlayStation Store's */
 #define ART_GENERATED 4 /* drawn by the selector */
+#define ART_SGDB 5      /* Settings > Game art: SteamGridDB's (cached in META) */
+#define ART_IGDB 6      /* Settings > Game art: IGDB's */
 enum { SEL_ICON, SEL_BACKDROP };
 
 /* <prefix>META/meta.bin (host/gfs_meta.py; meta.c) */
@@ -123,7 +125,7 @@ struct sel_port {
 };
 /* a title installed in saved data, listed when the row shows a USB drive's games */
 struct sel_inst {
-    char id[16], name[64], version[16];
+    char id[16], name[64], version[16], prefix[16];
     u64 size;
     u8 incomplete;
 };
@@ -136,11 +138,19 @@ struct sel_switch {
     u8 on_sets;             /* On sets the flag (else clears it) */
     u8 def;                 /* the default: 1 On */
     u8 logs;                /* shown under Logs, not Advanced */
+    u8 art;                 /* shown under Game art, not Advanced */
 };
 #define CONF_LOG_USB 0      /* the switch for the log on the USB drive (rel-diag's CTX_FLAG_NO_USB_LOG) */
 #define CONF_SHARE_MEM 4    /* share learned memory plans (CTX_FLAG_SHARE_MEM) */
 #define CONF_COMMUNITY_MEM 5 /* use community memory plans (CTX_FLAG_NO_COMMUNITY_MEM when Off) */
 #define CONF_FTP_SAVES 6    /* the FTP server's /saves (CTX_FLAG_FTP_SAVES) */
+#define CONF_FETCH_ART 7    /* missing game art fetched (CTX_FLAG_FETCH_ART), with the keys below */
+/* the keys Settings > Game art keeps (conf.c sel_art_key) */
+#define KEY_SGDB 0          /* SteamGridDB's API key */
+#define KEY_IGDB_ID 1       /* a Twitch application's Client ID, for IGDB */
+#define KEY_IGDB_SECRET 2   /* and its Client Secret */
+#define NKEYS 3
+#define KEY_MAX 72
 struct sel_info {
     struct sel_switch sw[SEL_MAX_SWITCHES];
     int nsw;
@@ -163,6 +173,9 @@ struct sel_info {
     int log_usb;       /* the log on a USB drive (switch CONF_LOG_USB): 1 on, 0 off */
     char log_where[160]; /* where it goes, as the core says (drive and file); "" unknown yet */
     int netinst;       /* the network installer is in this build */
+    int ps5;           /* PS5 games found on the drives and left out of the row */
+    char key_shown[NKEYS][40]; /* Game art's keys as shown: "abcd\xE2\x80\xA6wxyz", "" when none */
+    int art_fetched;   /* games given art this boot (Game art) */
 };
 /* a snapshot of the network installer (ghost_api.h struct netinst_status) */
 #define NET_IDLE 0
@@ -283,6 +296,10 @@ struct sel {
     float set_a, set_scroll, set_scroll_to, set_sec_y, set_row_y;
     int ask_kind;            /* the question up: ASK_PS4 (a game's dump) or ASK_CLOSE ("Close ghostldr") */
     int quit;                /* "Close ghostldr": the screen fades and ui_step reports UI_QUIT */
+    /* Game art: the keyboard a key is typed with (setui.c) */
+    int kb_open, kb_which, kb_r, kb_c, kb_shift;
+    float kb_a;
+    char kb_text[KEY_MAX];
     /* the network installer's card (Install over network) */
     int net_open;            /* the card is up */
     u64 set_now;             /* the last step's time (the hold's countdown) */
@@ -293,6 +310,16 @@ struct sel {
     char qr_text[48];        /* the address its QR code is of */
     u8 qr[29 * 29];          /* QR_N * QR_N modules */
     int reload_req;          /* an install finished: the platform reads the catalogue again */
+    int can_refresh;         /* Refresh (Triangle) can read the row again: the platform says (before ui_init) */
+    int refresh_req;         /* Refresh asked: the platform reads the drives or the catalogue again ... */
+    u64 refresh_at;          /* ... from then (its message shows first), and says what changed */
+    /* Settings > Games: a game installed in saved data deleted after a Yes (main.c, cat.c
+     * cat_delete: its containers, index, META and GFSCATALOG entry; its saves stay) */
+    int can_delete;          /* the platform can (a catalogue in saved data): set before ui_init */
+    int delete_req;          /* Yes: the platform deletes del_* from delete_at (its message shows first) */
+    u64 delete_at;
+    char del_id[16], del_prefix[16], del_name[128];
+    u64 del_size;
     /* top bar */
     int clock_h, clock_m, clock_24h, clock_valid;
     char user[64];           /* the signed-in user's name; empty: not shown */
@@ -321,6 +348,7 @@ struct sel {
 #define PAD_SETTINGS PAD_SQUARE /* Settings from the row */
 #define ASK_PS4 0
 #define ASK_CLOSE 1
+#define ASK_DELETE 2 /* "Delete <game>?" (Settings > Games: an install in saved data) */
 #define UI_QUIT (-20) /* ui_step's *boot after "Close ghostldr" (sel_api.h SEL_EXIT_LOADER) */
 
 #define CH_ALL 1u   /* everything (backdrop, panel, launch, toast) */
@@ -343,6 +371,8 @@ int sel_load_art(struct sel *S, int title, int which, surface *out);
 void sel_info_load(struct sel *S, struct sel_info *info);
 int sel_switch(struct sel *S, int i, int want); /* Advanced switch i: want < 0 asks; its state, or -1; i < 0: reset all */
 int sel_community(struct sel *S, int title, int on); /* a game's community memory plan used or off for it, kept: 0, or -1 */
+/* a Game art key: into out (when not NULL), and set to value (when not NULL: "" clears it), kept: 0, or -1 */
+int sel_art_key(struct sel *S, int which, const char *value, char *out, int cap);
 int sel_netinst(struct sel *S, int op, struct sel_net *st);
 
 /* ---- drawing (draw.c) ---- */
@@ -400,6 +430,10 @@ void qr_draw(surface *s, int x, int y, int size, const u8 *m, u32 a);
 int meta_parse(const u8 *d, u64 n, struct meta_info *mi);
 int qoi_header(const u8 *d, u64 n, int *w, int *h);
 int qoi_decode(const u8 *d, u64 n, surface *out);
+u64 qoi_max(int w, int h);
+u64 qoi_encode(const surface *in, u8 *out);
+u64 meta_build(const struct meta_info *mi, const char *title, u64 written, const u8 *const sect[META_SECTIONS],
+               const u32 len[META_SECTIONS], u8 *out, u64 cap);
 
 /* ---- the UI (ui.c) ---- */
 int ui_init(struct sel *S, struct title *titles, int n, int initial);
@@ -425,6 +459,7 @@ void ui_set_platform(struct sel *S, int platform); /* SEL_PS5 (the default) or S
 void ui_draw(struct sel *S);
 void ui_prepare_bg(struct sel *S, int title); /* decode + dim pic1 into the spare buffer */
 void ui_load_icon(struct sel *S, int title);
+void ui_set_icon(struct sel *S, int title, const surface *img, u8 src); /* Game art's picture for its tiles */
 /* the titles again (an install finished): the selection stays on its title;
  * new ones need their tiles' memory (ui_title_alloc) */
 int ui_title_alloc(struct sel *S, struct title *t);
@@ -435,6 +470,8 @@ void set_step(struct sel *S, u64 now, u64 dt, u32 pressed, u32 held, int step);
 void set_draw(struct sel *S, surface *s);
 void set_hints(struct sel *S, surface *s);
 int set_busy(const struct sel *S);   /* the sheet or its card is moving or up: draw whole frames */
+void set_rebuild(struct sel *S);     /* the open section again (the row changed): the focus stays on its entry */
+void ui_refresh(struct sel *S, u64 now); /* Refresh: asks the platform, its message first */
 /* shared drawing (ui.c) */
 int ui_hint(struct sel *S, surface *s, int x, int base, int button, const char *label, u32 c);
 void ui_card(surface *s, int x, int y, int w, int h, float e);

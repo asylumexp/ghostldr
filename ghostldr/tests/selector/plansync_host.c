@@ -4,6 +4,13 @@
  *
  *   plansync_host STORE DNS [--share HOST[:PORT] KEY [--tls]] [--github API RAW] [--no-fetch] [--now SECONDS]
  *                 TITLE...
+ *   plansync_host STORE DNS --art NAME HOST:PORT [--sgdb KEY] [--igdb ID SECRET] [--want icon|backdrop|both]
+ *                 [--again NAME]
+ *
+ * --art asks artfetch.c for NAME's art, every service at HOST:PORT over
+ * plain HTTP (test_plansync.py's fake), and prints what came back ("art"
+ * lines: the picture, its size and service); --again asks for a second
+ * game with the same state (the IGDB token, a refused key).
  *
  * --github points GitHub's two hosts at plain HTTP servers (test_plansync.py's).
  *
@@ -155,6 +162,35 @@ int main(int argc, char **argv)
     e.sclose = h_sclose, e.dns = h_dns, e.load = h_load, e.save = h_save, e.unlink = h_unlink, e.list = h_list;
     strcpy(e.version, "test");
     job.fetch = 1;
+    if (argc > 4 && !strcmp(argv[3], "--art")) { /* game art: artfetch.c */
+        static struct ps_art_keys k;
+        static struct ps_art_state st;
+        const char *names[2] = {argv[4], NULL};
+        int icon = 1, backdrop = 1;
+        for (int i = 6; i < argc; i++) {
+            if (!strcmp(argv[i], "--sgdb") && i + 1 < argc)
+                snprintf(k.sgdb, sizeof(k.sgdb), "%s", argv[++i]);
+            else if (!strcmp(argv[i], "--igdb") && i + 2 < argc)
+                snprintf(k.igdb_id, sizeof(k.igdb_id), "%s", argv[i + 1]),
+                    snprintf(k.igdb_secret, sizeof(k.igdb_secret), "%s", argv[i + 2]), i += 2;
+            else if (!strcmp(argv[i], "--want") && i + 1 < argc)
+                icon = strcmp(argv[i + 1], "backdrop") != 0, backdrop = strcmp(argv[i + 1], "icon") != 0, i++;
+            else if (!strcmp(argv[i], "--again") && i + 1 < argc)
+                names[1] = argv[++i];
+        }
+        snprintf(k.sgdb_host, sizeof(k.sgdb_host), "%s", argv[5]);
+        snprintf(k.twitch_host, sizeof(k.twitch_host), "%s", argv[5]);
+        snprintf(k.igdb_host, sizeof(k.igdb_host), "%s", argv[5]);
+        k.plain = 1;
+        for (int n = 0; n < 2 && names[n]; n++) {
+            struct ps_art_got g;
+            int rc = ps_art_fetch(&e, &k, &st, names[n], icon, backdrop, &g);
+            printf("art %s rc %d icon %lu %d backdrop %lu %d\n", names[n], rc, g.icon ? g.icon_len : 0, g.icon_from,
+                   g.backdrop ? g.backdrop_len : 0, g.backdrop_from);
+            free(g.icon), free(g.backdrop);
+        }
+        return 0;
+    }
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--share") && i + 2 < argc) {
             snprintf(e.share_host, sizeof(e.share_host), "%s", argv[++i]);

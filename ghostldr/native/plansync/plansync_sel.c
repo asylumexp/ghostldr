@@ -75,6 +75,10 @@ struct sel_ps {
     s32 (*netctl)(s32, void *);
     int tcp[PS_TCP], udp[PS_UDP];
     unsigned ntcp, nudp, next_tcp, next_udp;
+    /* the art job: sockets the boot thread keeps ready (artsync_pump), taken in turn */
+    int ring;
+    volatile unsigned made_tcp, made_udp; /* written by the boot thread; next_*: taken by the job */
+    volatile int live;    /* the socket the job is connecting or talking over (0: none): artsync_stop wakes it */
     char mp[16];
     int mounted;
     u64 thread;
@@ -141,12 +145,33 @@ static int make_socket(struct sel_ps *v, int type)
     return fd;
 }
 
-static int e_tcp(struct ps_env *e) { return P->next_tcp < P->ntcp ? P->tcp[P->next_tcp++] : -ENOSYS; }
-static int e_udp(struct ps_env *e) { return P->next_udp < P->nudp ? P->udp[P->next_udp++] : -ENOSYS; }
+/* the art job's: the next socket the boot thread made, waiting for it a while */
+static int ring_take(struct ps_env *e, int *fds, volatile unsigned *made, unsigned *next, unsigned n)
+{
+    for (int waited = 0; __atomic_load_n(made, __ATOMIC_ACQUIRE) == *next; waited += 20) {
+        if (e->stop || waited >= 10000)
+            return -ENOSYS;
+        P->k->usleep(20000);
+    }
+    return fds[(*next)++ % n];
+}
+static int e_tcp(struct ps_env *e)
+{
+    if (P->ring)
+        return ring_take(e, P->tcp, &P->made_tcp, &P->next_tcp, PS_TCP);
+    return P->next_tcp < P->ntcp ? P->tcp[P->next_tcp++] : -ENOSYS;
+}
+static int e_udp(struct ps_env *e)
+{
+    if (P->ring)
+        return ring_take(e, P->udp, &P->made_udp, &P->next_udp, PS_UDP);
+    return P->next_udp < P->nudp ? P->udp[P->next_udp++] : -ENOSYS;
+}
 
 static int e_connect(struct ps_env *e, int fd, unsigned addr, unsigned short port, int timeout_ms)
 {
     struct sin a = {16, AF_INET, be16(port), __builtin_bswap32(addr), {0}};
+    P->live = fd + 1;
     int fl = P->fcntl ? P->fcntl(fd, F_GETFL, 0) : -1;
     if (fl >= 0)
         P->fcntl(fd, F_SETFL, fl | O_NONBLOCK);
@@ -201,7 +226,11 @@ static long e_recv(struct ps_env *e, int fd, void *buf, unsigned long n)
     return r < 0 ? -errno_(e) : r;
 }
 
-static void e_sclose(struct ps_env *e, int fd) { P->k->close(fd); }
+static void e_sclose(struct ps_env *e, int fd)
+{
+    __atomic_store_n(&P->live, 0, __ATOMIC_RELEASE);
+    P->k->close(fd);
+}
 
 /* "192.168.1.1" -> host order */
 static unsigned ipv4(const char *s)
@@ -320,29 +349,13 @@ static int e_list(struct ps_env *e, const char *prefix, char *names, unsigned lo
     return count;
 }
 
-/* ---- the selector's calls ---- */
-
-static void *job_thread(void *arg)
+/* the environment over libkernel (plansync_start, artsync_start): size
+ * bytes zeroed, struct sel_ps first; NULL when libkernel lacks a call */
+static struct sel_ps *env_new(const struct ghost_api *api, unsigned long size)
 {
-    struct sel_ps *v = arg;
-    ps_run(&v->e, &v->job);
-    if (v->mounted && v->api->gfs_umount(v->mp, 60000) == 0)
-        v->mounted = 0;
-    return NULL;
-}
-
-/* Start the job for the catalogue's titles (on the boot thread: it makes the
- * sockets here).  share: send the outbox; fetch: check GitHub.  0, or < 0
- * when nothing was started (then nothing is offered). */
-int plansync_start(const struct ghost_api *api, const char (*titles)[16], unsigned n, int share, int fetch,
-                   void **handle)
-{
-    *handle = NULL;
-    if (!share && !fetch)
-        return -1;
-    struct sel_ps *v = api->page_alloc(sizeof(*v));
+    struct sel_ps *v = api->page_alloc(size);
     if (!v)
-        return -12;
+        return NULL;
     struct ps_env *e = &v->e;
     v->api = api, v->ctx = *api->ctx, v->k = api->k;
     u32 lk = (u32)v->ctx->libkernel_handle;
@@ -365,20 +378,47 @@ int plansync_start(const struct ghost_api *api, const char (*titles)[16], unsign
         *(void **)&v->netctl = api->host_real_in("libSceNetCtl", "sceNetCtlGetInfo");
     if (!v->connect || !v->setsockopt || !v->poll || !v->recvfrom || !v->k->sendto || !v->join) {
         api->logf("plans: libkernel lacks a socket or thread call");
-        api->page_free(v, sizeof(*v));
-        return -ENOSYS;
+        api->page_free(v, size);
+        return NULL;
     }
+    e->ctx = v;
+    e->alloc = e_alloc, e->free = e_free, e->log = e_log, e->now = e_now, e->clock_ms = e_clock;
+    e->random = e_random, e->tcp = e_tcp, e->udp = e_udp, e->connect = e_connect, e->timeouts = e_timeouts;
+    e->send = e_send, e->recv = e_recv, e->sclose = e_sclose, e->dns = e_dns;
+    e->load = e_load, e->save = e_save, e->unlink = e_unlink, e->list = e_list;
+    return v;
+}
+
+/* ---- the selector's calls ---- */
+
+static void *job_thread(void *arg)
+{
+    struct sel_ps *v = arg;
+    ps_run(&v->e, &v->job);
+    if (v->mounted && v->api->gfs_umount(v->mp, 60000) == 0)
+        v->mounted = 0;
+    return NULL;
+}
+
+/* Start the job for the catalogue's titles (on the boot thread: it makes the
+ * sockets here).  share: send the outbox; fetch: check GitHub.  0, or < 0
+ * when nothing was started (then nothing is offered). */
+int plansync_start(const struct ghost_api *api, const char (*titles)[16], unsigned n, int share, int fetch,
+                   void **handle)
+{
+    *handle = NULL;
+    if (!share && !fetch)
+        return -1;
+    struct sel_ps *v = env_new(api, sizeof(struct sel_ps));
+    if (!v)
+        return -12;
+    struct ps_env *e = &v->e;
     for (unsigned i = 0; i < PS_TCP; i++)
         if ((v->tcp[v->ntcp] = make_socket(v, SOCK_STREAM)) >= 0)
             v->ntcp++;
     for (unsigned i = 0; i < PS_UDP; i++)
         if ((v->udp[v->nudp] = make_socket(v, SOCK_DGRAM)) >= 0)
             v->nudp++;
-    e->ctx = v;
-    e->alloc = e_alloc, e->free = e_free, e->log = e_log, e->now = e_now, e->clock_ms = e_clock;
-    e->random = e_random, e->tcp = e_tcp, e->udp = e_udp, e->connect = e_connect, e->timeouts = e_timeouts;
-    e->send = e_send, e->recv = e_recv, e->sclose = e_sclose, e->dns = e_dns;
-    e->load = e_load, e->save = e_save, e->unlink = e_unlink, e->list = e_list;
     /* "https://host[:port]" or, for a server on the LAN, "http://host[:port]" */
     const char *url = PS_SHARE_URL;
     e->share_tls = !strncmp(url, "https://", 8);
@@ -442,4 +482,159 @@ void plansync_stop(void *handle)
     if (v->mounted)
         v->api->gfs_umount(v->mp, 60000);
     v->api->page_free(v, sizeof(*v));
+}
+
+/* ---- the art job (artfetch.c, docs/selector.md "Game art") ----
+ *
+ * The selector asks for one game at a time (artsync_ask: its name, what it
+ * lacks) and takes each answer when it is done (artsync_poll, artsync_free);
+ * the job runs them in order on its thread.  Its sockets come from the boot
+ * thread, a few ahead of the job (artsync_pump, from the selector's loop),
+ * as the JIT compiler process gives them only there. */
+#define ART_MAX 64
+#define ART_AHEAD_TCP 4
+#define ART_AHEAD_UDP 2
+struct art_req {
+    char name[128];
+    int icon, backdrop, rc;
+    volatile int state; /* 0 waiting, 1 done (the job's), 2 taken */
+    struct ps_art_got got;
+};
+struct sel_art {
+    struct sel_ps ps; /* first: the environment */
+    struct ps_art_keys keys;
+    struct ps_art_state st;
+    struct art_req req[ART_MAX];
+    volatile unsigned nreq; /* asked (the selector's) */
+    volatile unsigned done; /* answered (the job's) */
+};
+
+static void *art_thread(void *arg)
+{
+    struct sel_art *a = arg;
+    struct ps_env *e = &a->ps.e;
+    while (!e->stop) {
+        unsigned i = __atomic_load_n(&a->done, __ATOMIC_ACQUIRE);
+        if (i >= __atomic_load_n(&a->nreq, __ATOMIC_ACQUIRE)) {
+            a->ps.k->usleep(100000);
+            continue;
+        }
+        struct art_req *r = &a->req[i];
+        r->rc = ps_art_fetch(e, &a->keys, &a->st, r->name, r->icon, r->backdrop, &r->got);
+        __atomic_store_n(&r->state, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&a->done, i + 1, __ATOMIC_RELEASE);
+    }
+    return NULL;
+}
+
+int artsync_start(const struct ghost_api *api, const struct ps_art_keys *keys, void **handle)
+{
+    *handle = NULL;
+    struct sel_art *a = (struct sel_art *)env_new(api, sizeof(struct sel_art));
+    if (!a)
+        return -12;
+    a->ps.ring = 1;
+    a->keys = *keys;
+    u8 attr[0x40];
+    a->ps.k->pthread_attr_init(attr);
+    a->ps.k->pthread_attr_setstacksize(attr, 256 << 10);
+    int rc = a->ps.k->pthread_create(&a->ps.thread, attr, art_thread, a, "artsync");
+    a->ps.k->pthread_attr_destroy(attr);
+    if (rc != 0) {
+        api->page_free(a, sizeof(*a));
+        return -35;
+    }
+    api->logf("art: the job started (%s%s%s)", keys->sgdb[0] ? "SteamGridDB" : "",
+              keys->sgdb[0] && keys->igdb_id[0] ? ", " : "", keys->igdb_id[0] ? "IGDB" : "");
+    *handle = a;
+    return 0;
+}
+
+/* a game to look up: its slot, or -1 (full) */
+int artsync_ask(void *handle, const char *name, int icon, int backdrop)
+{
+    struct sel_art *a = handle;
+    unsigned i = a ? a->nreq : ART_MAX;
+    if (i >= ART_MAX)
+        return -1;
+    struct art_req *r = &a->req[i];
+    strlcpy(r->name, name, sizeof(r->name));
+    r->icon = icon, r->backdrop = backdrop;
+    __atomic_store_n(&a->nreq, i + 1, __ATOMIC_RELEASE);
+    return (int)i;
+}
+
+/* slot's answer once the job has it (*rc: ps_art_fetch's), else NULL */
+const struct ps_art_got *artsync_poll(void *handle, int slot, int *rc)
+{
+    struct sel_art *a = handle;
+    if (!a || slot < 0 || slot >= ART_MAX || __atomic_load_n(&a->req[slot].state, __ATOMIC_ACQUIRE) != 1)
+        return NULL;
+    *rc = a->req[slot].rc;
+    return &a->req[slot].got;
+}
+
+static void art_free(struct sel_art *a, struct art_req *r)
+{
+    if (r->got.icon)
+        a->ps.api->page_free(r->got.icon, PS_ART_IMAGE_CAP);
+    if (r->got.backdrop)
+        a->ps.api->page_free(r->got.backdrop, PS_ART_IMAGE_CAP);
+    memset(&r->got, 0, sizeof(r->got));
+    r->state = 2;
+}
+
+/* slot's pictures given back (once they are used) */
+void artsync_free(void *handle, int slot)
+{
+    struct sel_art *a = handle;
+    if (a && slot >= 0 && slot < ART_MAX && a->req[slot].state == 1)
+        art_free(a, &a->req[slot]);
+}
+
+/* the boot thread, from the selector's loop: sockets made a few ahead while games wait */
+void artsync_pump(void *handle)
+{
+    struct sel_art *a = handle;
+    if (!a || a->done >= a->nreq)
+        return;
+    struct sel_ps *v = &a->ps;
+    if (v->made_tcp - v->next_tcp < ART_AHEAD_TCP) {
+        int fd = make_socket(v, SOCK_STREAM);
+        if (fd >= 0) {
+            v->tcp[v->made_tcp % PS_TCP] = fd;
+            __atomic_store_n(&v->made_tcp, v->made_tcp + 1, __ATOMIC_RELEASE);
+        }
+    }
+    if (v->made_udp - v->next_udp < ART_AHEAD_UDP) {
+        int fd = make_socket(v, SOCK_DGRAM);
+        if (fd >= 0) {
+            v->udp[v->made_udp % PS_UDP] = fd;
+            __atomic_store_n(&v->made_udp, v->made_udp + 1, __ATOMIC_RELEASE);
+        }
+    }
+}
+
+/* Stop it (a request under way gives up at its next read or write), wait
+ * for its thread, close the sockets it didn't take, free what is left. */
+void artsync_stop(void *handle)
+{
+    struct sel_art *a = handle;
+    if (!a)
+        return;
+    struct sel_ps *v = &a->ps;
+    v->e.stop = 1;
+    int live = __atomic_load_n(&v->live, __ATOMIC_ACQUIRE);
+    if (live && v->shutdown) /* a request waiting on it gives up now */
+        v->shutdown(live - 1, 2);
+    v->join(v->thread, NULL);
+    for (unsigned i = v->next_tcp; i < v->made_tcp; i++)
+        v->k->close(v->tcp[i % PS_TCP]);
+    for (unsigned i = v->next_udp; i < v->made_udp; i++)
+        v->k->close(v->udp[i % PS_UDP]);
+    for (unsigned i = 0; i < ART_MAX; i++)
+        if (a->req[i].state == 1)
+            art_free(a, &a->req[i]);
+    v->api->logf("art: the job stopped (%u of %u games looked up)", a->done, a->nreq);
+    v->api->page_free(a, sizeof(*a));
 }

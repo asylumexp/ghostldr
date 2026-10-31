@@ -240,6 +240,30 @@ class Selector(unittest.TestCase):
                 (saves / "GFSCATALOG.before").rename(saves / "GFSCATALOG")
             else:
                 catalogue(saves, cat)
+        # delete: three titles; CUSA00002 has saves, and two containers named like its own that aren't
+        cls.delsaves = t / "saves-delete"
+        cat = []
+        for tid in ("CUSA00001", "CUSA00002", "CUSA00003"):
+            prefix = "G" + tid[-5:]
+            files = {"eboot.bin": b"\1" * 5000, "sce_sys/icon0.png": art(len(cat), "icon0.png")}
+            total, count = pack_title(cls.delsaves, prefix, tid, files, 200 << 10, prefix + "INDEX")
+            cat.append({"id": tid, "prefix": prefix, "index": prefix + "INDEX", "name": "", "version": "01.00",
+                        "total": total, "containers": count, "flags": 0})
+        catalogue(cls.delsaves, cat)
+        for d in ("G00002SAVE", "G00002D001SAVE", "G00002002", "G00002003", "G00002META"):
+            (cls.delsaves / d).mkdir()
+        (cls.delsaves / "G00002SAVE/sdmemory_0.bin").write_bytes(b"progress")
+        (cls.delsaves / "G00002003/gfs.tag").write_bytes(struct.pack("<QI4x", 0x9999, 3))
+        (cls.delsaves / "G00002META/meta.bin").write_bytes(b"GFSM".ljust(16, b"\0") + b"CUSA00002".ljust(16, b"\0"))
+        # usbrefresh: a library's games (the fake extension's lists point here)
+        cls.libsaves = t / "saves-lib"
+        for tid, folder, a in (("CUSA00001", "Starfall", 1), ("CUSA00002", "Neon Drift", 2),
+                               ("CUSA00042", "Skyward Harbour", 4)):
+            g = cls.libsaves / "lib" / folder
+            (g / "sce_sys").mkdir(parents=True)
+            (g / "eboot.bin").write_bytes(b"\1" * 100)
+            (g / "sce_sys/param.sfo").write_bytes(param_sfo([("TITLE", folder), ("TITLE_ID", tid)]))
+            (g / "sce_sys/icon0.png").write_bytes(art(a, "icon0.png"))
         # an app root (dev setups: no ghostfs)
         cls.approot = t / "approot"
         (cls.approot / "sce_sys").mkdir(parents=True)
@@ -432,11 +456,11 @@ class Selector(unittest.TestCase):
 
     # ---- the real module through the core's loader ----
     def run_host(self, mode: str, shots: str = "", in_memory: bool = False, module: Path | None = None,
-                 profiles: Path | None = None) -> str:
+                 profiles: Path | None = None, saves: Path | None = None) -> str:
         if not self.host:
             self.skipTest("no way to build and run x86-64 code here")
         module = module or SEL_BIN
-        saves = {"multi": self.multi, "approot": self.approot, "apollo": self.apollo,
+        saves = saves or {"multi": self.multi, "approot": self.approot, "apollo": self.apollo,
                  "apollo-one": self.apollo_one, "one": self.one, "empty": self.empty,
                  "settings": self.netsaves, "community": self.community, "community-none": self.community,
                  "community-runpy": self.community}.get(mode, self.legacy)
@@ -449,9 +473,55 @@ class Selector(unittest.TestCase):
         self.assertNotIn("FAILED", p.stdout)
         return p.stdout
 
+    def test_meta_written_by_the_selector(self) -> None:
+        """art.c keeps fetched art as gfs_meta.py lays it out: meta.c's QOI and meta.bin, read back by gfs_meta.py
+        and by the module's own decoder, pixel for pixel."""
+        sys.path.insert(0, str(ROOT / "ghostldr/host"))
+        import gfs_meta as gm
+        meta = Path(self.tmp.name) / "built-meta.bin"
+        p = subprocess.run([str(self.preview), "--build-meta", str(meta)], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = meta.read_bytes()
+        info = gm.parse(data)
+        self.assertEqual((info["title"], info["name"], info["name_source"], info["version"], info["flags"]),
+                         ("CUSA00042", "Skyward Harbour", 3, "01.00", 1))
+        self.assertEqual(info["size"], len(data))
+        self.assertIn("icon 384x384", gm.describe(info))
+        self.assertIn("(SteamGridDB)", gm.describe(info))
+        self.assertIn("(IGDB)", gm.describe(info))
+        for which, sect in (("icon", gm.SECT_ICON), ("backdrop", gm.SECT_BACKDROP)):
+            s = info["sections"][sect]
+            img = gm.qoi_decode(data[s["offset"]:s["offset"] + s["size"]])
+            bgra = Path(f"{meta}.{which}.bgra").read_bytes()
+            rgba = bytearray(len(bgra))
+            rgba[0::4], rgba[1::4], rgba[2::4], rgba[3::4] = bgra[2::4], bgra[1::4], bgra[0::4], bgra[3::4]
+            self.assertEqual((img.w, img.h), (s["w"], s["h"]))
+            self.assertEqual(bytes(img.rgba), bytes(rgba), which)
+        out = Path(self.tmp.name) / "built-meta"
+        out.mkdir(exist_ok=True)
+        p = subprocess.run([str(self.preview), "--decode-meta", str(meta), str(out)], capture_output=True, text=True)
+        self.assertIn("name 'Skyward Harbour' version '01.00' icon 5 backdrop 6", p.stdout)
+
+    def test_preview_refresh_delete_and_art_keys(self) -> None:
+        """Refresh (Triangle) reads the row again; Settings > Games deletes a game after a Yes (No first);
+        Settings > Game art's switch and a key typed on its keyboard."""
+        out = self.preview_run("--scene", "refresh")
+        self.assertIn("selector: refresh: asked", out)
+        self.assertIn("reload: 13 title(s), the new one CUSA00042", out)
+        out = self.preview_run("--scene", "delete")
+        self.assertIn("settings: delete CUSA11456 (GHOST): No", out)
+        self.assertIn("settings: delete CUSA11456 (GHOST): Yes", out)
+        self.assertEqual(out.count("delete: CUSA11456 (GHOST): 11 title(s) left"), 1)
+        out = self.preview_run("--scene", "artkeys")
+        self.assertIn("settings: fetch_art: 1", out)
+        self.assertIn("art key 0: aS2345678", out)
+        for shot in ("refresh-asked", "delete-ask", "delete-done", "art-keyboard", "art-saved"):
+            self.assertTrue((self.shots / f"preview-{shot}.png").is_file(), shot)
+
     def test_v01_install_on_request(self) -> None:
         out = self.run_host("single", "700:home,1900:info,3300:closed,3600:launch")
         self.assertIn("1 title(s) installed (GFSINDEX), shown on request", out)
+        self.assertIn("notification ghostldr: FTP service started on 192.168.1.123:1212", out)
         # before its index is read: the profile's name; then param.sfo's, in the system language, wins
         self.assertIn("title 0: CUSA11456 'Ghost of Tsushima' (name profile) , 0 MiB, index GFSINDEX", out)
         self.assertIn("'Test Title (English)' 02.18", out)
@@ -569,7 +639,7 @@ class Selector(unittest.TestCase):
         self.assertIn("settings: opened (2 title(s)", out)
         self.assertIn("netinst_fake: started", out)
         self.assertIn("settings: network install finished (1 this session): Skyward Harbour", out)
-        self.assertIn("settings: catalogue again: 3 title(s) (had 2, 1 new)", out)
+        self.assertIn("refresh: 3 title(s) (had 2: 1 new, 0 gone)", out)
         self.assertRegex(out, r"netinst_fake: stopped after \d+ polls")
         self.assertIn("settings: logs to the USB drive off: now 0", out)
         conf = (self.netsaves / "GLDRCONF/settings.txt").read_text()   # the store ghostldr.lua reads
@@ -641,6 +711,29 @@ class Selector(unittest.TestCase):
         out = self.run_host("community-runpy", profiles=self.community_bundle)
         self.assertIn("CUSA00001: a community memory plan from 12 console(s): off before the selector "
                       "(CTX_FLAG_NO_COMMUNITY_MEM set)", out)
+
+    def test_delete_an_installed_game(self) -> None:
+        """Settings > Games: a game installed in saved data deleted after a Yes: its containers (those the
+        catalogue or their tags say are its), index and META go, its saves and others' containers stay."""
+        saves = Path(self.tmp.name) / "saves-delete-run"
+        shutil.copytree(self.delsaves, saves)
+        out = self.run_host("delete", saves=saves)
+        self.assertIn("selector_host: deleted G00002INDEX G00002000 G00002META", out)
+        self.assertIn("delete: G00002002 left: no tag, past the count", out)
+        self.assertIn("delete: G00002003 left: another layout's", out)
+        cat = (saves / "GFSCATALOG/catalog.bin").read_bytes()
+        count, gen = struct.unpack_from("<I", cat, 16)[0], struct.unpack_from("<Q", cat, 24)[0]
+        self.assertEqual((count, gen), (2, 8))
+        self.assertEqual(len(cat), 64 + 2 * 192)
+        self.assertEqual([cat[64 + 192 * i:64 + 192 * i + 9] for i in range(2)], [b"CUSA00001", b"CUSA00003"])
+        self.assertEqual((saves / "G00002SAVE/sdmemory_0.bin").read_bytes(), b"progress")
+
+    def test_refresh_a_usb_library(self) -> None:
+        """Triangle: the library looked at again (ghost_api.library_scan); the row follows and the choice
+        indexes the new list."""
+        out = self.run_host("usbrefresh", saves=self.libsaves)
+        self.assertIn("refresh: 2 title(s) (had 2: 1 new, 1 gone)", out)
+        self.assertIn("refresh: CUSA00001 'Starfall' is gone from the drives (its tiles reused)", out)
 
     def test_catalogue(self) -> None:
         out = self.run_host("multi", "2000:home,2560:moving,4000:third,4500:launch")

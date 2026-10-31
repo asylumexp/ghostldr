@@ -21,6 +21,9 @@
  * once, writes pending=safe and says so; the selector then says so too.
  * Reset to defaults empties the file's switches.
  *
+ * steamgriddb_key, igdb_client_id and igdb_client_secret are the keys typed
+ * in Settings > Game art (sel_art_key): kept here, never logged.
+ *
  * community_off=CUSA00001,CUSA11456 lists the games whose community memory
  * plan the player turned off in their Information panel (sel_community);
  * the game picked gets CTX_FLAG_NO_COMMUNITY_MEM from it and the switch
@@ -102,8 +105,22 @@ int conf_switch(int i, struct sel_switch *w)
         str_copy(w->off, "Off: the FTP server shows no saves folder", sizeof(w->off));
         w->flag = CTX_FLAG_FTP_SAVES, w->on_sets = 1, w->def = 0; /* run.py --ftp-saves */
         return 0;
+    case CONF_FETCH_ART: /* shown under Game art, with its keys; the selector reads it (art.c) */
+        str_copy(w->key, "fetch_art", sizeof(w->key));
+        str_copy(w->label, "Fetch missing art", sizeof(w->label));
+        str_copy(w->on, "On: a game with no picture or backdrop of its own gets them, by its name, and keeps them",
+                 sizeof(w->on));
+        str_copy(w->off, "Off: such a game shows a tile drawn in its colour", sizeof(w->off));
+        w->flag = CTX_FLAG_FETCH_ART, w->on_sets = 1, w->def = 0, w->art = 1; /* run.py --fetch-art */
+        return 0;
     }
     return -1;
+}
+
+/* Game art's keys in the file (never in the log) */
+static const char *key_name(int k)
+{
+    return k == KEY_SGDB ? "steamgriddb_key" : k == KEY_IGDB_ID ? "igdb_client_id" : "igdb_client_secret";
 }
 
 /* the value of key in text: its length, or -1 */
@@ -172,6 +189,9 @@ void conf_load(struct plat *P)
     u64 on = get(t, n, "flags_on", v, sizeof(v)) > 0 ? hex(v) : 0, off = get(t, n, "flags_off", v, sizeof(v)) > 0 ? hex(v) : 0;
     if (get(t, n, "community_off", P->conf_off, sizeof(P->conf_off)) < 0)
         P->conf_off[0] = 0;
+    for (int k = 0; k < NKEYS; k++)
+        if (get(t, n, key_name(k), P->art_key[k], KEY_MAX) < 0)
+            P->art_key[k][0] = 0;
     int pending = get(t, n, "pending", v, sizeof(v)) > 0;
     P->conf_safe = pending && str_same(v, "safe");
     /* this boot's flags: with them (ghostldr.lua applied them), without, or nothing to apply */
@@ -207,6 +227,9 @@ static int conf_text(struct plat *P, char *t, int cap, u64 *on_mask, u64 *off_ma
     n += fmt(t + n, (size_t)(cap - n), "flags_on=0x%lx\nflags_off=0x%lx\n", *on_mask, *off_mask);
     if (P->conf_off[0])
         n += fmt(t + n, (size_t)(cap - n), "community_off=%s\n", P->conf_off);
+    for (int k = 0; k < NKEYS; k++)
+        if (P->art_key[k][0])
+            n += fmt(t + n, (size_t)(cap - n), "%s=%s\n", key_name(k), P->art_key[k]);
     return n;
 }
 
@@ -253,6 +276,8 @@ int conf_set(struct plat *P, int i, int on)
         P->ctx->flags |= w.flag;
     else
         P->ctx->flags &= ~w.flag;
+    if (i == CONF_FETCH_ART && on != (int)((was >> i) & 1))
+        art_restart(P);
     return 0;
 }
 
@@ -357,4 +382,30 @@ void conf_start(struct plat *P, const struct title *t)
             t->community_from, why, off ? "set" : "clear");
     else
         LOG(P, "%s: no community memory plan (CTX_FLAG_NO_COMMUNITY_MEM %s: %s)", t->id, off ? "set" : "clear", why);
+}
+
+/* ---- Game art's keys (Settings > Game art, art.c) ---- */
+int sel_art_key(struct sel *S, int which, const char *value, char *out, int cap)
+{
+    struct plat *P = PLAT(S);
+    if (which < 0 || which >= NKEYS)
+        return -1;
+    if (out)
+        str_copy(out, P->art_key[which], cap);
+    if (!value)
+        return 0;
+    char was[KEY_MAX];
+    str_copy(was, P->art_key[which], sizeof(was));
+    int n = 0; /* printable, no spaces: what a key is */
+    for (const char *c = value; *c && n + 1 < KEY_MAX; c++)
+        if (*c > ' ' && *c < 0x7F && *c != '=')
+            P->art_key[which][n++] = *c;
+    P->art_key[which][n] = 0;
+    int rc = conf_write(P);
+    if (rc != 0)
+        str_copy(P->art_key[which], was, KEY_MAX);
+    LOG(P, "settings: %s %s: %x", key_name(which), n ? "set" : "cleared", (u32)rc);
+    if (rc == 0)
+        art_restart(P);
+    return rc == 0 ? 0 : -1;
 }

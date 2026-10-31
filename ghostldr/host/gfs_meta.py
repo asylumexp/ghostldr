@@ -90,9 +90,11 @@ SECTION = struct.Struct("<IIHHBBH")
 # where a name or a picture came from (selector/src/plat.h NAME_*, sel.h ART_*)
 NAME_SFO, NAME_PROFILE, NAME_GIVEN, NAME_STORE = 1, 2, 3, 4
 ART_TITLE, ART_GIVEN, ART_STORE = 1, 2, 3
+ART_SGDB, ART_IGDB = 5, 6         # fetched by the selector (Settings > Game art)
 NAME_SOURCES = {0: "none", NAME_SFO: "param.sfo", NAME_PROFILE: "profile", NAME_GIVEN: "given",
                 NAME_STORE: "PlayStation Store"}
-ART_SOURCES = {0: "none", ART_TITLE: "the title's sce_sys", ART_GIVEN: "given", ART_STORE: "PlayStation Store"}
+ART_SOURCES = {0: "none", ART_TITLE: "the title's sce_sys", ART_GIVEN: "given", ART_STORE: "PlayStation Store",
+               ART_SGDB: "SteamGridDB", ART_IGDB: "IGDB"}
 NAME_BYTES = 127
 SFO_MAX = 64 << 10
 

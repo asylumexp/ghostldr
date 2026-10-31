@@ -781,3 +781,14 @@ void ps_run(struct ps_env *e, struct ps_job *job)
         fetch(e, job);
     __atomic_store_n(&job->state, job->github == 200 || job->github == 304 ? PS_DONE : PS_FAILED, __ATOMIC_RELEASE);
 }
+
+/* ---- one request for artfetch.c (game art from the services the player gave keys for) ---- */
+int ps_http(struct ps_env *e, int tls, const char *host, unsigned short port, const char *method, const char *path,
+            const char *headers, const void *body, unsigned long blen, unsigned char *out, unsigned long cap,
+            unsigned long *len, int *truncated)
+{
+    struct resp r;
+    int rc = http(e, tls, host, port, method, path, headers, body, blen, out, cap, &r);
+    *len = r.len, *truncated = r.truncated;
+    return rc == 0 ? r.status : -1;
+}

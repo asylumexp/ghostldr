@@ -549,6 +549,14 @@ int ext_library(const struct lib_title **list)
     return g_early ? g_early->library(list) : 0;
 }
 
+int ext_library_scan(const struct lib_title **list, u32 *ps5, int again)
+{
+    *list = NULL;
+    if (!g_early || g_early->size < __builtin_offsetof(struct ext_early, lib_again) + 8 || !g_early->lib_again)
+        return -1;
+    return g_early->lib_again(list, ps5, again);
+}
+
 /* "auto" found no game on a drive: the code's early JIT block goes back (the
  * next boot needs it) and the code is placed again with the title, as for
  * any installed title; the blob stays. */

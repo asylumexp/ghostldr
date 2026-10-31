@@ -15,7 +15,9 @@
  *      the save scan (ghost_api.save_prescan) with its progress on screen;
  *      Settings (setui.c, info.c) at the end of the row, also with one
  *      title or none: the drive check, the network installer (whose new
- *      titles join the row), the log on the USB drive, Close ghostldr;
+ *      titles join the row), the log on the USB drive, deleting a game
+ *      installed in saved data, Close ghostldr; Refresh (Triangle) reads
+ *      the row again, and Game art (art.c) fetches missing art meanwhile;
  *   5. tears everything down: closes VideoOut, the system font, unloads the
  *      system modules it loaded, and unmaps and releases both blocks, then
  *      returns the chosen title.  The core then overwrites this image.
@@ -244,7 +246,7 @@ static void sync_title(struct sel *S, struct plat *P, int i)
 }
 
 /* <prefix>META: its header once (with whatever follows it in the first MiB) */
-static const u8 *meta_head(struct sel *S, struct plat *P, int i, u64 *n)
+const u8 *meta_head(struct sel *S, struct plat *P, int i, u64 *n)
 {
     struct cat_title *c = &P->cat[i];
     *n = 0;
@@ -435,6 +437,36 @@ static void video_close(struct plat *P)
     P->vo_open = 0;
 }
 
+/* Three seconds after the selector first appears, say where the FTP server
+ * which boot.c started can be reached.  The request is consumed before this
+ * call returns, so it can live on this stack. */
+static void ftp_notice(struct plat *P, u32 port)
+{
+    struct {
+        s32 type, req_id, priority, msg_id, target_id, user_id, unk1, unk2, app_id, error_num, unk3;
+        u8 use_icon;
+        char message[1024];
+        char icon[1024];
+        char unk[1024];
+        u8 pad[3];
+    } __attribute__((packed)) r;
+    _Static_assert(sizeof(r) == 0xC30, "notification request");
+    s32 (*notify)(s32, void *, u64, s32) =
+        (s32(*)(s32, void *, u64, s32))P->api->host_dlsym((u32)P->ctx->libkernel_handle,
+                                                           "sceKernelSendNotificationRequest");
+    char ip[16];
+    info_network_ip(P, ip);
+    if (!notify || !ip[0]) {
+        LOG(P, "FTP service started on %s:%u; notification unavailable", ip[0] ? ip : "unknown IP", port);
+        return;
+    }
+    memset(&r, 0, sizeof(r));
+    r.target_id = -1;
+    fmt(r.message, sizeof(r.message), "ghostldr: FTP service started on %s:%u", ip, port);
+    s32 rc = notify(0, &r, sizeof(r), 0);
+    LOG(P, "FTP service started on %s:%u: notification %x", ip, port, (u32)rc);
+}
+
 /* ---- pad ---- */
 #define PAD_INTERCEPTED 0x80000000u
 
@@ -538,59 +570,170 @@ static void clock_now(struct sel *S, struct plat *P)
     ui_set_clock(S, (int)(day / 3600), (int)(day / 60 % 60), h24 != 0);
 }
 
-/* ---- the network installer changed the catalogue: the row again ---- */
-static struct title *reload(struct sel *S, struct plat *P, struct title *titles)
+/* a title of the row as the catalogue (or the library) has it, tiles aside */
+static void title_from(struct plat *P, struct title *t, const struct cat_title *c)
 {
-    if (!P->reload_ok || P->library || !P->ghostfs)
+    str_copy(t->id, c->id, sizeof(t->id));
+    str_copy(t->name, c->name, sizeof(t->name));
+    str_copy(t->version, c->version, sizeof(t->version));
+    str_copy(t->prefix, P->ghostfs ? c->prefix : "", sizeof(t->prefix));
+    t->size = c->total;
+    t->flags = title_flags(c);
+    t->community = c->seed, t->community_from = c->seed_from;
+    t->community_off = (u8)conf_community_off(P, c->id);
+    str_copy(t->note, c->note, sizeof(t->note));
+    if (P->library) { /* its folder, as the drive shows it: without the mount point and app0 */
+        info_title_where(P, c->path, c->dir_len, t->where, (int)sizeof(t->where));
+        if (!t->name[0] && !t->id[0]) { /* nothing names it: its folder's name */
+            const char *base = t->where;
+            for (const char *k = base; *k; k++)
+                if (*k == '/' && k[1])
+                    base = k + 1;
+            str_copy(t->name, base, sizeof(t->name));
+        }
+    }
+}
+
+/* the same title in the row before: by its folder in a library (two copies
+ * share an ID), else by its ID */
+static int same_title(const struct plat *P, const struct cat_title *a, const struct cat_title *b)
+{
+    return !strcmp(a->id, b->id) && (!P->library || !strcmp(a->path, b->path));
+}
+
+/* ---- the row again: the network installer changed the catalogue, or
+ * Refresh (Triangle, Settings' Look again): a library's games looked for
+ * again on the drives (ghost_api.library_scan, again), else GFSCATALOG read
+ * again.  A title still there keeps its tiles and what was read of it; a
+ * new one takes the tiles of one that went, else new ones (the heap has
+ * room for ntitle_cap).  The arrays are two of ntitle_cap, in turn.  *added
+ * and *gone: how many; -1 in *added when nothing could be read (the row
+ * stays). ---- */
+static struct title *reload(struct sel *S, struct plat *P, struct title *titles, int again, int *added, int *gone)
+{
+    *added = *gone = 0;
+    if (!P->reload_ok) {
+        *added = -1;
         return titles;
+    }
     struct cat_title *old = P->cat;
-    int had = P->ncat, n = cat_count(P), fresh = 0;
-    struct title *t = n > 0 ? sel_alloc(S, sizeof(struct title) * (u64)n) : titles;
-    if (n < 0 || !t || (n > 0 && cat_load(S, P, n) != 0)) {
+    int had = P->ncat, n;
+    if (P->library)
+        n = P->api->size >= __builtin_offsetof(struct ghost_api, library_scan) + 8 && P->api->library_scan
+                ? P->api->library_scan(&P->lib, &P->ps5, again) : -1;
+    else
+        n = cat_count(P);
+    if (n > P->ntitle_cap) {
+        LOG(P, "refresh: %d titles: the first %d are listed (the heap has room for so many)", n, P->ntitle_cap);
+        n = P->ntitle_cap;
+    }
+    int k = P->buf_turn;
+    for (int i = 0; i < 2 && !P->title_buf[1]; i++) {
+        P->title_buf[i] = sel_alloc(S, sizeof(struct title) * (u64)P->ntitle_cap);
+        P->cat_buf[i] = sel_alloc(S, sizeof(struct cat_title) * (u64)P->ntitle_cap);
+        if (!P->title_buf[i] || !P->cat_buf[i])
+            P->title_buf[0] = P->title_buf[1] = NULL;
+    }
+    struct title *t = P->title_buf[k];
+    P->cat_into = P->cat_buf[k];
+    int bad = n < 0 || !t || (n > 0 && cat_load(S, P, n) != 0);
+    P->cat_into = NULL;
+    if (bad) {
         P->cat = old, P->ncat = had;
-        LOG(P, "settings: catalogue again: unreadable, kept as it was");
+        LOG(P, "refresh: the %s: unreadable, kept as it was", P->library ? "drives" : "catalogue");
+        *added = -1;
         return titles;
     }
     if (n == 0)
-        P->ncat = 0;
+        P->cat = P->cat_buf[k], P->ncat = 0;
+    u8 kept[SEL_MAX_TITLES], have[SEL_MAX_TITLES]; /* kept: an old title still here (2: its tiles taken); have: a new one that was */
+    memset(kept, 0, sizeof(kept));
+    memset(have, 0, sizeof(have));
     for (int i = 0; i < P->ncat; i++) {
         const struct cat_title *c = &P->cat[i];
-        int k = -1;
-        for (int j = 0; j < had && k < 0; j++)
-            if (!strcmp(old[j].id, c->id))
-                k = j;
-        if (k >= 0) {
-            t[i] = titles[k]; /* its tiles as they are */
-            P->cat[i].meta = old[k].meta, P->cat[i].meta_state = old[k].meta_state, P->cat[i].indexed = old[k].indexed;
-            memcpy(P->cat[i].file, old[k].file, sizeof(old[k].file));
-            P->cat[i].cap = old[k].cap;
-        } else {
-            if (P->tiles_used >= P->ntitle_cap) { /* the heap has room for so many tiles */
-                LOG(P, "settings: catalogue again: no room for more titles' tiles (%d): kept as it was", P->ntitle_cap);
-                P->cat = old, P->ncat = had;
-                return titles;
-            }
-            memset(&t[i], 0, sizeof(t[i]));
-            str_copy(t[i].id, c->id, sizeof(t[i].id));
-            str_copy(t[i].name, c->name, sizeof(t[i].name));
-            str_copy(t[i].version, c->version, sizeof(t[i].version));
-            str_copy(t[i].prefix, c->prefix, sizeof(t[i].prefix));
-            t[i].size = c->total;
-            t[i].community = c->seed, t[i].community_from = c->seed_from;
-            t[i].community_off = (u8)conf_community_off(P, c->id);
-            if (ui_title_alloc(S, &t[i]) != 0) {
-                P->cat = old, P->ncat = had;
-                return titles;
-            }
-            P->tiles_used++, fresh++;
-            LOG(P, "title %d: %s '%s' %s, %lu MiB: installed over the network", i, c->id, c->name, c->version,
-                c->total >> 20);
-        }
-        t[i].flags = (t[i].flags & TITLE_DUMP) | title_flags(c);
+        int j = -1;
+        for (int m = 0; m < had && j < 0; m++)
+            if (!kept[m] && same_title(P, &old[m], c))
+                j = m;
+        if (j < 0)
+            continue;
+        kept[j] = 1;
+        t[i] = titles[j]; /* its tiles as they are */
+        P->cat[i].meta = old[j].meta, P->cat[i].meta_state = old[j].meta_state, P->cat[i].indexed = old[j].indexed;
+        memcpy(P->cat[i].file, old[j].file, sizeof(old[j].file));
+        P->cat[i].cap = old[j].cap;
+        u32 dump = t[i].flags & TITLE_DUMP;
+        title_from(P, &t[i], &P->cat[i]);
+        if (P->cat[i].name[0] == 0 && titles[j].name[0])
+            str_copy(t[i].name, titles[j].name, sizeof(t[i].name));
+        t[i].flags |= dump; /* as its param.sfo said */
+        have[i] = 1;
     }
+    int spare = 0; /* the tiles of the titles that went */
+    for (int i = 0; i < P->ncat; i++) {
+        if (have[i])
+            continue;
+        const struct cat_title *c = &P->cat[i];
+        surface big = {0}, small = {0};
+        while (spare < had && kept[spare])
+            spare++;
+        if (spare < had) {
+            big = titles[spare].icon, small = titles[spare].icon_small;
+            kept[spare++] = 2;
+        }
+        memset(&t[i], 0, sizeof(t[i]));
+        title_from(P, &t[i], c);
+        if (big.px) {
+            t[i].icon = big, t[i].icon_small = small;
+            t[i].tint = title_tint(t[i].id, t[i].name);
+        } else if (P->tiles_used >= P->ntitle_cap || ui_title_alloc(S, &t[i]) != 0) {
+            LOG(P, "refresh: no room for title %d's tiles: the row stops before it", i);
+            P->ncat = i;
+            break;
+        } else {
+            P->tiles_used++;
+        }
+        (*added)++;
+        LOG(P, "title %d: %s '%s' %s%s%s: new in the row", i, c->id, c->name, c->version,
+            P->library ? " at " : "", P->library ? c->path : "");
+    }
+    for (int m = 0; m < had; m++)
+        if (!kept[m]) {
+            (*gone)++;
+            LOG(P, "refresh: %s '%s' is gone from the %s", old[m].id, old[m].name, P->library ? "drives" : "catalogue");
+        } else if (kept[m] == 2) {
+            (*gone)++;
+            LOG(P, "refresh: %s '%s' is gone from the %s (its tiles reused)", old[m].id, old[m].name,
+                P->library ? "drives" : "catalogue");
+        }
+    P->buf_turn = !k;
     ui_set_titles(S, t, P->ncat);
-    LOG(P, "settings: catalogue again: %d title(s) (had %d, %d new)", P->ncat, had, fresh);
+    LOG(P, "refresh: %d title(s) (had %d: %d new, %d gone)%s", P->ncat, had, *added, *gone,
+        P->ps5 ? "; PS5 games left out of the library" : "");
     return t;
+}
+
+/* Refresh's words: what changed */
+static void refresh_said(struct sel *S, struct plat *P, u64 now, int added, int gone)
+{
+    char msg[96];
+    const char *where = P->library ? "on the USB drives" : "installed";
+    if (added < 0) {
+        ui_toast(S, now, P->library || P->ghostfs ? "The games couldn't be read again" : "This boot's game was given: nothing to look for");
+        return;
+    }
+    if (!added && !gone)
+        sel_fmt(msg, sizeof(msg), "No change: %d game%s %s", P->ncat, P->ncat == 1 ? "" : "s", where);
+    else if (added && gone)
+        sel_fmt(msg, sizeof(msg), "%d new game%s, %d gone", added, added == 1 ? "" : "s", gone);
+    else if (added)
+        sel_fmt(msg, sizeof(msg), "%d new game%s %s", added, added == 1 ? "" : "s", where);
+    else
+        sel_fmt(msg, sizeof(msg), "%d game%s gone", gone, gone == 1 ? "" : "s");
+    if (added > 0)
+        ui_toast_ok(S, now, msg);
+    else
+        ui_toast(S, now, msg);
 }
 
 /* ---- one step: the pad, the clock, the users, the UI, a frame if it changed ---- */
@@ -698,8 +841,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         return -1;
     if (n > SEL_MAX_TITLES)
         n = SEL_MAX_TITLES;
-    /* an install over the network may add titles while it runs (ghostfs only) */
-    P.reload_ok = P.ghostfs && !ask_only && info_has_netinst();
+    /* the row may be read again: an install over the network (ghostfs), Refresh (a library's drives too) */
+    P.reload_ok = (P.ghostfs || P.library) && !ask_only;
     P.ntitle_cap = n + (P.reload_ok ? NET_EXTRA : 0);
     if (P.ntitle_cap > SEL_MAX_TITLES)
         P.ntitle_cap = SEL_MAX_TITLES;
@@ -710,7 +853,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     size_t run_len = 0;
     P.k->avail_direct(0, (off_t)P.k->direct_size(), 0x200000, &run, &run_len);
     P.video_size = 2 * FB_SLOT;
-    P.heap_size = (HEAP_BASE + (u64)P.ntitle_cap * HEAP_TITLE + (P.reload_ok ? (u64)n * HEAP_TITLE / 4 : 0) +
+    P.heap_size = (HEAP_BASE + (u64)P.ntitle_cap * HEAP_TITLE +
+                   (P.reload_ok ? 2 * (u64)P.ntitle_cap * (sizeof(struct title) + sizeof(struct cat_title)) : 0) +
                    HEAP_FONT + HEAP_TEMP + HEAP_SETTINGS + (sysfont ? HEAP_SYSFONT : 0) + sizeof(struct sel) +
                    0x1FFFFF) & ~0x1FFFFFull;
     u64 top = (u64)run + run_len;
@@ -740,25 +884,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         goto out;
     for (int i = 0; i < n; i++) {
         const struct cat_title *c = &P.cat[i];
-        str_copy(titles[i].id, c->id, sizeof(titles[i].id));
-        str_copy(titles[i].name, c->name, sizeof(titles[i].name));
-        str_copy(titles[i].version, c->version, sizeof(titles[i].version));
-        str_copy(titles[i].prefix, P.ghostfs ? c->prefix : "", sizeof(titles[i].prefix));
-        titles[i].size = c->total;
-        titles[i].flags = title_flags(c);
-        titles[i].community = c->seed, titles[i].community_from = c->seed_from;
-        str_copy(titles[i].note, c->note, sizeof(titles[i].note));
+        title_from(&P, &titles[i], c);
         P.tiles_used++;
-        if (P.library) { /* its folder, as the drive shows it: without the mount point and app0 */
-            info_title_where(&P, c->path, c->dir_len, titles[i].where, (int)sizeof(titles[i].where));
-            if (!titles[i].name[0] && !titles[i].id[0]) { /* nothing names it: its folder's name */
-                const char *base = titles[i].where;
-                for (const char *c = base; *c; c++)
-                    if (*c == '/' && c[1])
-                        base = c + 1;
-                str_copy(titles[i].name, base, sizeof(titles[i].name));
-            }
-        }
         if (!P.ghostfs && !P.library && !strncmp(P.root, "/ghostldr_usb", 13)) { /* the one game on a USB drive */
             u32 len = (u32)strlen(P.root);
             if (len > 5 && !strcmp(P.root + len - 5, "/app0"))
@@ -781,6 +908,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
     if (png_init(&P) != 0)
         LOG(&P, "libScePngDec unavailable: tiles and backgrounds use the built-in fallback");
     ui_set_platform(S, P.ps4 ? SEL_PS4 : SEL_PS5);
+    S->can_refresh = P.reload_ok;
+    S->can_delete = !ask_only && (P.ghostfs ? P.catalogue : P.library); /* a USB boot: Settings lists GFSCATALOG's */
     if (ask_only) { /* the core's title alone */
         const char *id = api->title_id();
         for (int i = 0; n > 1 && i < n; i++)
@@ -811,6 +940,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
             plansync_start(api, (const char (*)[16])ids, nid, share, fetch, &ps);
     }
 
+    art_start(&P); /* Settings > Game art: missing art fetched while the games show */
+
     /* 4. screen and pad */
     if (video_open(&P) != 0) {
         LOG(&P, "no video output: booting the default title");
@@ -826,6 +957,8 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
 
     /* 5. the loop: 30 fps at most, frames drawn only when something changed */
     u64 now = P.proc_time(), started = now;
+    u32 ftp_port = CTX_SELECTOR_FTP_PORT(P.ctx->flags);
+    u64 ftp_notice_at = ftp_port ? started + 3000000 : 0;
     P.prev = now;
     if (P.conf_safe) /* ghostldr.lua left the switches out: the last boot with them never got here */
         ui_toast(S, now, "Settings \xE2\x80\xBA Advanced was left out of this boot: the last one with it stopped early");
@@ -834,14 +967,49 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
         now = P.proc_time();
         int boot = -1;
         tick(S, &P, now, &boot);
+        if (ftp_notice_at && now >= ftp_notice_at) {
+            ftp_notice_at = 0;
+            ftp_notice(&P, ftp_port);
+        }
         if (S->scan_req)
             run_scan(S, &P, S->sel, first + S->sel);
         if (ps && !job && (job = plansync_poll(ps)) != NULL)
             community_offer(S, &P, job);
-        if (S->reload_req) {
+        art_step(S, &P);
+        if (S->reload_req) { /* an install over the network finished */
             S->reload_req = 0;
-            titles = reload(S, &P, titles);
+            int added, gone;
+            if (P.ghostfs)
+                titles = reload(S, &P, titles, 0, &added, &gone);
             n = P.ncat;
+        }
+        if (S->delete_req && now >= S->delete_at) { /* Settings > Games: Yes, once its message has shown */
+            S->delete_req = 0;
+            char why[96];
+            int rc = cat_delete(S, &P, S->del_id, S->del_prefix, why, sizeof(why)), added, gone;
+            if (P.ghostfs) /* the row without it */
+                titles = reload(S, &P, titles, 0, &added, &gone);
+            n = P.ncat;
+            char msg[96];
+            if (rc == 0 && !why[0])
+                sel_fmt(msg, sizeof(msg), "Deleted %s: its saves are kept", S->del_name);
+            else
+                sel_fmt(msg, sizeof(msg), rc == 0 ? "Deleted %s; %s" : "%s: not deleted: %s", S->del_name, why);
+            if (rc == 0)
+                ui_toast_ok(S, P.proc_time(), msg);
+            else
+                ui_toast(S, P.proc_time(), msg);
+            if (S->set_open)
+                set_rebuild(S);
+        }
+        if (S->refresh_req && now >= S->refresh_at) { /* Refresh: once its message has shown */
+            S->refresh_req = 0;
+            int added, gone;
+            titles = reload(S, &P, titles, 1, &added, &gone);
+            n = P.ncat;
+            refresh_said(S, &P, P.proc_time(), added, gone);
+            if (S->set_open)
+                set_rebuild(S);
         }
         if (boot == UI_QUIT) {
             choice = SEL_EXIT_LOADER;
@@ -875,6 +1043,7 @@ __attribute__((section(".text.entry"), used)) int sel_main(const struct ghost_ap
 out:
     /* 6. give everything back */
     plansync_stop(ps);
+    art_stop(&P);
     info_netinst_stop(&P);
     video_close(&P);
     sysfont_close(&P);

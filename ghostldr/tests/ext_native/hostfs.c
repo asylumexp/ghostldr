@@ -174,3 +174,12 @@ int hfs_thread(void *(*fn)(void *), void *arg)
         pthread_detach(t);
     return rc;
 }
+
+/* the test's own change to FSROOT (approot_host --rescan-mv): a folder moved */
+int hfs_rename(const char *from, const char *to)
+{
+    char a[1024], b[1024];
+    snprintf(a, sizeof(a), "%s%s", g_root, from);
+    snprintf(b, sizeof(b), "%s%s", g_root, to);
+    return rename(a, b);
+}

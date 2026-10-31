@@ -601,7 +601,7 @@ def boot_flags(args) -> int:
         | (16384 if args.diag else 0) | (65536 if args.no_auto_memory else 0) \
         | (131072 if args.auto_memory else 0) | (524288 if args.forget_memory else 0) \
         | (0x8000000 if args.share_memory else 0) | (0x10000000 if args.no_community_memory else 0) \
-        | (0x40000000 if args.ftp_saves else 0) \
+        | (0x40000000 if args.ftp_saves else 0) | (0x80000000 if args.fetch_art else 0) \
         | (args.ftp_port << 48 if args.mode == "boot" else 0)
 
 
@@ -701,6 +701,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ftp-saves", action="store_true",
                         help="list every logged-in user's saves in the FTP server's /saves, as the "
                              "Settings switch does (docs/ftp.md#saves)")
+    parser.add_argument("--fetch-art", action="store_true",
+                        help="the game selector fetches missing game art with the keys set in Settings > Game art, "
+                             "as its switch does (docs/selector.md#game-art)")
     parser.add_argument("--elfldr-port", type=int, default=ELFLDR_PORT,
                         help=f"elfldr: the console's TCP port for payloads (default {ELFLDR_PORT}; docs/elfldr.md)")
     parser.add_argument("--file", type=Path, help="raw Lua file for mode=lua")

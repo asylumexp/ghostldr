@@ -52,7 +52,7 @@ import time
 import unicodedata
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import gfs_catalog as gc
@@ -112,6 +112,7 @@ class Scan:
     games: list              # Game, as the console orders them: bootable by ID then folder, then the others
     folders: int = 0         # folders listed
     cut: bool = False        # the search stopped short (SCAN_DIRS, SCAN_ENTRIES, SCAN_MAX)
+    ps5: list = field(default_factory=list)  # PS5 games found and left out, as the console leaves them (Game)
 
     @property
     def bootable(self) -> list:
@@ -124,6 +125,12 @@ class Scan:
 def _skip_dir(name: str) -> bool:
     return name.startswith(".") or name.lower() in ("system volume information", "$recycle.bin", "sce_sys",
                                                     "sce_module")
+
+
+def _skip_save_tree(path: str) -> bool:
+    """Console and Apollo save/export trees which aren't game libraries."""
+    return path.lower() in ("ps4/apollo", "ps4/savedata", "ps4/export",
+                            "ps5/apollo", "ps5/savedata", "ps5/export")
 
 
 def _title_name(s: str) -> bool:
@@ -177,6 +184,13 @@ def identify(d, g: Game) -> None:
             pass
 
 
+def ps5_game(d, g: Game) -> bool:
+    """A PS5 game's dump (approot.c ps5_game): a PPSA title ID, or
+    sce_sys/param.json and no param.sfo."""
+    return g.id.startswith("PPSA") or (d.is_file(_join(g.app0, "sce_sys/param.json")) and
+                                       not d.is_file(_join(g.app0, "sce_sys/param.sfo")))
+
+
 def scan(drive, top: str = "", depth: int = SCAN_DEPTH, dirs: int = SCAN_DIRS) -> Scan:
     """The games under `top` on a drive (a mount point, ftp://..., or an open
     drive), found as the PS5 finds them: breadth first, a folder with
@@ -205,7 +219,8 @@ def scan(drive, top: str = "", depth: int = SCAN_DEPTH, dirs: int = SCAN_DIRS) -
                 names["eboot"] = name
             elif is_dir and low in ("app0", "sce_sys"):
                 names[low] = name
-            elif is_dir and level < depth and not _skip_dir(name) and len("/ghostldr_usb/" + _join(rel, name)) < 250:
+            elif (is_dir and level < depth and not _skip_dir(name) and
+                  not _skip_save_tree(_join(rel, name)) and len("/ghostldr_usb/" + _join(rel, name)) < 250):
                 if len(queue_) < dirs:
                     queue_.append((_join(rel, name), level + 1))
                 else:
@@ -229,6 +244,9 @@ def scan(drive, top: str = "", depth: int = SCAN_DEPTH, dirs: int = SCAN_DIRS) -
             out.games.append(g)
             continue
         identify(d, g)
+        if ps5_game(d, g):          # SWRR runs PS4 games: the console doesn't list it
+            out.ps5.append(g)
+            continue
         out.games.append(g)
     out.cut = out.cut or head < len(queue_)
     # as the console orders them: bootable first, by ID, then by folder; second copies marked
@@ -1049,6 +1067,9 @@ def _inspect(d, top: str, walk: bool) -> Report:
     for g in deeper:
         rows.append(("WARN", f"{g.folder}: {g.id or 'a game'} the PS5 won't find: more than {SCAN_DEPTH} folders "
                              "down from the top; move it up"))
+    for g in sc.ps5:
+        where = g.folder or "the drive's top folder"
+        rows.append(("WARN", f"{where}: {g.id or 'a game'} is a PS5 game: not listed, SWRR runs PS4 games"))
     if sc.cut:
         rows.append(("WARN", f"the PS5 stops looking after {SCAN_DIRS} folders ({sc.folders} looked at): "
                              "keep games near the drive's top"))

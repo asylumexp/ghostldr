@@ -22,7 +22,7 @@ int ftp_stop(unsigned max_ms) { return 0; }
 int ftp_running(void) { return 0; }
 
 /* ext_main.c's ext_early: no app root here (ext.c refuses a zero magic) */
-const struct ext_early g_approot_early HIDDEN = {0, 0, NULL, NULL, NULL, NULL, NULL, NULL};
+const struct ext_early g_approot_early HIDDEN = {0, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
 
 /* hle_module.c: whether a title module is a sysmodule game module; a
  * payload never is */

@@ -218,6 +218,15 @@ struct ghost_api {
      * most max, ended ones included), and one of ghostldr's own added. */
     u32 (*thread_list)(u64 *tids, const char **names, u32 max);
     void (*thread_note)(u64 tid, const char *name);
+    /* ---- the game selector's refresh (docs/selector.md "Refresh") ----
+     * A library's games again (ext/src/approot.c): again nonzero looks at
+     * the USB drives again (one gone is forgotten, one plugged in since
+     * mounted) and lists the games in the same folder on each, in
+     * library()'s order, which the selector's choice indexes from then on;
+     * *ps5 (may be NULL) gets the PS5 games found and left out of it.  The
+     * count, or < 0 when this boot's games don't come from a folder of
+     * games (ghostfs, one title, or once the title is picked). */
+    int (*library_scan)(const struct lib_title **list, u32 *ps5, int again);
 };
 
 /* A game found under an app root that is a folder of games (a USB drive, or
@@ -278,6 +287,9 @@ struct ext_early {
      * (then the code must stay).  NULL: none (the ELF loader's extension). */
     int (*ftp_start)(u32 port);
     int (*ftp_stop)(void);
+    /* The library's games again (ghost_api.library_scan, same contract):
+     * again nonzero looks at the drives again first.  NULL: none. */
+    int (*lib_again)(const struct lib_title **list, u32 *ps5, int again);
 };
 typedef const struct ext_early *(*ext_early_fn)(const struct ghost_api *api);
 

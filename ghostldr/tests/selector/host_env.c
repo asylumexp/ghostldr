@@ -39,6 +39,14 @@
  *                   after which GFSCATALOG.after is served for GFSCATALOG),
  *                   Circle stops it; Logs: the switch (a fake log_usb); the row
  *                   now has three titles: Right, Right, Cross -> 2, the new one
+ *           delete  three titles: Square, Right, Down, Cross (delete CUSA00002?),
+ *                   Left (Yes), Cross: its containers, index and META go
+ *                   (sceSaveDataDelete, faked), its saves and a container
+ *                   that isn't its own stay, GFSCATALOG without it; Circle x2,
+ *                   Cross -> 0 (CUSA00001)
+ *           usbrefresh a library (CTX_FLAG_LIBRARY, ghost_api.library) of
+ *                   two games; Triangle: library_scan(again) has one gone and
+ *                   one new; Left (from the Settings tile), Cross -> 1, the new one
  *
  * Environment: SEL_SHOTS="ms:name,..." saves what is on the screen at each
  * time as OUT_DIR/MODE-name.png.  SEL_BUNDLE=1: the module comes in memory,
@@ -57,6 +65,7 @@ s64 sys_write(int fd, const void *buf, u64 n);
 int sys_mkdir(const char *path);
 s64 sys_read(int fd, void *buf, u64 n);
 s64 sys_pread(int fd, void *buf, u64 n, s64 off);
+s64 sys_lseek(int fd, s64 off, int whence);
 int sys_close(int fd);
 s64 sys_file_size(const char *path);
 void *sys_calloc(u64 n);
@@ -67,6 +76,7 @@ void sys_vlog(const char *fmt, __builtin_va_list ap);
 void sys_exit(int code);
 int png_host_decode(const u8 *data, u64 n, u32 *w, u32 *h, u32 *out);
 int png_host_write(const char *path, const u32 *px, int w, int h, int stride);
+int sys_rmtree(const char *path);
 
 struct kfuncs K;
 struct boot_ctx *g_ctx;
@@ -266,6 +276,7 @@ static int k_avail_flex(size_t *out)
 #define H_PAD 0x21
 #define H_USER 0x22
 #define H_SYSSVC 0x23
+#define H_NET 0x24
 #define H_PNG 0x40
 #define H_FONT 0x41
 #define H_FONTFT 0x42
@@ -274,7 +285,7 @@ static const struct {
     const char *name;
 } g_loaded_by_swrr[] = {
     {H_VIDEO, "libSceVideoOut.sprx"}, {H_PAD, "libScePad.sprx"}, {H_USER, "libSceUserService.sprx"},
-    {H_SYSSVC, "libSceSystemService.sprx"},
+    {H_SYSSVC, "libSceSystemService.sprx"}, {H_NET, "libSceNetCtl.sprx"},
 };
 static int g_mod_loaded[3], g_mod_unloaded[3]; /* png, font, fontft */
 
@@ -350,8 +361,8 @@ int gfs_mount(const char *dirname, int mode, u64 blocks, char mount_point[16])
         say("selector_host: a title was installed over the network");
         return (int)0x809f0008;
     }
-    if (mode != 1 && !str_eq(dirname, "GLDRCONF")) {
-        check(0, "the selector mounts read-only (but its own settings, GLDRCONF)");
+    if (mode != 1 && !str_eq(dirname, "GLDRCONF") && !(str_eq(g_mode, "delete") && str_eq(dirname, "GFSCATALOG"))) {
+        check(0, "the selector mounts read-only (but its own settings, GLDRCONF, and GFSCATALOG when it deletes)");
         return (int)0x809f0001;
     }
     if (mode == 6 && sys_file_size(dir) < 0) { /* create: a new container (96 blocks at least) */
@@ -405,6 +416,10 @@ static int host_path(char *out, u64 size, const char *path)
         fmtx(out, size, "%s/%s", g_art, path + 16);
         return 0;
     }
+    if (strncmp(path, "/data/test/lib/", 15) == 0) { /* usbrefresh: the library's games */
+        fmtx(out, size, "%s/lib/%s", g_art, path + 15);
+        return 0;
+    }
     return -1;
 }
 
@@ -440,6 +455,7 @@ int vfs_open(const char *path, int flags, int mode) { return k_open(path, flags,
 s64 vfs_read(int fd, void *buf, u64 n) { return sys_read(fd, buf, n); }
 int vfs_close(int fd) { return k_close(fd); }
 int vfs_stat(const char *path, void *st) { return k_stat(path, st); }
+s64 vfs_lseek(int fd, s64 off, int whence) { return sys_lseek(fd, off, whence); }
 
 /* ---- the pad: buttons from a script of (ms, buttons) ---- */
 struct step {
@@ -458,9 +474,10 @@ static const struct step APOLLO[] = {{2500, 0x20},   {2600, 0}, {3000, 0x80},   
 static const struct step APOLLO_ONE[] = {{1500, 0x4000}, {1600, 0}};
 /* Right (the gear), Left, Cross */
 static const struct step ONE[] = {{1500, 0x20}, {1600, 0}, {2500, 0x80}, {2600, 0}, {3500, 0x4000}, {3600, 0}};
-/* Cross (Settings), Down x5 (About), Right, Cross (Close ghostldr), Left (Yes), Cross */
+/* Cross (Settings), Down x6 (About), Right, Cross (Close ghostldr), Left (Yes), Cross */
 static const struct step EMPTY[] = {{1500, 0x4000}, {1600, 0}, {1800, 0x40}, {1900, 0}, {2000, 0x40},   {2100, 0},
                                     {2300, 0x40},   {2400, 0}, {2600, 0x40}, {2700, 0}, {2900, 0x40},   {3000, 0},
+                                    {3100, 0x40},   {3200, 0},
                                     {3300, 0x20},   {3400, 0}, {3700, 0x4000}, {3800, 0}, {4200, 0x80}, {4300, 0},
                                     {4600, 0x4000}, {4700, 0}};
 /* Square, Down x2 (Network), Right, Down (Install over network), Cross: the
@@ -486,6 +503,12 @@ static const struct step COMMUNITY[] = {
 /* CUSA00002 has none: Right, Options, Square (Settings: no row to change), Circle, Cross */
 static const struct step COMMUNITY_NONE[] = {{1500, 0x20},   {1600, 0}, {2600, 0x8}, {2700, 0}, {3200, 0x8000},
                                              {3300, 0},      {3800, 0x2000}, {3900, 0}, {4400, 0x4000}, {4500, 0}};
+/* Square, Right, Down (CUSA00002), Cross (asked), Left (Yes), Cross; Circle, Circle; Cross */
+static const struct step DELETE[] = {{1500, 0x8000}, {1600, 0}, {2000, 0x20}, {2100, 0}, {2400, 0x40}, {2500, 0},
+                                     {2900, 0x4000}, {3000, 0}, {3500, 0x80}, {3600, 0}, {4000, 0x4000}, {4100, 0},
+                                     {6000, 0x2000}, {6100, 0}, {6500, 0x2000}, {6600, 0}, {7500, 0x4000}, {7600, 0}};
+/* Triangle (Refresh); Left (from the Settings tile: the game selected is gone), Cross */
+static const struct step USBREFRESH[] = {{1500, 0x1000}, {1600, 0}, {3500, 0x80}, {3600, 0}, {4500, 0x4000}, {4600, 0}};
 /* run.py --no-community-memory: Cross on CUSA00001 */
 static const struct step COMMUNITY_RUNPY[] = {{1500, 0x4000}, {1600, 0}};
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
@@ -499,11 +522,13 @@ static int pad_read(s32 handle, u8 *data)
                          : str_eq(g_mode, "apollo-one") ? APOLLO_ONE : str_eq(g_mode, "one") ? ONE
                          : str_eq(g_mode, "empty") ? EMPTY : str_eq(g_mode, "settings") ? SETTINGS
                          : str_eq(g_mode, "community") ? COMMUNITY : str_eq(g_mode, "community-none") ? COMMUNITY_NONE
-                         : str_eq(g_mode, "community-runpy") ? COMMUNITY_RUNPY : SINGLE;
+                         : str_eq(g_mode, "community-runpy") ? COMMUNITY_RUNPY : str_eq(g_mode, "delete") ? DELETE
+                         : str_eq(g_mode, "usbrefresh") ? USBREFRESH : SINGLE;
     int n = str_eq(g_mode, "ps4") ? N(PS4) : str_eq(g_mode, "apollo") ? N(APOLLO) : str_eq(g_mode, "apollo-one") ? N(APOLLO_ONE)
           : str_eq(g_mode, "one") ? N(ONE) : str_eq(g_mode, "empty") ? N(EMPTY) : str_eq(g_mode, "settings") ? N(SETTINGS)
           : str_eq(g_mode, "community") ? N(COMMUNITY) : str_eq(g_mode, "community-none") ? N(COMMUNITY_NONE)
-          : str_eq(g_mode, "community-runpy") ? N(COMMUNITY_RUNPY) : 6;
+          : str_eq(g_mode, "community-runpy") ? N(COMMUNITY_RUNPY) : str_eq(g_mode, "delete") ? N(DELETE)
+          : str_eq(g_mode, "usbrefresh") ? N(USBREFRESH) : 6;
     u32 ms = (u32)((g_now - 1000000) / 1000), b = 0;
     for (int i = 0; i < n; i++)
         if (ms >= s[i].ms)
@@ -575,6 +600,55 @@ static int save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total
     g_scan_cancels += stop != 0;
     return (int)(done / 4);
 }
+/* ---- delete: sceSaveDataDelete (SceSaveDataDelete: userId @0, dirName* @0x10) ---- */
+static int g_deletes;
+static char g_deleted[512];
+static s32 f_sd_delete(const void *p)
+{
+    const char *dir = *(const char *const *)((const u8 *)p + 0x10);
+    char path[1024];
+    fmtx(path, sizeof(path), "%s/%s", g_art, dir);
+    check(*(const s32 *)p == 0x10000001, "deleted for the user running SWRR");
+    for (int i = 1; i < 16; i++)
+        if (g_mp[i][0] && str_eq(g_mp[i], dir))
+            check(0, "a container deleted while it is mounted");
+    g_deletes++;
+    int n = 0;
+    while (g_deleted[n])
+        n++;
+    fmtx(g_deleted + n, sizeof(g_deleted) - (u64)n, "%s ", dir);
+    return sys_rmtree(path) == 0 ? 0 : (int)0x809f0008;
+}
+static void *f_host_real_in(const char *mod, const char *name)
+{
+    return str_eq(mod, "libSceSaveData") && str_eq(name, "sceSaveDataDelete") ? (void *)f_sd_delete : NULL;
+}
+
+/* ---- usbrefresh: the extension's library, and the same drives looked at again ---- */
+static struct lib_title g_lib1[2], g_lib2[2];
+static int g_scans_again;
+static void lib_entry(struct lib_title *t, const char *id, const char *dir)
+{
+    memset(t, 0, sizeof(*t));
+    strcpy(t->id, id);
+    fmtx(t->path, sizeof(t->path), "/data/test/lib/%s", dir);
+    while (t->path[t->dir_len])
+        t->dir_len++;
+}
+static int f_library(const struct lib_title **list)
+{
+    *list = g_lib1;
+    return 2;
+}
+static int f_library_scan(const struct lib_title **list, u32 *ps5, int again)
+{
+    g_scans_again += again != 0;
+    *list = g_scans_again ? g_lib2 : g_lib1;
+    if (ps5)
+        *ps5 = 1;
+    return 2;
+}
+
 /* ---- Settings: the core's log switch (a fake); the network installer is the
  * module's own (a test build linked with tests/selector/netinst_fake) ---- */
 static int g_pages;
@@ -597,8 +671,9 @@ struct vo_attr {
     u32 pixel_format, tiling, aspect, width, height, pitch, option, reserved0;
     u64 reserved1;
 };
-static int g_vo_open, g_vo_closed, g_vo_rate = -1, g_registered;
+static int g_vo_open, g_vo_closed, g_vo_rate = -1, g_registered, g_ftp_notices;
 static u64 g_fb[2], g_flips, g_shot_after[8];
+static u64 g_first_flip_at;
 static char g_shot_name[8][32];
 static int g_nshots, g_shot_done[8];
 
@@ -638,6 +713,8 @@ static int vo_rate(s32 h, s32 rate)
 static int g_shown = -1;
 static int vo_submit(s32 h, s32 index, s32 mode, s64 arg)
 {
+    if (!g_flips)
+        g_first_flip_at = g_now;
     g_flips++;
     g_shown = index;
     return index == 0 || index == 1 ? 0 : -1;
@@ -707,6 +784,23 @@ static int png_decode(void *h, const struct png_dec *d, struct png_info *i)
 }
 static int png_delete(void *h) { return 0; }
 
+static int net_info(s32 what, void *out)
+{
+    check(what == 14, "network IPv4 address requested");
+    strcpy(out, "192.168.1.123");
+    return 0;
+}
+
+static int k_notify(s32 device, void *request, u64 size, s32 blocking)
+{
+    check(device == 0 && size == 0xC30 && blocking == 0, "notification request shape");
+    check(g_first_flip_at && g_now - g_first_flip_at >= 3000000, "FTP notice waited three seconds on screen");
+    const char *message = (const char *)request + 0x2D;
+    say("selector_host: notification %s", message);
+    g_ftp_notices++;
+    return 0;
+}
+
 /* ---- libSceFont (badfont: the library refuses) ---- */
 static int font_ok(void) { return 0; }
 static int font_fail(void) { return (int)0x80460002; }
@@ -725,6 +819,7 @@ void *host_dlsym(u32 handle, const char *name)
         {H_KERNEL, "sceKernelConvertUtcToLocaltime", k_utc2local},
         {H_KERNEL, "sceKernelReleaseDirectMemory", k_release_direct},
         {H_KERNEL, "sceKernelStopUnloadModule", k_stop_unload},
+        {H_KERNEL, "sceKernelSendNotificationRequest", k_notify},
         {H_VIDEO, "sceVideoOutSetBufferAttribute", vo_set_attr},
         {H_VIDEO, "sceVideoOutRegisterBuffers", vo_register},
         {H_VIDEO, "sceVideoOutSetFlipRate", vo_rate},
@@ -737,6 +832,7 @@ void *host_dlsym(u32 handle, const char *name)
         {H_USER, "sceUserServiceGetRegisteredUserIdList", user_registered},
         {H_USER, "sceUserServiceGetLoginUserIdList", user_login},
         {H_SYSSVC, "sceSystemServiceParamGetInt", param_int},
+        {H_NET, "sceNetCtlGetInfo", net_info},
         {H_PNG, "scePngDecParseHeader", png_parse},
         {H_PNG, "scePngDecQueryMemorySize", png_query},
         {H_PNG, "scePngDecCreate", png_create},
@@ -835,9 +931,11 @@ int main(int argc, char **argv)
     }
     cx->magic = BOOT_MAGIC, cx->size = sizeof(*cx), cx->libkernel_handle = H_KERNEL, cx->jit_memcpy = JIT_MEMCPY;
     cx->staging_size = 4u << 20, cx->staging = (u64)sys_calloc(cx->staging_size);
-    cx->app_root = (u64)(str_eq(g_mode, "approot") ? "/data/test/app0" : "ghostfs");
+    int usbrefresh = str_eq(g_mode, "usbrefresh");
+    cx->app_root = (u64)(str_eq(g_mode, "approot") ? "/data/test/app0" : usbrefresh ? "/data/test/lib" : "ghostfs");
     int apollo = str_eq(g_mode, "apollo") || str_eq(g_mode, "apollo-one");
-    int settings = str_eq(g_mode, "one") || str_eq(g_mode, "empty") || str_eq(g_mode, "settings");
+    int settings = str_eq(g_mode, "one") || str_eq(g_mode, "empty") || str_eq(g_mode, "settings") ||
+                   str_eq(g_mode, "delete");
     int community = !strncmp(g_mode, "community", 9);
     cx->flags = (str_eq(g_mode, "skip") || apollo || settings ? 0 : CTX_FLAG_SELECT) | 2 |
                 (str_eq(g_mode, "single") || str_eq(g_mode, "multi") || str_eq(g_mode, "ps4") || apollo || settings ||
@@ -845,7 +943,10 @@ int main(int argc, char **argv)
                      ? CTX_FLAG_SEL_FONT_BUILTIN
                      : 0) |
                 (str_eq(g_mode, "ps4") ? CTX_FLAG_PS4 : 0) |
-                (str_eq(g_mode, "community-runpy") ? CTX_FLAG_NO_COMMUNITY_MEM : 0);
+                (str_eq(g_mode, "community-runpy") ? CTX_FLAG_NO_COMMUNITY_MEM : 0) |
+                (usbrefresh ? CTX_FLAG_LIBRARY : 0);
+    if (str_eq(g_mode, "single"))
+        cx->flags |= CTX_FLAG_ELFLDR | CTX_ELFLDR_SELECT; /* the release's selector: FTP is fixed at 1212 */
     struct ghost_api *a = &g_ghost_api;
     a->version = GHOST_API_VERSION, a->size = sizeof(*a), a->ctx = &g_ctx, a->k = &K, a->logf = logf;
     a->call_gadget6 = call_gadget6, a->host_dlsym = host_dlsym, a->hle_lookup = hle_lookup;
@@ -854,6 +955,10 @@ int main(int argc, char **argv)
     a->profile_has = f_profile_has, a->title_id = f_title_id;
     a->title_user = &g_user_chosen, a->title_pick = title_pick, a->save_prescan = save_prescan;
     a->page_alloc = f_page_alloc, a->page_free = f_page_free;
+    a->host_real_in = f_host_real_in;
+    a->library = f_library, a->library_scan = f_library_scan, a->vfs_lseek = vfs_lseek;
+    lib_entry(&g_lib1[0], "CUSA00001", "Starfall"), lib_entry(&g_lib1[1], "CUSA00002", "Neon Drift");
+    lib_entry(&g_lib2[0], "CUSA00002", "Neon Drift"), lib_entry(&g_lib2[1], "CUSA00042", "Skyward Harbour");
 
 
     u64 size = (u64)sys_file_size(argv[2]);
@@ -879,7 +984,7 @@ int main(int argc, char **argv)
     int pick = sel_run((cx->flags & CTX_FLAG_SELECT) || str_eq(g_mode, "apollo") || f_profile_has(PF_SAVE_TOOL) || settings,
                        title);
 
-    int want = str_eq(g_mode, "multi") || str_eq(g_mode, "settings") ? 2 : str_eq(g_mode, "ps4") ? 1
+    int want = str_eq(g_mode, "multi") || str_eq(g_mode, "settings") ? 2 : str_eq(g_mode, "ps4") || usbrefresh ? 1
              : str_eq(g_mode, "community-none") ? 1 : str_eq(g_mode, "skip") || str_eq(g_mode, "badcrc") ? -1 : str_eq(g_mode, "empty") ? SEL_EXIT_LOADER : 0;
     say("selector_host: %s chose %d (%.16s)", g_mode, pick, pick >= 0 ? title : "-");
     check(pick == want, "the expected title was chosen");
@@ -901,6 +1006,32 @@ int main(int argc, char **argv)
     if (str_eq(g_mode, "community-none")) {
         check(str_eq(title, "CUSA00002"), "its ID is returned");
         check(!(cx->flags & CTX_FLAG_NO_COMMUNITY_MEM), "community plans on: CTX_FLAG_NO_COMMUNITY_MEM clear");
+    }
+    if (str_eq(g_mode, "delete")) {
+        char p[1024];
+        check(str_eq(title, "CUSA00001"), "its ID is returned");
+        say("selector_host: deleted %s", g_deleted);
+        fmtx(p, sizeof(p), "%s/G00002000", g_art);
+        check(sys_file_size(p) < 0, "the title's data container deleted");
+        fmtx(p, sizeof(p), "%s/G00002INDEX", g_art);
+        check(sys_file_size(p) < 0, "its index deleted");
+        fmtx(p, sizeof(p), "%s/G00002META", g_art);
+        check(sys_file_size(p) < 0, "its name and art deleted");
+        fmtx(p, sizeof(p), "%s/G00002SAVE", g_art);
+        check(sys_file_size(p) >= 0, "its progress kept");
+        fmtx(p, sizeof(p), "%s/G00002D001SAVE", g_art);
+        check(sys_file_size(p) >= 0, "its save directory kept");
+        fmtx(p, sizeof(p), "%s/G00002002", g_art);
+        check(sys_file_size(p) >= 0, "a container past its count with no tag kept");
+        fmtx(p, sizeof(p), "%s/G00002003", g_art);
+        check(sys_file_size(p) >= 0, "a container whose tag names another layout kept");
+        fmtx(p, sizeof(p), "%s/G00001000", g_art);
+        check(sys_file_size(p) >= 0, "the other titles' containers kept");
+        check(g_deletes == 3, "three containers deleted (data, index, META)");
+    }
+    if (usbrefresh) {
+        check(str_eq(title, "CUSA00042"), "the game found by Refresh was chosen");
+        check(g_scans_again == 1, "Triangle looked at the drives again once");
     }
     if (str_eq(g_mode, "community-runpy"))
         check((cx->flags & CTX_FLAG_NO_COMMUNITY_MEM) != 0, "run.py's CTX_FLAG_NO_COMMUNITY_MEM stands");
@@ -927,6 +1058,7 @@ int main(int argc, char **argv)
     } else {
         check(g_vo_open == 0 && g_nblocks == 0, "nothing opened or allocated");
     }
+    check(g_ftp_notices == (str_eq(g_mode, "single") ? 1 : 0), "FTP notice shown exactly when configured");
     int all_back = 1;
     u64 mib = 0;
     for (int i = 0; i < g_nblocks; i++) {

@@ -66,9 +66,13 @@ class ScanTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.tmp_dir.cleanup()
 
-    def console_list(self, fs: Path, drive: str, top: str = "") -> list[tuple]:
-        out = subprocess.run([str(self.exe), str(fs), f"usb:/{top}", "--map", drive, "--select"],
-                             capture_output=True, text=True, timeout=60).stdout
+    def console_list(self, fs: Path, drive: str, top: str = "", *extra: str, out: str = "") -> list[tuple]:
+        """The console's list (approot_host's "lib" lines), or the one after Refresh in out."""
+        if not out:
+            out = subprocess.run([str(self.exe), str(fs), f"usb:/{top}", "--map", drive, "--select", *extra],
+                                 capture_output=True, text=True, timeout=60).stdout
+            self.console_out = out
+            out = out.split("\nagain ")[0]
         rows = []
         for ln in out.splitlines():
             if ln.startswith("lib "):
@@ -92,6 +96,42 @@ class ScanTests(unittest.TestCase):
             ("LAPY20001", "folder name")])
         self.assertEqual(sc.first("CUSA11456").folder, "My Games/ghost of tsushima")
         self.assertEqual(sc.games[0].name, "Bloodborne")                 # meta.bin's name
+
+    def test_ps5_games_left_out(self) -> None:
+        sc = ud.scan(self.drive)
+        self.assertEqual(sorted(g.app0 for g in sc.ps5), ["PS5 games/Astro", "dumps/PPSA17419-app0"])
+        self.console_list(self.fs, "/mnt/usb1")
+        self.assertEqual(self.console_out.count("a PS5 game"), 2)
+        self.assertNotIn("PPSA", "".join(g.id for g in sc.games))
+        with mock.patch.object(ud, "fs_type", return_value="exfat"):
+            rows = ud.inspect(self.drive).rows
+        self.assertIn(("WARN", "dumps/PPSA17419-app0: PPSA17419 is a PS5 game: not listed, SWRR runs PS4 games"),
+                      rows)
+
+    def test_save_and_export_trees_are_left_out(self) -> None:
+        sc = ud.scan(self.drive)
+        paths = [g.folder for g in sc.games] + [g.folder for g in sc.ps5]
+        self.assertFalse(any(p.startswith(("PS4/APOLLO/", "PS4/SAVEDATA/", "PS4/EXPORT/", "PS5/EXPORT/"))
+                             for p in paths))
+        console = self.console_list(self.fs, "/mnt/usb1")
+        self.assertEqual(self.computer_list(sc), console)
+        self.assertIn("PS4/APOLLO: a save/export folder: not listed", self.console_out)
+
+    def test_refresh_finds_what_changed(self) -> None:
+        """The selector's Refresh (ext_early.lib_again): a game moved off the drive goes, one moved on
+        shows, as a fresh scan of the drive finds them."""
+        fs = self.tmp / "refresh"
+        anywhere_files(fs)
+        put(fs, "spare/Neon Drift (CUSA00002)/eboot.bin", b"n")
+        before = self.console_list(fs, "/mnt/usb1", "", "--rescan-mv", "/mnt/usb1/Homebrew", "/gone",
+                                   "--rescan-mv", "/spare/Neon Drift (CUSA00002)", "/mnt/usb1/Neon Drift (CUSA00002)")
+        after = self.console_list(fs, "/mnt/usb1", out=self.console_out.split("\nagain ")[1])
+        self.assertIn("LAPY20001", [r[0] for r in before])
+        self.assertIn("again 7 ps5 2", self.console_out)
+        ids = [r[0] for r in after]
+        self.assertNotIn("LAPY20001", ids)
+        self.assertIn("CUSA00002", ids)
+        self.assertEqual(after, self.computer_list(ud.scan(fs / "mnt/usb1")))
 
     def test_limits_as_the_console(self) -> None:
         fs = self.tmp / "big"

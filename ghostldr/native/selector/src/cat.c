@@ -129,6 +129,9 @@ int cat_count(struct plat *P)
         if (P->ctx->flags & CTX_FLAG_LIBRARY) {
             P->library = 1;
             int n = P->api->library ? P->api->library(&P->lib) : 0;
+            const struct lib_title *same;
+            if (P->api->size >= __builtin_offsetof(struct ghost_api, library_scan) + 8 && P->api->library_scan)
+                P->api->library_scan(&same, &P->ps5, 0); /* the PS5 games it left out */
             return n < SEL_MAX_TITLES ? n : SEL_MAX_TITLES;
         }
         return 1;
@@ -274,7 +277,9 @@ void cat_meta_names(struct plat *P, int t, const u8 *head, u64 n)
 
 int cat_load(struct sel *S, struct plat *P, int n)
 {
-    P->cat = sel_alloc(S, sizeof(struct cat_title) * (u64)n);
+    if (P->cat_into) /* the row read again: into the array not in use */
+        memset(P->cat_into, 0, sizeof(struct cat_title) * (u64)n);
+    P->cat = P->cat_into ? P->cat_into : sel_alloc(S, sizeof(struct cat_title) * (u64)n);
     if (!P->cat)
         return -1;
     P->ncat = n;
@@ -486,6 +491,7 @@ int cat_installed(struct sel *S, struct plat *P, struct sel_inst *out, int max)
             copy_str(t->id, e, 16, sizeof(t->id));
             copy_str(t->name, e + 0x40, 64, sizeof(t->name));
             copy_str(t->version, e + 0x80, 16, sizeof(t->version));
+            copy_str(t->prefix, e + 0x10, 16, sizeof(t->prefix));
             memcpy(&t->size, e + 0x98, 8);
             u32 flags;
             memcpy(&flags, e + 0xA4, 4);
@@ -493,4 +499,200 @@ int cat_installed(struct sel *S, struct plat *P, struct sel_inst *out, int max)
         }
     sel_release(S, m);
     return n;
+}
+
+/* ---- deleting a title installed in saved data (Settings > Games) ----
+ *
+ * As gfs_install.py --remove does it (host/gfs_install.py plan_remove), in
+ * an order a power cut can't make worse: its GFSCATALOG entry marked
+ * incomplete; its index; its data containers <prefix>000.. whose gfs.tag
+ * names its layout and their number (or, with no tag, within the count the
+ * catalogue has), stopping after 4 missing names in a row; its META when it
+ * is its own; then the entry goes.  Its progress (<prefix>SAVE,
+ * <prefix>D<nnn>SAVE, <prefix>M<nn>SAVE) is never touched, nor ghostldr's
+ * own containers (GLDR*, GFS*) or the host's save. */
+#define SAVE_NOT_FOUND ((s32)0x809F0008)
+#define CAT_MAX_CONT 96 /* ghostfs.c GFS_MAX_CONT */
+
+/* a prefix gfs_install.py could have given (gfs_catalog.py prefix_problem) */
+static int prefix_ok(const char *p)
+{
+    int n = str_len(p);
+    if (n < 1 || n > 12 || !strncmp(p, "GFS", 3) || !strncmp(p, "GLDR", 4))
+        return 0;
+    for (int i = 0; i < n; i++)
+        if (!((p[i] >= 'A' && p[i] <= 'Z') || (p[i] >= '0' && p[i] <= '9')))
+            return 0;
+    const char *e = p + n;
+    if (n >= 4 && e[-4] == 'D' && e[-3] >= '0' && e[-3] <= '9' && e[-2] >= '0' && e[-2] <= '9' && e[-1] >= '0' && e[-1] <= '9')
+        return 0;
+    if (n >= 3 && e[-3] == 'M' && e[-2] >= '0' && e[-2] <= '9' && e[-1] >= '0' && e[-1] <= '9')
+        return 0;
+    return 1;
+}
+
+/* sceSaveDataDelete for the user running SWRR: 0, or an SCE error */
+int cat_sd_delete(struct plat *P, const char *name)
+{
+    int n = str_len(name);
+    if (n >= 4 && !strcmp(name + n - 4, "SAVE")) /* progress: never from here */
+        return -1;
+    s32 (*del)(const void *) = P->api->host_real_in ? (s32(*)(const void *))P->api->host_real_in("libSceSaveData", "sceSaveDataDelete") : NULL;
+    if (!del)
+        return (int)0x809F000B; /* INTERNAL */
+    char dir[32];
+    u8 d[0x40];
+    memset(dir, 0, sizeof(dir));
+    memset(d, 0, sizeof(d));
+    strlcpy(dir, name, sizeof(dir));
+    *(s32 *)d = P->user;         /* SceSaveDataDelete: userId @0 */
+    *(char **)(d + 0x10) = dir;  /* dirName* @0x10 */
+    return del(d);
+}
+
+/* up to cap bytes of dir/file, mounted read-only: bytes read; SAVE_NOT_FOUND when dir isn't there */
+static s64 probe(struct plat *P, const char *dir, const char *file, void *buf, u64 cap)
+{
+    char mp[16], d[32];
+    strlcpy(d, dir, sizeof(d));
+    int rc = P->api->gfs_mount(d, 1, 0, mp);
+    if (rc != 0)
+        return rc == SAVE_NOT_FOUND ? SAVE_NOT_FOUND : -1;
+    P->mounts++;
+    char path[64];
+    fmt(path, sizeof(path), "%s/%s", mp, file);
+    s64 got = 0;
+    int fd = P->k->open(path, O_RDONLY, 0);
+    if (fd >= 0) {
+        got = P->k->read(fd, buf, cap);
+        P->k->close(fd);
+    }
+    umount(P, mp);
+    return got < 0 ? 0 : got;
+}
+
+/* GFSCATALOG/catalog.bin written whole: 0, or an SCE error */
+static int cat_write(struct plat *P, const u8 *buf, u64 size)
+{
+    char mp[16], path[64];
+    int rc = P->api->gfs_mount("GFSCATALOG", 2 /* read-write */, 0, mp);
+    if (rc != 0)
+        return rc;
+    P->mounts++;
+    fmt(path, sizeof(path), "%s/catalog.bin", mp);
+    int fd = P->k->open(path, 0x601 /* O_WRONLY | O_CREAT | O_TRUNC */, 0666);
+    rc = fd < 0 ? fd : P->k->write(fd, buf, size) == (ssize_t)size ? 0 : -1;
+    if (fd >= 0)
+        P->k->close(fd);
+    int u = P->api->gfs_umount(mp, 2000); /* the commit */
+    P->umounts++;
+    return rc ? rc : u;
+}
+
+int cat_delete(struct sel *S, struct plat *P, const char *id, const char *prefix, char *msg, int cap)
+{
+    msg[0] = 0;
+    if (!prefix_ok(prefix)) {
+        LOG(P, "delete: %s: prefix '%s' refused", id, prefix);
+        fmt(msg, (size_t)cap, "Its containers' names (%s) aren't a game's", prefix);
+        return -1;
+    }
+    struct cat_hdr h;
+    memset(&h, 0, sizeof(h));
+    if (read_in(P, "GFSCATALOG", "catalog.bin", 0, &h, sizeof(h)) != (s64)sizeof(h) || memcmp(h.magic, "GFSC", 4) ||
+        h.header_size < 64 || h.entry_size < CAT_ENTRY || h.count > SEL_MAX_TITLES) {
+        fmt(msg, (size_t)cap, "The list of installed games (GFSCATALOG) couldn't be read");
+        return -1;
+    }
+    u64 size = (u64)h.header_size + (u64)h.count * h.entry_size, m = sel_mark(S);
+    u8 *buf = sel_alloc(S, size);
+    int at = -1;
+    if (buf && read_in(P, "GFSCATALOG", "catalog.bin", 0, buf, size) == (s64)size)
+        for (u32 i = 0; i < h.count && at < 0; i++) {
+            const u8 *e = buf + h.header_size + (u64)i * h.entry_size;
+            char eid[16], epre[16];
+            copy_str(eid, e, 16, sizeof(eid));
+            copy_str(epre, e + 0x10, 16, sizeof(epre));
+            if (!strcmp(eid, id) && !strcmp(epre, prefix))
+                at = (int)i;
+        }
+    if (at < 0) {
+        sel_release(S, m);
+        fmt(msg, (size_t)cap, "%s isn't in the list of installed games any more", id);
+        return -1;
+    }
+    u8 *e = buf + h.header_size + (u64)at * h.entry_size;
+    char index[32];
+    u64 layout;
+    u32 containers, flags;
+    copy_str(index, e + 0x20, 32, sizeof(index));
+    memcpy(&layout, e + 0x90, 8);
+    memcpy(&containers, e + 0xA0, 4);
+    memcpy(&flags, e + 0xA4, 4);
+    LOG(P, "delete: %s: prefix %s, index %s, %u containers, layout %lx", id, prefix, index, containers, layout);
+    /* 1. incomplete in the catalogue: a cut here leaves a title that says so */
+    flags |= CAT_INCOMPLETE;
+    memcpy(e + 0xA4, &flags, 4);
+    int rc = cat_write(P, buf, size);
+    if (rc != 0) {
+        sel_release(S, m);
+        LOG(P, "delete: %s: GFSCATALOG not written: %x", id, (u32)rc);
+        fmt(msg, (size_t)cap, "The list of installed games couldn't be written (%x)", (u32)rc);
+        return -1;
+    }
+    /* 2. its index: its own, or the legacy one its entry names */
+    char want[32];
+    fmt(want, sizeof(want), "%sINDEX", prefix);
+    if (!strcmp(index, want) || ((flags & CAT_LEGACY) && (!strcmp(index, "GFSINDEX") || !strcmp(index, "GHOSTIDX"))))
+        LOG(P, "delete: %s: %x", index, (u32)cat_sd_delete(P, index));
+    /* 3. its data containers */
+    u32 gone = 0, left = 0, miss = 0;
+    for (u32 k = 0; k < CAT_MAX_CONT && miss < 4; k++) {
+        char name[32];
+        u8 tag[16];
+        memset(tag, 0, sizeof(tag));
+        fmt(name, sizeof(name), "%s%03u", prefix, k);
+        s64 got = probe(P, name, "gfs.tag", tag, sizeof(tag));
+        if (got == SAVE_NOT_FOUND) {
+            miss++;
+            continue;
+        }
+        miss = 0;
+        u64 tl;
+        u32 tk;
+        memcpy(&tl, tag, 8), memcpy(&tk, tag + 8, 4);
+        int mine = got >= 12 ? tl == layout && tk == k : k < containers;
+        int d = mine ? cat_sd_delete(P, name) : -1;
+        if (mine && d == 0)
+            gone++;
+        else
+            left++;
+        if (!mine || d != 0)
+            LOG(P, "delete: %s left: %s (%x)", name, mine ? "not deleted" : got >= 12 ? "another layout's" : "no tag, past the count", (u32)d);
+    }
+    /* 4. its name and art, when META is its own */
+    char meta[32];
+    u8 mh[0x20];
+    memset(mh, 0, sizeof(mh));
+    fmt(meta, sizeof(meta), "%sMETA", prefix);
+    s64 mg = probe(P, meta, "meta.bin", mh, sizeof(mh));
+    if (mg >= (s64)sizeof(mh) && !memcmp(mh, "GFSM", 4) && !strncmp((const char *)mh + 0x10, id, 16))
+        LOG(P, "delete: %s: %x", meta, (u32)cat_sd_delete(P, meta));
+    else if (mg != SAVE_NOT_FOUND)
+        LOG(P, "delete: %s left: not %s's", meta, id);
+    /* 5. out of the catalogue */
+    memmove(e, e + h.entry_size, size - (u64)(e - buf) - h.entry_size);
+    struct cat_hdr *nh = (struct cat_hdr *)buf;
+    nh->count--, nh->generation++;
+    rc = cat_write(P, buf, size - h.entry_size);
+    sel_release(S, m);
+    LOG(P, "delete: %s: %u containers deleted, %u left; GFSCATALOG %x; its saves (%sSAVE ...) kept", id, gone, left,
+        (u32)rc, prefix);
+    if (rc != 0) {
+        fmt(msg, (size_t)cap, "Deleted, but the list of installed games couldn't be written (%x)", (u32)rc);
+        return -1;
+    }
+    if (left)
+        fmt(msg, (size_t)cap, "%u container%s left: not this install's", left, left == 1 ? "" : "s");
+    return 0;
 }

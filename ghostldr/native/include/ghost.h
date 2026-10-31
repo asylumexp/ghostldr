@@ -660,7 +660,8 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
  * share learned memory plans, 268435456 no community memory plan (automem.c,
  * docs/community-plans.md), 536870912 back to the game selector when the
  * title ends (CTX_FLAG_RETURN), 1073741824 the FTP server's /saves
- * (CTX_FLAG_FTP_SAVES); bits 32-47
+ * (CTX_FLAG_FTP_SAVES), 2147483648 the selector fetches missing game art
+ * (CTX_FLAG_FETCH_ART); bits 32-47
  * hold the ELF loader's port, bits 48-63 the FTP server's (CTX_FTP_PORT) */
 #define CTX_FLAG_NO_AUTO_MEM 65536      /* plan-free titles keep the plain budget (run.py --no-auto-memory) */
 #define CTX_FLAG_AUTO_MEM 131072        /* the automatic plan instead of a profile's manual one (run.py --auto-memory) */
@@ -678,6 +679,7 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
 #define CTX_FLAG_SHARE_MEM 134217728   /* Settings/run.py --share-memory: log each saved learned plan for the computer to share */
 #define CTX_FLAG_NO_COMMUNITY_MEM 268435456 /* Settings, the game's Information panel, run.py --no-community-memory: no REC_SEED start */
 #define CTX_FLAG_FTP_SAVES 1073741824  /* Settings/run.py --ftp-saves: the FTP server lists every logged-in user's saves in /saves (ftp_saves.c; the selector may set it live) */
+#define CTX_FLAG_FETCH_ART 2147483648u /* Settings > Game art/run.py --fetch-art: the selector fetches missing art with the keys in Settings (docs/selector.md) */
 /* Back to the game selector (ghostldr.lua's listen mode on a PS5 with the
  * bundle cached; docs/selector.md "Back to the game selector"): ghost_boot
  * does not return once the title runs, but when it ends (it quits or
@@ -707,6 +709,11 @@ int jit_objects_find(struct jit_obj *o, u32 n, u32 want);
  * boots the pick in a second call (struct el_select at CTX_SELECT_SLOT,
  * ghostldr.lua's, zeroed; ctx->size 0x218) */
 #define CTX_ELFLDR_SELECT (1ULL << 57)
+/* FTP while the selector is on screen: the release's selector beside its
+ * ELF loader uses the fixed release port because bits 32-63 describe that
+ * loader; ordinary boots carry the requested FTP port in bits 48-63. */
+#define CTX_SELECTOR_FTP_PORT(flags) \
+    (((flags) & CTX_ELFLDR_SELECT) ? 1212u : ((flags) & CTX_FLAG_ELFLDR) ? 0u : CTX_FTP_PORT(flags))
 #define CTX_SELECT_SLOT 66
 #define CTX_ELFLDR_PICKED 4 /* ghost_elfldr's result then (beside elfldr.h's EL_BOOT 1, EL_BUNDLE 2, EL_FORGET 3) */
 struct el_select {
@@ -772,6 +779,8 @@ int ext_approot_pick(const char *title, int index, const char **root);
 void ext_ftp_early(u32 port); /* the FTP server while the game selector shows (0: none) */
 struct lib_title;
 int ext_library(const struct lib_title **list); /* the games approot_init found (ghost_api.library) */
+int ext_library_scan(const struct lib_title **list, u32 *ps5, int again); /* them again (ghost_api.library_scan) */
+int boot_library_scan(const struct lib_title **list, u32 *ps5, int again); /* boot.c: only while a library leaves the choice to the selector */
 void ext_abandon(void);  /* a boot stopped before the title loaded: free the code's JIT block and the blob */
 void ext_unplace(void);  /* auto app root with nothing on a drive: free the code's JIT block, keep the blob */
 void ext_boot_done(void); /* imports resolved: free the blob */

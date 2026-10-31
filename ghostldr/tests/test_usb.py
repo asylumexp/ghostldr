@@ -654,6 +654,19 @@ def anywhere_files(root: Path) -> None:
         ".Trashes/501/old/eboot.bin": b"t",
         ".Trashes/501/old/sce_sys/param.sfo": make_sfo({"TITLE": "Old", "TITLE_ID": "CUSA31313"}),
         "notes/readme.txt": b"r",
+        # PS5 games (SWRR runs PS4 ones): left out, by the ID in the folder's name and by param.json
+        "dumps/PPSA17419-app0/eboot.bin": b"5",
+        "dumps/PPSA17419-app0/sce_sys/param.json": b'{"titleId": "PPSA17419"}',
+        "PS5 games/Astro/eboot.bin": b"5",
+        "PS5 games/Astro/sce_sys/param.json": b'{"titleId": "PPSA01234"}',
+        # standard save/export trees aren't game libraries; Apollo saves in
+        # particular have sce_sys and used to appear as broken games
+        "PS4/APOLLO/backup_CUSA07992_SCUS-97429/sce_sys/param.sfo": make_sfo(
+            {"TITLE": "Apollo backup", "TITLE_ID": "CUSA07992"}),
+        "PS4/SAVEDATA/0000000000000001/CUSA11456/sce_sys/param.sfo": make_sfo(
+            {"TITLE": "Saved data", "TITLE_ID": "CUSA11456"}),
+        "PS4/EXPORT/CUSA11456/sce_sys/param.sfo": make_sfo({"TITLE_ID": "CUSA11456"}),
+        "PS5/EXPORT/BACKUP/sce_sys/param.json": b'{"titleId": "PPSA01234"}',
     }
     for rel, data in files.items():
         put(root, f"{d}/{rel}", data)
@@ -748,6 +761,8 @@ class AppRootTests(unittest.TestCase):
         self.assertNotIn("CUSA99999", r["log"])                          # inside a game's folder
         self.assertNotIn("CUSA12121", r["log"])                          # too deep
         self.assertNotIn("CUSA31313", r["log"])                          # .Trashes
+        self.assertIn("PS4/APOLLO: a save/export folder: not listed", r["log"])
+        self.assertNotIn("backup_CUSA07992", "\n".join(x[2] for x in r["lib"]))
         self.assertIn("approot: 4 games on the USB drive", r["log"])
         self.assertEqual(r["pick"][0], -1)                               # the selector chose nothing
         self.assertIn("no game chosen", r["log"])

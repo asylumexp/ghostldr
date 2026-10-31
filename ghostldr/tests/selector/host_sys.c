@@ -35,6 +35,7 @@ long sys_write(int fd, const void *buf, unsigned long n) { return write(fd, buf,
 int sys_mkdir(const char *path) { return mkdir(path, 0755); }
 long sys_read(int fd, void *buf, unsigned long n) { return read(fd, buf, n); }
 long sys_pread(int fd, void *buf, unsigned long n, long off) { return pread(fd, buf, n, off); }
+long sys_lseek(int fd, long off, int whence) { return lseek(fd, off, whence); }
 int sys_close(int fd) { return close(fd); }
 long sys_file_size(const char *path)
 {
@@ -56,4 +57,23 @@ void sys_vlog(const char *fmt, va_list ap)
     vprintf(fmt, ap);
     putchar('\n');
     fflush(stdout);
+}
+
+/* a save container deleted (the fake sceSaveDataDelete): the directory and its files */
+#include <dirent.h>
+int sys_rmtree(const char *path)
+{
+    DIR *d = opendir(path);
+    if (!d)
+        return -1;
+    struct dirent *e;
+    char p[1024];
+    while ((e = readdir(d)))
+        if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..")) {
+            snprintf(p, sizeof(p), "%s/%s", path, e->d_name);
+            if (unlink(p) != 0)
+                sys_rmtree(p);
+        }
+    closedir(d);
+    return rmdir(path);
 }

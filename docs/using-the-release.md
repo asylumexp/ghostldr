@@ -127,16 +127,18 @@ The selector shows every game it found, on the USB drives in the PS5 and install
 |---|---|
 | Left / Right, L1 / R1 | Move along the row (L1 and R1 jump five). |
 | Cross | Start the selected game. |
-| Triangle or Options | The game's details: title ID, version, where it is, and what's wrong with it, if anything. |
+| Options | The game's details: title ID, version, where it is, and what's wrong with it, if anything. |
+| Triangle | Refresh: look for games again. A game copied onto the drive (over FTP, say) shows, one taken off goes, without restarting SWRR. |
 | Square | Settings (as does the gear at the end of the row). |
 
 **Settings** (Up and Down choose a section, Right or Cross goes in, Left or Circle comes back out):
 
-- **Games:** the drive check. Every game, with `Ready`, or what is wrong and what to do in plain words: an install that isn't finished, a folder on a drive that can't start and why (no `eboot.bin`, no title ID, ...), a second copy of a game.
-- **USB drives:** each drive the PS5 has, its file system (exFAT or FAT32, with FAT32's 4 GiB limit), size and free space, the games found on it and the folders that can't start. **Look again** reads the drives again after you plug one in.
+- **Games:** the drive check. Every game, with `Ready`, or what is wrong and what to do in plain words: an install that isn't finished, a folder on a drive that can't start and why (no `eboot.bin`, no title ID, ...), a second copy of a game. PS5 games on the drive aren't listed (SWRR runs PS4 games): a line says how many were left out. **Cross on a game installed in saved data deletes it**, after a Yes (No is selected first): its install goes, its saves stay.
+- **USB drives:** each drive the PS5 has, its file system (exFAT or FAT32, with FAT32's 4 GiB limit), size and free space, the games found on it and the folders that can't start. **Look again** reads the drives again after you plug one in, and the row with them (as Triangle does).
 - **Network:** the PS5's address, the ports ghostldr uses, and **Install over network** ([below](#no-drive-install-over-the-network)).
 - **Logs:** **Write logs to the USB drive** (on by default), and where the log goes ([logs.md](logs.md)).
 - **Advanced:** what were developer options, as switches: **Show the system's dialogs**, **Plan memory automatically**, **Keep Remote Play on**, **Saves in FTP** (the FTP server's `saves` folder: every logged-in user's saves; [ftp.md](ftp.md#saves)), and **Reset to defaults**. A change counts at once, for the game you pick next, and is kept in SWRR's saved data (`GLDRCONF`).
+- **Game art:** **Fetch missing art** (off by default) gives a game with no picture or backdrop of its own one from SteamGridDB or IGDB, found by its name and kept with the game. It needs your own key: a SteamGridDB API key (steamgriddb.com › Preferences › API), or an IGDB Client ID and Client Secret (a Twitch application: dev.twitch.tv › Console). Type them on the on-screen keyboard there; they stay in `GLDRCONF`.
 - **Safe mode:** if a boot with Advanced's switches stops before the selector comes up, the next boot leaves them out once, and the TV says "Settings > Advanced is left out of this boot", so a switch can't lock you out. Change it there, or **Reset to defaults**.
 - **About:** ghostldr's version and build, the bundle cache, the console and its firmware, SWRR's region, and **Close ghostldr**: after a Yes, SWRR is back at Luac0re's loader ("Closed in Settings"), which takes `ghostldr.lua` again.
 
@@ -192,7 +194,7 @@ The page shows the progress, the speed and the time left. On a PS5 it goes at 22
 ## Removing it
 
 - **A game on the USB drive:** delete its folder on a computer. Its progress stays in SWRR's saved data.
-- **An installed game:** **Remove** in the install page's list of installed games (its progress stays). Or by hand in **Settings → Saved Data and Game/App Settings → Saved Data (PS4) → Console Storage → Star Wars Racer Revenge**: its data containers (`GHOST000`…`GHOST055` for Ghost), its index (`GHOSTINDEX`) and, if it's there, `GHOSTMETA`.
+- **An installed game:** Settings › Games, Cross on it, Yes (its progress stays). Or **Remove** in the install page's list of installed games. Or by hand in **Settings → Saved Data and Game/App Settings → Saved Data (PS4) → Console Storage → Star Wars Racer Revenge**: its data containers (`GHOST000`…`GHOST055` for Ghost), its index (`GHOSTINDEX`) and, if it's there, `GHOSTMETA`.
 - **The bundle cache,** `GLDRCACHE` (16 MiB): `printf 'forget\n' | nc CONSOLE 9021` while the ELF loader listens, or delete it in the same Saved Data list. **ghostldr's settings,** `GLDRCONF`: Settings → Advanced → **Reset to defaults** puts every switch back; the container can be deleted in the same list.
 - **Keep** the games' progress (`GHOSTSAVE`, `<prefix>SAVE`) and the Luac0re save (`SLUS-20268` on US SWRR, `SLES-50366` on EU) unless you mean to remove them too.
 

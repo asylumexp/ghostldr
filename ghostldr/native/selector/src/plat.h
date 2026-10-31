@@ -110,12 +110,25 @@ struct plat {
     int reload_ok;        /* an install can add titles: the heap has room for NET_EXTRA more */
     int ntitle_cap;       /* titles' tiles the heap was sized for */
     int tiles_used;       /* tiles allocated so far (the row's titles, and those an install added) */
+    /* the row read again (main.c reload): arrays of ntitle_cap in turn, cat_load's into cat_into */
+    struct cat_title *cat_buf[2], *cat_into;
+    struct title *title_buf[2];
+    int buf_turn;
+    u32 ps5;              /* a library: PS5 games on the drives, left out of it (ghost_api.library_scan) */
     u32 mod_usb;          /* libSceUsbStorage, when this module loaded it (kept loaded: the session stays) */
     u32 conf_on;          /* Settings > Advanced: the switches' states (conf.c) */
     int conf_safe;        /* ghostldr.lua left them out of this boot (safe mode) */
     int conf_live;        /* this boot's flags have the switches' masks: 1, 0, or -1 none to apply */
     int conf_no_community; /* CTX_FLAG_NO_COMMUNITY_MEM was set before the selector, not by the switch (run.py) */
     char conf_off[CONF_OFF_MAX]; /* GLDRCONF's community_off: the games the player turned it off for, by ID */
+    char art_key[NKEYS][KEY_MAX]; /* Settings > Game art's keys (GLDRCONF) */
+    /* Game art (art.c): the job, and what each title asked for */
+    void *art;
+    int art_fetched;                 /* games given art this boot */
+    char art_seen[2 * SEL_MAX_TITLES][16]; /* titles looked at, by ID (the row may be read again) */
+    int art_nseen;
+    char art_req[SEL_MAX_TITLES][16]; /* the job's requests in its order: their titles' IDs */
+    int art_nreq, art_poll;          /* asked; the next answer to take (the job answers in order) */
     /* time and system settings */
     u64 (*proc_time)(void);
     s32 (*gettimeofday)(void *tv, void *tz);
@@ -135,7 +148,18 @@ int cat_load(struct sel *S, struct plat *P, int n);
 s64 cat_file(struct sel *S, struct plat *P, int title, int which, void *buf, u64 cap);
 s64 cat_meta_read(struct plat *P, int title, u64 off, void *buf, u64 cap);
 int cat_installed(struct sel *S, struct plat *P, struct sel_inst *out, int max); /* GFSCATALOG's titles */
+int cat_delete(struct sel *S, struct plat *P, const char *id, const char *prefix, char *msg, int cap); /* sel_delete */
 void cat_meta_names(struct plat *P, int title, const u8 *head, u64 n);
+
+/* main.c: a title's META header, read once (then NULL; c->meta_state says) */
+const u8 *meta_head(struct sel *S, struct plat *P, int i, u64 *n);
+/* cat.c: sceSaveDataDelete for the user running SWRR (never a SAVE container) */
+int cat_sd_delete(struct plat *P, const char *name);
+/* art.c: Game art (Settings > Game art, docs/selector.md) */
+void art_start(struct plat *P);
+void art_step(struct sel *S, struct plat *P);
+void art_stop(struct plat *P);
+void art_restart(struct plat *P);
 
 /* png.c */
 int png_init(struct plat *P);
@@ -143,6 +167,7 @@ int png_decode_to(struct sel *S, struct plat *P, const u8 *data, u64 n, surface 
 
 /* info.c: what Settings shows, and its calls into the core */
 #define NET_EXTRA 8 /* titles an install over the network may add while the selector runs */
+void info_network_ip(struct plat *P, char ip[16]);
 void info_title_where(struct plat *P, const char *path, u32 len, char *out, int cap);
 void info_netinst_stop(struct plat *P);
 /* conf.c: Settings > Advanced's switches in GLDRCONF/settings.txt */

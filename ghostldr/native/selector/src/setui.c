@@ -7,7 +7,8 @@
  *
  *  - Games: every title the selector has, each with its problem and what to
  *    do about it, in plain words (what `ghostldr.py check` said on a
- *    computer).
+ *    computer); Cross on one installed in saved data deletes it, after a
+ *    Yes (its saves stay).
  *  - USB drives: each drive the console has, its file system, size and free
  *    space, the games found on it, FAT32's 4 GiB limit, where logs go.
  *  - Network: the console's address, Install over network (the extension's
@@ -17,6 +18,8 @@
  *    (the core's ghost_api.log_usb: rel-diag's log sink).
  *  - Advanced: switches that were run.py flags (conf.c: boot context flags
  *    kept in GLDRCONF/settings.txt), and Reset to defaults.
+ *  - Game art: Fetch missing art (a switch) and the keys of the services it
+ *    asks (SteamGridDB, IGDB), typed on a keyboard card (art.c).
  *  - About: ghostldr's version and build, the bundle cache, the console and
  *    SWRR, and Close ghostldr.
  *
@@ -30,16 +33,20 @@
 #define SEC_NETWORK 2
 #define SEC_LOGS 3
 #define SEC_ADVANCED 4
-#define SEC_ABOUT 5
-#define NSEC 6
-static const char SEC_NAME[NSEC][16] = {"Games", "USB drives", "Network", "Logs", "Advanced", "About"};
+#define SEC_ART 5
+#define SEC_ABOUT 6
+#define NSEC 7
+static const char SEC_NAME[NSEC][16] = {"Games", "USB drives", "Network", "Logs", "Advanced", "Game art", "About"};
 
 #define SACT_LOG_USB 1
 #define SACT_NETINST 2
 #define SACT_CLOSE 3
 #define SACT_RECHECK 4
 #define SACT_RESET 5
+#define SACT_KEY 8 /* + KEY_*: Game art's keys, typed on the keyboard card */
 #define SACT_SWITCH 16 /* + the switch's index */
+#define SACT_DELETE 64 /* + the title's index: a game the row has, installed in saved data */
+#define SACT_DELETE_INST 128 /* + its index in sel_info's inst: one the row doesn't have (a USB boot) */
 
 /* layout */
 #define MARGIN 96
@@ -101,8 +108,9 @@ static void cap_first(char *s)
         s[0] = (char)(s[0] - 32);
 }
 
-/* a title: its name, what it is, and its problem with the fix */
-static void game_row(struct sel *S, const struct title *t)
+/* a title: its name, what it is, and its problem with the fix; Cross deletes
+ * one installed in saved data (after a Yes) */
+static void game_row(struct sel *S, const struct title *t, int i)
 {
     char line[160], size[24];
     struct srow *r = row(S, SROW_ITEM, t->name[0] && text_fits_font(S, t->name) ? t->name : t->id[0] ? t->id
@@ -123,6 +131,8 @@ static void game_row(struct sel *S, const struct title *t)
     else if (t->prefix[0])
         sel_fmt(line + n, (int)sizeof(line) - n, "%sInstalled in saved data (%s)", n ? "  \xC2\xB7  " : "", t->prefix);
     sub(r, line);
+    if (S->can_delete && t->prefix[0] && !t->where[0])
+        r->act = (u16)(SACT_DELETE + i);
     char note[160];
     str_copy(note, t->note, sizeof(note));
     cap_first(note);
@@ -194,6 +204,11 @@ static void build(struct sel *S)
     S->nrows = 0;
     switch (S->set_sec) {
     case SEC_GAMES: {
+        if (in->ps5 > 0) {
+            sel_fmt(line, sizeof(line), "%d PS5 game%s on the USB drive%s %s left out: SWRR runs PS4 games only.", in->ps5,
+                    in->ps5 == 1 ? "" : "s", in->ndrives > 1 ? "s" : "", in->ps5 == 1 ? "is" : "are");
+            text_row(S, "PS5 GAMES", line);
+        }
         if (!S->ntitles) {
             text_row(S, "NO GAMES YET",
                      "Copy a game's folder (the one with eboot.bin) to an exFAT USB drive, or install one over the "
@@ -207,13 +222,15 @@ static void build(struct sel *S)
                 S->ntitles == 1 ? "" : "S", ready, S->ntitles - ready);
         row(S, SROW_HEAD, line);
         for (int i = 0; i < S->ntitles; i++)
-            game_row(S, &S->titles[i]);
+            game_row(S, &S->titles[i], i);
         if (in->ninst > 0) { /* a USB boot: what saved data holds as well */
             sel_fmt(line, sizeof(line), "%d INSTALLED IN SAVED DATA", in->ninst);
             row(S, SROW_HEAD, line);
             for (int i = 0; i < in->ninst; i++) {
                 const struct sel_inst *t = &in->inst[i];
                 struct srow *r = row(S, SROW_ITEM, t->name[0] && text_fits_font(S, t->name) ? t->name : t->id);
+                if (S->can_delete && t->prefix[0])
+                    r->act = (u16)(SACT_DELETE_INST + i);
                 char size[24];
                 ui_size(size, sizeof(size), t->size);
                 sel_fmt(line, sizeof(line), "%s%s%s  \xC2\xB7  %s  \xC2\xB7  Installed in saved data", t->id,
@@ -254,7 +271,9 @@ static void build(struct sel *S)
         if (in->usb == USB_READ)
             row(S, SROW_ACTION, "Look again")->act = SACT_RECHECK;
         if (in->usb == USB_READ)
-            sub(&S->rows[S->nrows - 1], "Read the drives again (a game newly copied shows when ghostldr starts again)");
+            sub(&S->rows[S->nrows - 1], S->can_refresh && S->ntitles && S->titles[0].where[0]
+                                            ? "Read the drives again: games copied or removed since show in the row (Triangle there too)"
+                                            : "Read the drives again (a drive's games show when ghostldr starts with it plugged in)");
         break;
     case SEC_NETWORK: {
         text_row(S, "THIS CONSOLE'S ADDRESS", in->ip[0] ? in->ip : "Not connected to a network");
@@ -293,7 +312,7 @@ static void build(struct sel *S)
                                                  "one started without them. Change them here, or reset them.");
         for (int i = 0; i < in->nsw; i++) {
             const struct sel_switch *w = &in->sw[i];
-            if (w->logs)
+            if (w->logs || w->art)
                 continue;
             struct srow *r = row(S, SROW_TOGGLE, w->label);
             r->act = (u16)(SACT_SWITCH + i), r->on = (u8)((in->sw_on >> i) & 1);
@@ -306,6 +325,40 @@ static void build(struct sel *S)
                                    ? "This console's saved data (GLDRCONF). This boot started without them (a boot from "
                                      "a computer's run.py): the release's boots use them"
                                    : "This console's saved data (GLDRCONF): this boot and the next ones use them");
+        break;
+    }
+    case SEC_ART: {
+        int on = 0;
+        for (int i = 0; i < in->nsw; i++) {
+            const struct sel_switch *w = &in->sw[i];
+            if (!w->art)
+                continue;
+            struct srow *r = row(S, SROW_TOGGLE, w->label);
+            r->act = (u16)(SACT_SWITCH + i), r->on = (u8)((in->sw_on >> i) & 1);
+            sub(r, r->on ? w->on : w->off);
+            on = r->on;
+        }
+        static const char label[NKEYS][32] = {"SteamGridDB API key", "IGDB Client ID", "IGDB Client Secret"};
+        static const char none[NKEYS][96] = {"Not set: steamgriddb.com \xE2\x80\xBA Preferences \xE2\x80\xBA API",
+                                             "Not set: a Twitch application\xE2\x80\x99s, dev.twitch.tv \xE2\x80\xBA Console",
+                                             "Not set: the same application\xE2\x80\x99s New Secret"};
+        int keys = in->key_shown[KEY_SGDB][0] || (in->key_shown[KEY_IGDB_ID][0] && in->key_shown[KEY_IGDB_SECRET][0]);
+        for (int k = 0; k < NKEYS; k++) {
+            struct srow *r = row(S, SROW_ACTION, label[k]);
+            r->act = (u16)(SACT_KEY + k);
+            if (in->key_shown[k][0])
+                sel_fmt(line, sizeof(line), "Set: %s", in->key_shown[k]);
+            sub(r, in->key_shown[k][0] ? line : none[k]);
+        }
+        if (on && !keys)
+            text_row(S, "NOTHING TO ASK YET", "Set SteamGridDB\xE2\x80\x99s key, or both of IGDB\xE2\x80\x99s, then start ghostldr again.");
+        if (in->art_fetched > 0) {
+            sel_fmt(line, sizeof(line), "%d game%s got art", in->art_fetched, in->art_fetched == 1 ? "" : "s");
+            text_row(S, "THIS TIME", line);
+        }
+        text_row(S, "HOW IT WORKS", "A game (not homebrew) with no picture or backdrop of its own gets them from "
+                                    "SteamGridDB, else IGDB, by its name. They are kept with the game: the next boots "
+                                    "don\xE2\x80\x99t ask again. The keys stay in this console\xE2\x80\x99s saved data (GLDRCONF).");
         break;
     }
     default: {
@@ -445,6 +498,19 @@ static void net_step(struct sel *S, u64 now, u32 pressed, u32 held)
     }
 }
 
+/* the section built again: the focus stays on the same entry (rows above it may come or go) */
+static void refocus(struct sel *S, u16 keep)
+{
+    build(S);
+    layout(S);
+    S->set_row = first_focus(S, 0, 1);
+    for (int i = 0; i < S->nrows; i++)
+        if (focusable(&S->rows[i]) && S->rows[i].act == keep && keep)
+            S->set_row = i;
+    scroll_to_focus(S);
+    S->changed |= CH_ALL;
+}
+
 static void act(struct sel *S, u64 now, struct srow *r)
 {
     struct sel_info *in = S->info;
@@ -469,7 +535,7 @@ static void act(struct sel *S, u64 now, struct srow *r)
     } else if (r->act == SACT_CLOSE) {
         S->ask_open = 1, S->ask_yes = 0, S->ask_focus = 0, S->ask_kind = ASK_CLOSE;
         sel_log(S, "settings: asking before closing ghostldr");
-    } else if (r->act >= SACT_SWITCH || r->act == SACT_RESET) {
+    } else if ((r->act >= SACT_SWITCH && r->act < SACT_SWITCH + SEL_MAX_SWITCHES) || r->act == SACT_RESET) {
         int i = r->act == SACT_RESET ? -1 : r->act - SACT_SWITCH;
         int got = sel_switch(S, i, i < 0 ? 0 : !r->on);
         sel_log(S, "settings: %s: %d", i < 0 ? "reset to defaults" : in->sw[i].key, got);
@@ -483,27 +549,114 @@ static void act(struct sel *S, u64 now, struct srow *r)
             if (i < 0)
                 ui_toast_ok(S, now, "Every switch is back to its default");
         }
-    } else if (r->act == SACT_RECHECK) {
-        sel_info_load(S, in);
-        ui_toast(S, now, "The drives were read again");
+    } else if (r->act >= SACT_DELETE && r->act < SACT_DELETE_INST + SEL_MAX_TITLES) { /* asked first: No has the focus */
+        int i = r->act - (r->act >= SACT_DELETE_INST ? SACT_DELETE_INST : SACT_DELETE);
+        const char *id, *prefix, *name;
+        u64 size;
+        if (r->act >= SACT_DELETE_INST) {
+            const struct sel_inst *t = &in->inst[i];
+            id = t->id, prefix = t->prefix, name = t->name[0] && text_fits_font(S, t->name) ? t->name : t->id, size = t->size;
+        } else {
+            const struct title *t = &S->titles[i];
+            id = t->id, prefix = t->prefix, name = t->name[0] && text_fits_font(S, t->name) ? t->name : t->id, size = t->size;
+        }
+        str_copy(S->del_id, id, sizeof(S->del_id));
+        str_copy(S->del_prefix, prefix, sizeof(S->del_prefix));
+        str_copy(S->del_name, name[0] ? name : prefix, sizeof(S->del_name));
+        S->del_size = size;
+        S->ask_open = 1, S->ask_yes = 0, S->ask_focus = 0, S->ask_kind = ASK_DELETE;
+        sel_log(S, "settings: asking before deleting %s (%s)", id, prefix);
+        return;
+    } else if (r->act >= SACT_KEY && r->act < SACT_KEY + NKEYS) { /* the keyboard, with the key as it is */
+        S->kb_open = 1, S->kb_which = r->act - SACT_KEY, S->kb_r = 1, S->kb_c = 0, S->kb_shift = 0;
+        sel_art_key(S, S->kb_which, 0, S->kb_text, sizeof(S->kb_text));
+        S->changed |= CH_ALL;
+        return;
+    } else if (r->act == SACT_RECHECK) { /* the platform reads the drives, then set_rebuild */
+        if (S->can_refresh) {
+            ui_refresh(S, now);
+        } else {
+            sel_info_load(S, in);
+            ui_toast(S, now, "The drives were read again");
+        }
     } else {
         return;
     }
-    u16 keep = r->act; /* the focus stays on the same entry (rows above it may come or go) */
-    build(S);
-    layout(S);
-    S->set_row = first_focus(S, 0, 1);
-    for (int i = 0; i < S->nrows; i++)
-        if (focusable(&S->rows[i]) && S->rows[i].act == keep && keep)
-            S->set_row = i;
-    scroll_to_focus(S);
-    S->changed |= CH_ALL;
+    refocus(S, r->act);
+}
+
+void set_rebuild(struct sel *S)
+{
+    if (!S->info)
+        return;
+    sel_info_load(S, S->info);
+    refocus(S, S->set_row >= 0 && S->set_row < S->nrows ? S->rows[S->set_row].act : 0);
+}
+
+/* ---- the keyboard card (Game art's keys) ----
+ * Four rows of keys and a row of Shift, Delete, Clear and Done; the d-pad
+ * moves, Cross types, Square deletes, Triangle is Shift, Options is Done,
+ * Circle leaves without saving. */
+#define KB_ROWS 5
+#define KB_COLS 10
+static const char KB_KEYS[4][KB_COLS + 1] = {"1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm_.:"};
+static const char KB_ACT[4][8] = {"Shift", "Delete", "Clear", "Done"};
+static char kb_char(const struct sel *S, int r, int c)
+{
+    char ch = KB_KEYS[r][c];
+    return S->kb_shift && ch >= 'a' && ch <= 'z' ? (char)(ch - 32) : ch;
+}
+
+static void kb_done(struct sel *S, u64 now)
+{
+    S->kb_open = 0;
+    int rc = sel_art_key(S, S->kb_which, S->kb_text, 0, 0);
+    ui_toast(S, now, rc != 0 ? "The key couldn't be saved" : S->kb_text[0] ? "Saved" : "Cleared");
+    if (rc == 0)
+        S->toast_ok = 1;
+    sel_info_load(S, S->info);
+    refocus(S, (u16)(SACT_KEY + S->kb_which));
+}
+
+static void kb_step(struct sel *S, u64 now, u32 pressed)
+{
+    int n = str_len(S->kb_text), r = S->kb_r, c = S->kb_c;
+    if (pressed & PAD_LEFT)
+        c = (c + KB_COLS - (r == 4 ? 3 : 1)) % KB_COLS;
+    if (pressed & PAD_RIGHT)
+        c = r == 4 ? (c / 3 + 1) % 4 * 3 : (c + 1) % KB_COLS;
+    if (pressed & PAD_UP)
+        r = (r + KB_ROWS - 1) % KB_ROWS;
+    if (pressed & PAD_DOWN)
+        r = (r + 1) % KB_ROWS;
+    if (r == 4)
+        c = c / 3 * 3 < KB_COLS ? c / 3 * 3 : 9; /* the wide keys: Shift 0, Delete 3, Clear 6, Done 9 */
+    S->kb_r = r, S->kb_c = c;
+    int act = r == 4 ? (c >= 9 ? 3 : c / 3) : -1;
+    if ((pressed & PAD_CROSS) && r < 4 && n + 1 < KEY_MAX)
+        S->kb_text[n] = kb_char(S, r, c), S->kb_text[n + 1] = 0;
+    if (((pressed & PAD_CROSS) && act == 1) || ((pressed & PAD_SQUARE) && n))
+        S->kb_text[n ? n - 1 : 0] = 0;
+    if ((pressed & PAD_CROSS) && act == 2)
+        S->kb_text[0] = 0;
+    if (((pressed & PAD_CROSS) && act == 0) || (pressed & PAD_TRIANGLE))
+        S->kb_shift = !S->kb_shift;
+    if (((pressed & PAD_CROSS) && act == 3) || (pressed & PAD_OPTIONS)) {
+        kb_done(S, now);
+    } else if (pressed & PAD_CIRCLE) {
+        S->kb_open = 0;
+        sel_log(S, "settings: a key not changed");
+    }
+    if (pressed)
+        S->changed |= CH_ALL;
 }
 
 void set_step(struct sel *S, u64 now, u64 dt, u32 pressed, u32 held, int step)
 {
     S->set_now = now;
-    if (S->net_open) {
+    if (S->kb_open) {
+        kb_step(S, now, pressed);
+    } else if (S->net_open) {
         net_step(S, now, pressed, held);
     } else if (!S->set_in) {
         int sec = clampi(S->set_sec + step, 0, NSEC - 1);
@@ -557,6 +710,14 @@ void set_step(struct sel *S, u64 now, u64 dt, u32 pressed, u32 held, int step)
         S->net_a = 1;
     if (S->net_a != na)
         S->changed |= CH_ALL;
+    float ka = S->kb_a;
+    S->kb_a += ((S->kb_open ? 1.0f : 0.0f) - S->kb_a) * (dt >= 160000 ? 1.0f : (float)dt / 160000.0f);
+    if (S->kb_a < 0.01f && !S->kb_open)
+        S->kb_a = 0;
+    if (S->kb_a > 0.99f && S->kb_open)
+        S->kb_a = 1;
+    if (S->kb_a != ka)
+        S->changed |= CH_ALL;
 }
 
 int set_busy(const struct sel *S)
@@ -565,7 +726,7 @@ int set_busy(const struct sel *S)
         return 0;
     float ry = S->set_row >= 0 && S->set_row < S->nrows ? (float)S->rows[S->set_row].y : 0;
     return S->set_sec_y != (float)S->set_sec || S->set_row_y != ry || S->set_scroll != S->set_scroll_to ||
-           (S->net_a > 0 && S->net_a < 1) || S->net_hold;
+           (S->net_a > 0 && S->net_a < 1) || S->net_hold || (S->kb_a > 0 && S->kb_a < 1);
 }
 
 /* ---- drawing ---- */
@@ -701,6 +862,51 @@ static void net_card(struct sel *S, surface *s, float k)
     }
 }
 
+#define KB_W 1240
+#define KB_H 760
+#define KB_KEY 96
+#define KB_GAP 12
+static void kb_card(struct sel *S, surface *s, float k)
+{
+    static const char title[NKEYS][32] = {"SteamGridDB API key", "IGDB Client ID", "IGDB Client Secret"};
+    float e = 1 - (1 - k) * (1 - k);
+    u32 a = (u32)(e * 255);
+    draw_dim(s, 0, SCREEN_W, 0, SCREEN_H, (int)(190 * e));
+    int x = (SCREEN_W - KB_W) / 2, y = (SCREEN_H - KB_H) / 2 - 24 + (int)((1 - e) * 28);
+    draw_rrect(s, x, y, KB_W, KB_H, 28, fade(0xFF202530u, a));
+    ui_card(s, x, y, KB_W, KB_H, e);
+    ui_text_bold(S, s, 34, x + 56, y + 84, title[S->kb_which], fade(WHITE, a), KB_W - 112);
+    /* the text so far, its end where the next character goes */
+    int fx = x + 56, fy = y + 118, fw = KB_W - 112;
+    draw_rrect(s, fx, fy, fw, 72, 16, fade(0x30FFFFFFu, a));
+    const char *t = S->kb_text;
+    while (text_width(S, 30, t) > fw - 56 && *t)
+        t++; /* the end shows */
+    int tw = draw_text(S, s, 30, fx + 24, fy + 48, t[0] ? t : "", fade(WHITE, a), fw - 48);
+    draw_rect_blend(s, fx + 26 + tw, fy + 18, 3, 38, fade(0xC0FFFFFFu, a));
+    char count[32];
+    sel_fmt(count, sizeof(count), "%d characters", str_len(S->kb_text));
+    draw_text(S, s, 22, fx + fw - text_width(S, 22, count) - 4, fy + 104, count, fade(DIM, a), 0);
+    /* the keys */
+    int gx = x + (KB_W - (KB_COLS * KB_KEY + (KB_COLS - 1) * KB_GAP)) / 2, gy = y + 262;
+    for (int r = 0; r < KB_ROWS; r++)
+        for (int c = 0; c < (r == 4 ? 4 : KB_COLS); c++) {
+            int wide = (KB_COLS * KB_KEY + (KB_COLS - 1) * KB_GAP - 3 * KB_GAP) / 4;
+            int kx = r == 4 ? gx + c * (wide + KB_GAP) : gx + c * (KB_KEY + KB_GAP), ky = gy + r * (76 + KB_GAP);
+            int kw = r == 4 ? wide : KB_KEY;
+            int focus = S->kb_r == r && (r == 4 ? (S->kb_c >= 9 ? 3 : S->kb_c / 3) == c : S->kb_c == c);
+            int lit = r == 4 && c == 0 && S->kb_shift;
+            draw_rrect(s, kx, ky, kw, 76, 14, fade(focus ? 0xFFF4F6F8u : lit ? 0x60FFFFFFu : 0x26FFFFFFu, a));
+            char lab[8] = {0};
+            if (r < 4)
+                lab[0] = kb_char(S, r, c);
+            else
+                str_copy(lab, KB_ACT[c], sizeof(lab));
+            int px = r < 4 ? 34 : 26, lw = text_width(S, px, lab);
+            draw_text(S, s, px, kx + (kw - lw) / 2, ky + 50, lab, fade(focus ? INK : WHITE, a), 0);
+        }
+}
+
 void set_draw(struct sel *S, surface *s)
 {
     float k = S->set_a, e = 1 - (1 - k) * (1 - k);
@@ -751,11 +957,21 @@ void set_draw(struct sel *S, surface *s)
     }
     if (S->net_a > 0)
         net_card(S, s, S->net_a);
+    if (S->kb_a > 0)
+        kb_card(S, s, S->kb_a);
 }
 
 void set_hints(struct sel *S, surface *s)
 {
     int base = SCREEN_H - 64, x = SCREEN_W - MARGIN;
+    if (S->kb_a > 0.5f) {
+        x = ui_hint(S, s, x, base, PAD_CIRCLE, "Cancel", SOFT) - 44;
+        x = ui_hint(S, s, x, base, PAD_OPTIONS, "Done", SOFT) - 44;
+        x = ui_hint(S, s, x, base, PAD_TRIANGLE, "Shift", SOFT) - 44;
+        x = ui_hint(S, s, x, base, PAD_SQUARE, "Delete", SOFT) - 44;
+        ui_hint(S, s, x, base, PAD_CROSS, "Type", SOFT);
+        return;
+    }
     if (S->net_a > 0.5f) {
         if (S->net.state == NET_BUSY) {
             char label[48];
@@ -778,7 +994,10 @@ void set_hints(struct sel *S, surface *s)
     const struct srow *r = S->set_row >= 0 ? &S->rows[S->set_row] : 0;
     if (r && r->kind == SROW_TOGGLE)
         ui_hint(S, s, x, base, PAD_CROSS, "Change", SOFT);
+    else if (r && r->kind == SROW_ITEM && r->act >= SACT_DELETE)
+        ui_hint(S, s, x, base, PAD_CROSS, "Delete", SOFT);
     else if (r && r->kind == SROW_ACTION)
         ui_hint(S, s, x, base, PAD_CROSS, r->act == SACT_CLOSE ? "Close ghostldr" : r->act == SACT_RECHECK ? "Look again"
-                                          : r->act == SACT_RESET ? "Reset" : "Start", SOFT);
+                                          : r->act == SACT_RESET ? "Reset" : r->act >= SACT_KEY && r->act < SACT_KEY + NKEYS ? "Type"
+                                          : "Start", SOFT);
 }

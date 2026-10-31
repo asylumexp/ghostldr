@@ -278,16 +278,13 @@ static void mark_icon(surface *s)
     draw_warning(s, cx, cy, size, AMBER, 0xFF2A1E08u);
 }
 
-void ui_load_icon(struct sel *S, int i)
+/* both tiles from img (NULL: drawn in the title's colour), marked and rounded */
+static void icon_from(struct sel *S, int i, const surface *img)
 {
     struct title *t = &S->titles[i];
-    if (t->icon_state)
-        return;
-    u64 m = sel_mark(S);
-    surface img;
-    if (sel_load_art(S, i, SEL_ICON, &img) == 0 && img.w >= 16 && img.h >= 16) {
-        draw_resample(&t->icon, &img);
-        draw_resample(&t->icon_small, &img);
+    if (img) {
+        draw_resample(&t->icon, img);
+        draw_resample(&t->icon_small, img);
         t->icon_state = 1;
     } else {
         fallback_icon(S, t, &t->icon);
@@ -295,7 +292,6 @@ void ui_load_icon(struct sel *S, int i)
         t->icon_state = 2;
         t->icon_src = ART_GENERATED;
     }
-    sel_release(S, m);
     /* the flags are final now: loading the art read the title's param.sfo */
     t->marked = (u8)ps4_marked(S, t);
     if (t->marked) {
@@ -305,6 +301,25 @@ void ui_load_icon(struct sel *S, int i)
     draw_round_corners(&t->icon, RADIUS);
     draw_round_corners(&t->icon_small, RADIUS * TILE_SMALL / TILE_BIG);
     S->changed |= S->panel > 0 || S->ask > 0 ? CH_ALL : CH_ROW;
+}
+
+void ui_load_icon(struct sel *S, int i)
+{
+    struct title *t = &S->titles[i];
+    if (t->icon_state)
+        return;
+    u64 m = sel_mark(S);
+    surface img;
+    int ok = sel_load_art(S, i, SEL_ICON, &img) == 0 && img.w >= 16 && img.h >= 16;
+    icon_from(S, i, ok ? &img : 0);
+    sel_release(S, m);
+}
+
+/* a picture found for the title's tile (Game art): src is where it came from */
+void ui_set_icon(struct sel *S, int i, const surface *img, u8 src)
+{
+    icon_from(S, i, img);
+    S->titles[i].icon_src = src;
 }
 
 /* where tile i sits when tile k is focused */
@@ -576,6 +591,18 @@ static void start(struct sel *S)
         S->launching = 1;
 }
 
+/* Refresh (Triangle, Settings' Look again): the platform reads the row
+ * again (a library's drives, or the catalogue) once this message shows, and
+ * then says what changed */
+void ui_refresh(struct sel *S, u64 now)
+{
+    if (S->refresh_req)
+        return;
+    S->refresh_req = 1, S->refresh_at = now + 200000;
+    ui_toast(S, now, "Looking for games again\xE2\x80\xA6");
+    sel_log(S, "refresh: asked");
+}
+
 /* Cross on the selected title: boot it, ask first (a game's dump on a PS4),
  * or say why it can't start */
 static void choose(struct sel *S, u64 now)
@@ -666,6 +693,14 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int stick_
                 sel_log(S, "settings: Close ghostldr: %s", go ? "Yes: back to Luac0re's loader" : "No");
                 if (go)
                     S->quit = 1, S->launching = 1;
+            } else if (S->ask_kind == ASK_DELETE) {
+                sel_log(S, "settings: delete %s (%s): %s", S->del_id, S->del_prefix, go ? "Yes" : "No");
+                if (go) {
+                    char msg[96];
+                    sel_fmt(msg, sizeof(msg), "Deleting %s\xE2\x80\xA6", S->del_name);
+                    ui_toast(S, now, msg);
+                    S->delete_req = 1, S->delete_at = now + 200000;
+                }
             } else {
                 sel_log(S, "PS4: %s for title %d (%s)%s", go ? "Yes" : "No", S->sel, S->titles[S->sel].id,
                         go ? ": booting it" : "");
@@ -698,8 +733,10 @@ int ui_step(struct sel *S, u64 now, u64 dt, u32 buttons, int stick_x, int stick_
             community_flip(S, now);
         else if (pressed & PAD_SETTINGS)
             S->panel_open = 0, set_open(S, now);
-        else if ((pressed & (PAD_OPTIONS | PAD_TRIANGLE)) && !on_gear(S))
+        else if ((pressed & PAD_OPTIONS) && !on_gear(S))
             S->panel_open = !S->panel_open, S->toast_until_us = 0;
+        else if ((pressed & PAD_TRIANGLE) && !S->panel_open && S->can_refresh)
+            ui_refresh(S, now);
         else if ((pressed & PAD_CIRCLE) && S->panel_open)
             S->panel_open = 0;
     }
@@ -797,6 +834,15 @@ static void square_glyph(surface *s, float cx, float cy, float r, u32 disc, u32 
     draw_line(s, cx - k, cy + k, cx - k, cy - k, w, ink);
 }
 
+static void triangle_glyph(surface *s, float cx, float cy, float r, u32 disc, u32 ink)
+{
+    draw_disc(s, cx, cy, r, 0, disc);
+    float k = r * 0.46f, w = r * 0.15f, top = cy - k * 0.95f, base = cy + k * 0.62f;
+    draw_line(s, cx, top, cx + k, base, w, ink);
+    draw_line(s, cx + k, base, cx - k, base, w, ink);
+    draw_line(s, cx - k, base, cx, top, w, ink);
+}
+
 /* "OPTIONS" on a pill, as the button is labelled on the controller */
 static int options_glyph(struct sel *S, surface *s, int x, int cy, u32 pill, u32 ink)
 {
@@ -822,6 +868,8 @@ static int hint(struct sel *S, surface *s, int x, int base, int button, const ch
         cross_glyph(s, (float)x - 28, cy, 16, fade(0xF0FFFFFFu, c >> 24), INK);
     else if (button == PAD_SQUARE)
         square_glyph(s, (float)x - 28, cy, 16, fade(0xF0FFFFFFu, c >> 24), INK);
+    else if (button == PAD_TRIANGLE)
+        triangle_glyph(s, (float)x - 28, cy, 16, fade(0xF0FFFFFFu, c >> 24), INK);
     else
         circle_glyph(s, (float)x - 28, cy, 16, fade(0xF0FFFFFFu, c >> 24), INK);
     return x - 44;
@@ -857,10 +905,14 @@ static void hints(struct sel *S, surface *s)
         if (community_shown(S, t))
             hint(S, s, x, base, PAD_SQUARE, t->community_off ? "Use community plan" : "Turn off community plan", SOFT);
     } else if (on_gear(S)) {
-        hint(S, s, x, base, PAD_CROSS, "Settings", SOFT);
+        x = hint(S, s, x, base, PAD_CROSS, "Settings", SOFT) - 44;
+        if (S->can_refresh)
+            hint(S, s, x, base, PAD_TRIANGLE, "Refresh", SOFT);
     } else {
         x = hint(S, s, x, base, PAD_SQUARE, "Settings", SOFT) - 44;
-        hint(S, s, x, base, PAD_OPTIONS, "Information", SOFT);
+        x = hint(S, s, x, base, PAD_OPTIONS, "Information", SOFT) - 44;
+        if (S->can_refresh)
+            hint(S, s, x, base, PAD_TRIANGLE, "Refresh", SOFT);
     }
 }
 
@@ -1194,7 +1246,8 @@ static void details(struct sel *S, surface *s)
 static const char *art_label(u8 src)
 {
     return src == ART_TITLE ? "The game's own" : src == ART_GIVEN ? "Added at install"
-         : src == ART_STORE ? "PlayStation Store" : src == ART_GENERATED ? "Generated" : "-";
+         : src == ART_STORE ? "PlayStation Store" : src == ART_GENERATED ? "Generated"
+         : src == ART_SGDB ? "SteamGridDB" : src == ART_IGDB ? "IGDB" : "-";
 }
 
 /* the information panel: a sheet sliding in from the right */
@@ -1314,21 +1367,28 @@ static void ask_dialog(struct sel *S, surface *s, float k)
     draw_shadow(s, x, y + 14, ASK_W, ASK_H, 28, 60, (int)(170 * e));
     draw_rrect(s, x, y, ASK_W, ASK_H, 28, fade(0xF6202530u, a));
     draw_rring(s, x, y, ASK_W, ASK_H, 28, 1, fade(0x30FFFFFFu, a));
-    int close = S->ask_kind == ASK_CLOSE;
+    int close = S->ask_kind == ASK_CLOSE, del = S->ask_kind == ASK_DELETE;
     if (close)
         ui_gear(s, (float)SCREEN_W / 2, (float)y + 80, 30, fade(0xFFF2F4F7u, a), fade(0xFF202530u, a));
     else
-        draw_warning(s, (float)SCREEN_W / 2, (float)y + 78, 68, fade(AMBER, a), fade(0xFF2A1E08u, a));
+        draw_warning(s, (float)SCREEN_W / 2, (float)y + 78, 68, fade(del ? RED : AMBER, a), fade(0xFF2A1E08u, a));
 
+    char said[200], size[24];
+    if (del) {
+        fmt_size(size, sizeof(size), S->del_size);
+        sel_fmt(said, sizeof(said), S->del_size ? "Delete %s? Its install in saved data (%s) is removed."
+                                                : "Delete %s? Its install in saved data is removed.", S->del_name, size);
+    }
     const char *msg = close ? "Close ghostldr? SWRR goes back to Luac0re\xE2\x80\x99s loader without starting a game."
-                            : "Game dumps largely will not work on PS4 due to RAM limitations";
+                    : del ? said : "Game dumps largely will not work on PS4 due to RAM limitations";
     char lines[2][128];
     int n = wrap_lines(S, 30, ASK_W - 120, msg, lines, 2), ty = y + 172;
     for (int i = 0; i < n; i++, ty += 42) {
         int w = text_width(S, 30, lines[i]);
         draw_text(S, s, 30, (SCREEN_W - w) / 2, ty, lines[i], fade(WHITE, a), ASK_W - 120);
     }
-    const char *q = close ? "Send ghostldr.lua again to come back." : "Continue anyways?";
+    const char *q = close ? "Send ghostldr.lua again to come back."
+                  : del ? "Its saves stay. Installing it again takes as long as the first time." : "Continue anyways?";
     int qw = text_width(S, 26, q);
     draw_text(S, s, 26, (SCREEN_W - qw) / 2, ty + 10, q, fade(DIM, a), 0);
 

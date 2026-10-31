@@ -133,25 +133,30 @@ struct netctl_info {
     char ip[16];
     u8 rest[496];
 };
-static void network(struct plat *P, struct sel_info *in)
+void info_network_ip(struct plat *P, char ip[16])
 {
-    in->ip[0] = 0;
+    ip[0] = 0;
     const u64 *slots = (const u64 *)P->ctx;
     if (P->ctx->size > CTX_CONSOLE_IP_SLOT * 8 && slots[CTX_CONSOLE_IP_SLOT]) { /* listen mode: ghostldr.lua's */
-        const char *ip = (const char *)slots[CTX_CONSOLE_IP_SLOT];
-        if (ip[0] >= '0' && ip[0] <= '9')
-            str_copy(in->ip, ip, sizeof(in->ip));
+        const char *known = (const char *)slots[CTX_CONSOLE_IP_SLOT];
+        if (known[0] >= '0' && known[0] <= '9')
+            str_copy(ip, known, 16);
     }
-    if (!in->ip[0]) {
+    if (!ip[0]) {
         u32 h = sys_module(P, "libSceNetCtl.sprx", 0, NULL);
         s32 (*get)(s32, void *) = h ? (s32(*)(s32, void *))sys_sym(P, h, "sceNetCtlGetInfo") : NULL;
         struct netctl_info ni;
         memset(&ni, 0, sizeof(ni));
         s32 rc = get ? get(14 /* SCE_NET_CTL_INFO_IP_ADDRESS */, &ni) : -1;
         if (rc == 0 && ni.ip[0] >= '0' && ni.ip[0] <= '9')
-            str_copy(in->ip, ni.ip, sizeof(in->ip) < 16 ? sizeof(in->ip) : 16);
-        LOG(P, "settings: sceNetCtlGetInfo: %x '%s'", (u32)rc, in->ip);
+            str_copy(ip, ni.ip, 16);
+        LOG(P, "sceNetCtlGetInfo: %x '%s'", (u32)rc, ip);
     }
+}
+
+static void network(struct plat *P, struct sel_info *in)
+{
+    info_network_ip(P, in->ip);
     u64 f = P->ctx->flags;
     int n = 0;
     struct sel_port *pt = in->ports;
@@ -165,7 +170,7 @@ static void network(struct plat *P, struct sel_info *in)
                                   : "ghostldr's bundle port and ELF loader (9022 when 9021 was taken)",
                  sizeof(pt[0].what));
     }
-    u32 ftp = (f & CTX_FLAG_ELFLDR) ? 0 : CTX_FTP_PORT(f);
+    u32 ftp = CTX_SELECTOR_FTP_PORT(f);
     if (ftp) {
         pt[n].port = (u16)ftp;
         str_copy(pt[n++].what, "FTP, while a game runs: the USB drive, and the game's own files", sizeof(pt[0].what));
@@ -308,6 +313,18 @@ void sel_info_load(struct sel *S, struct sel_info *in)
         str_copy(in->log_where, in->log_usb ? "The drive your game starts from, else the first drive that takes a write, "
                                               "in the folder ghostldr/logs" : "Not to a drive", sizeof(in->log_where));
     in->ninst = P->ghostfs ? -1 : cat_installed(S, P, in->inst, SEL_MAX_TITLES);
+    in->ps5 = P->library ? (int)P->ps5 : 0;
+    for (int k = 0; k < NKEYS; k++) { /* a key as shown: its ends only */
+        const char *v = P->art_key[k];
+        int n = str_len(v);
+        if (!n)
+            in->key_shown[k][0] = 0;
+        else if (n <= 10)
+            fmt(in->key_shown[k], sizeof(in->key_shown[k]), "%d characters", n);
+        else
+            fmt(in->key_shown[k], sizeof(in->key_shown[k]), "%.4s\xE2\x80\xA6%s", v, v + n - 4);
+    }
+    in->art_fetched = P->art_fetched;
     for (in->nsw = 0; in->nsw < SEL_MAX_SWITCHES && conf_switch(in->nsw, &in->sw[in->nsw]) == 0; in->nsw++)
         ;
     in->sw_on = P->conf_on, in->sw_safe = P->conf_safe, in->sw_live = P->conf_live;

@@ -747,7 +747,8 @@ static void title_prefix(const char *dir, const char *title, char prefix[16])
  * below the folder, SCAN_DIRS folders in all and SCAN_ENTRIES entries per
  * folder, so a large drive stays quick (the console's exFAT lists a folder
  * of thousands of files slowly).  Names starting with "." are skipped
- * (macOS's .Spotlight-V100, .Trashes, ...), and Windows' system folders. */
+ * (macOS's .Spotlight-V100, .Trashes, ...), Windows' system folders, and
+ * the consoles' standard save/export trees. */
 #define SCAN_DEPTH 4
 #define SCAN_DIRS 256
 #define SCAN_ENTRIES 4096
@@ -755,6 +756,7 @@ static void title_prefix(const char *dir, const char *title, char prefix[16])
 
 static struct lib_title *g_list; /* page_alloc'd while a library is open */
 static u32 g_count, g_good;      /* games found; of them bootable */
+static u32 g_ps5;                /* PS5 games found and left out (ps5_game) */
 static bool g_cut;               /* the scan stopped short */
 
 static void lib_free(void)
@@ -762,7 +764,7 @@ static void lib_free(void)
     if (g_list)
         page_free(g_list, sizeof(struct lib_title) * LIB_MAX);
     g_list = NULL;
-    g_count = g_good = 0;
+    g_count = g_good = g_ps5 = 0;
     g_lib[0] = 0;
 }
 
@@ -822,11 +824,28 @@ static const char *identify(const char *app0, size_t dir_len, char id[16])
                : "no sce_sys/param.sfo: name the folder after the game's ID (CUSA12345)";
 }
 
-/* A game found at app0 (dir_len: its folder) */
+/* A PS5 game's dump (a PPSA title ID, or sce_sys/param.json and no
+ * param.sfo): SWRR runs in PS4 mode, so it can't start one */
+static bool ps5_game(const char *app0, const char *id)
+{
+    if (strncmp(id, "PPSA", 4) == 0)
+        return true;
+    char sys[300];
+    fmt(sys, sizeof(sys), "%s/sce_sys", app0);
+    return is_file(sys, "param.json") && !is_file(sys, "param.sfo");
+}
+
+/* A game found at app0 (dir_len: its folder); a PS5 game's is left out of
+ * the list (counted, and logged) */
 static void lib_game(const char *app0, size_t dir_len)
 {
     struct lib_title *t = lib_add(app0, dir_len);
     const char *why = t ? identify(app0, dir_len, t->id) : NULL;
+    if (t && ps5_game(app0, t->id)) {
+        logf("approot: %s: a PS5 game (%s): not listed, SWRR runs PS4 games", shown(app0), t->id[0] ? t->id : "param.json");
+        g_count--, g_ps5++;
+        return;
+    }
     if (why)
         lib_bad(t, why);
 }
@@ -835,6 +854,22 @@ static bool skip_dir(const char *name)
 {
     return name[0] == '.' || same_ci(name, "System Volume Information") || same_ci(name, "$RECYCLE.BIN") ||
            same_ci(name, "sce_sys") || same_ci(name, "sce_module");
+}
+
+/* Standard console and Apollo save trees at the drive's top.  Apollo saves
+ * have sce_sys but no eboot.bin, so looking inside PS4/APOLLO would otherwise
+ * show each one as a broken game.  Match the whole drive-relative path: a
+ * real Apollo homebrew copied to ghostldr/apollo remains a game. */
+static bool save_tree(const char *path)
+{
+    int slot = usb_slot_of(path);
+    if (slot < 0)
+        return false;
+    const char *rel = path + strlen(usb_slot_mp((u32)slot));
+    if (*rel == '/')
+        rel++;
+    return same_ci(rel, "PS4/APOLLO") || same_ci(rel, "PS4/SAVEDATA") || same_ci(rel, "PS4/EXPORT") ||
+           same_ci(rel, "PS5/APOLLO") || same_ci(rel, "PS5/SAVEDATA") || same_ci(rel, "PS5/EXPORT");
 }
 
 /* the games under root (one drive's) into g_list */
@@ -880,11 +915,13 @@ static void lib_scan_one(const char *root, char (*q)[256])
                     app0 = true;
                 else if (type == 0x4000 && same_ci(name, "sce_sys"))
                     sce_sys = true;
-                else if (type == 0x4000 && d < SCAN_DEPTH && !skip_dir(name) && len < 250) {
-                    if (tail < SCAN_DIRS) {
+                else if (type == 0x4000 && d < SCAN_DEPTH && len < 250) {
+                    if (save_tree(path)) {
+                        logf("approot: %s: a save/export folder: not listed", shown(path));
+                    } else if (!skip_dir(name) && tail < SCAN_DIRS) {
                         strlcpy(q[tail], path, 256);
                         depth[tail++] = (u8)(d + 1);
-                    } else {
+                    } else if (!skip_dir(name)) {
                         g_cut = true;
                     }
                 }
@@ -971,6 +1008,67 @@ static int lib_get(const struct lib_title **list)
 }
 
 static int usb_open(const char *path, char *out, size_t size);
+static char g_path[256]; /* usb_open's path below the drives' top ("" for the top): looked in again */
+
+/* the same folder on each drive mounted now, in g_roots (said: each drive's answer logged) */
+static void usb_roots(bool said)
+{
+    char top[64];
+    size_t k = 0;
+    while (g_path[k] && g_path[k] != '/' && k < sizeof(top) - 1)
+        top[k] = g_path[k], k++;
+    top[k] = 0;
+    g_nroots = 0;
+    for (u32 s = 0; s < USB_SLOTS; s++) {
+        char mp[24], want[320];
+        if (!U.mounted[s])
+            continue;
+        slot_mp(s, mp);
+        fmt(want, sizeof(want), "%s/%s", mp, top);
+        bool has = !top[0] || is_dir(want);
+        if (top[0] && said)
+            logf("approot: %s %s", want, has ? "found" : "missing");
+        if (has)
+            fmt(g_roots[g_nroots++], sizeof(g_roots[0]), g_path[0] ? "%s/%s" : "%s", mp, g_path);
+    }
+}
+
+/* ghost_api.library_scan (the game selector's refresh): again nonzero looks
+ * at the drives again, as an FTP login does (a drive gone is forgotten, one
+ * plugged in since mounted), and lists the games in the same folder on each
+ * again; *ps5 gets the PS5 games left out.  The count, or -1 when this
+ * boot's games don't come from a folder of games (any more). */
+static int lib_again(const struct lib_title **list, u32 *ps5, int again)
+{
+    *list = NULL;
+    if (!g_list)
+        return -1;
+    if (again) {
+        if (g_usb) {
+            char mp[24];
+            spin_lock(&g_mount_lock);
+            for (u32 k = 0; k < USB_SLOTS; k++)
+                if (U.mounted[k] && !is_dir(slot_mp(k, mp))) {
+                    logf("approot: the USB drive at %s is gone", mp);
+                    U.mounted[k] = false;
+                }
+            usb_mount_new();
+            usb_roots(false);
+            spin_unlock(&g_mount_lock);
+        }
+        char keep[256];
+        strlcpy(keep, g_lib, sizeof(keep));
+        lib_scan(g_roots, g_nroots);
+        if (!g_nroots) /* no drive has the folder now: the library stays where it was, empty */
+            strlcpy(g_lib, keep, sizeof(g_lib));
+        logf("approot: looked again: %u game%s in %u folder%s%s", g_good, g_good == 1 ? "" : "s", g_nroots,
+             g_nroots == 1 ? "" : "s", g_ps5 ? " (PS5 games left out, above)" : "");
+    }
+    *list = g_list;
+    if (ps5)
+        *ps5 = g_ps5;
+    return g_list ? (int)g_count : -1;
+}
 
 /* a boot that stops: the drive goes back; "auto" boots the installed titles instead */
 static int give_up(void)
@@ -1115,8 +1213,8 @@ static int approot_init(const char **root)
     char where[64];
     if (top)
         fmt(where, sizeof(where), g_nroots > 1 ? "on %u USB drives" : "on the USB drive", g_nroots);
-    logf("approot: %u game%s %s%s%s", g_good, g_good == 1 ? "" : "s", top ? where : "in ", top ? "" : shown(dir),
-         g_count > g_good ? " (and folders that can't be booted, above)" : "");
+    logf("approot: %u game%s %s%s%s%s", g_good, g_good == 1 ? "" : "s", top ? where : "in ", top ? "" : shown(dir),
+         g_count > g_good ? " (and folders that can't be booted, above)" : "", g_ps5 ? " (PS5 games left out, above)" : "");
     if (!g_good) {
         logf("approot: %s holds no games (a folder with eboot.bin, or with app0/eboot.bin)", shown(dir));
         NOTE(FAIL_NO_GAMES, shown(dir));
@@ -1162,19 +1260,8 @@ static int usb_open(const char *path, char *out, size_t size)
         top[k] = path[k], k++;
     top[k] = 0;
     u32 m = usb_mount_all();
-    g_nroots = 0;
-    for (u32 s = 0; s < USB_SLOTS; s++) {
-        char mp[24], want[320];
-        if (!U.mounted[s])
-            continue;
-        slot_mp(s, mp);
-        fmt(want, sizeof(want), "%s/%s", mp, top);
-        bool has = !top[0] || is_dir(want);
-        if (top[0])
-            logf("approot: %s %s", want, has ? "found" : "missing");
-        if (has)
-            fmt(g_roots[g_nroots++], sizeof(g_roots[0]), *path ? "%s/%s" : "%s", mp, path);
-    }
+    strlcpy(g_path, path, sizeof(g_path));
+    usb_roots(true);
     if (g_nroots) {
         g_usb = true;
         strlcpy(out, g_roots[0], size);
@@ -1207,4 +1294,4 @@ int ftp_early_stop(void) HIDDEN;
 
 const struct ext_early g_approot_early HIDDEN = {EXT_EARLY_MAGIC, sizeof(struct ext_early), approot_init,
                                                   approot_pick, lib_get, save_prescan, ftp_early_start,
-                                                  ftp_early_stop};
+                                                  ftp_early_stop, lib_again};

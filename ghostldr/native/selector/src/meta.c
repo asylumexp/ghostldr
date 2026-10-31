@@ -91,3 +91,110 @@ int qoi_decode(const u8 *d, u64 n, surface *out)
     }
     return 0;
 }
+
+/* ---- writing (art.c: Game art's pictures, kept with the title) ---- */
+
+static void put32le(u8 *p, u32 v) { p[0] = (u8)v, p[1] = (u8)(v >> 8), p[2] = (u8)(v >> 16), p[3] = (u8)(v >> 24); }
+static void put32be(u8 *p, u32 v) { p[3] = (u8)v, p[2] = (u8)(v >> 8), p[1] = (u8)(v >> 16), p[0] = (u8)(v >> 24); }
+
+/* worst case: a byte of tag and four of colour per pixel, the header and the end */
+u64 qoi_max(int w, int h) { return (u64)w * (u64)h * 5 + 14 + 8; }
+
+/* in (0xAARRGGBB) as QOI into out (qoi_max bytes): its length */
+u64 qoi_encode(const surface *in, u8 *out)
+{
+    u8 *o = out;
+    o[0] = 'q', o[1] = 'o', o[2] = 'i', o[3] = 'f';
+    put32be(o + 4, (u32)in->w), put32be(o + 8, (u32)in->h);
+    o[12] = 4, o[13] = 0; /* RGBA, sRGB */
+    u64 n = 14;
+    u32 index[64];
+    __builtin_memset(index, 0, sizeof(index));
+    u32 prev = 0xFF000000u;
+    int run = 0;
+    for (int y = 0; y < in->h; y++) {
+        const u32 *row = in->px + (u64)y * (u64)in->stride;
+        for (int x = 0; x < in->w; x++) {
+            u32 c = row[x];
+            int last = y == in->h - 1 && x == in->w - 1;
+            if (c == prev) {
+                if (++run == 62 || last)
+                    out[n++] = (u8)(0xC0 | (run - 1)), run = 0;
+                continue;
+            }
+            if (run)
+                out[n++] = (u8)(0xC0 | (run - 1)), run = 0;
+            u32 a = c >> 24, r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+            int h = (int)((r * 3 + g * 5 + b * 7 + a * 11) & 63);
+            if (index[h] == c) {
+                out[n++] = (u8)h;
+            } else {
+                index[h] = c;
+                if (a == prev >> 24) {
+                    int dr = (int)r - (int)((prev >> 16) & 255), dg = (int)g - (int)((prev >> 8) & 255),
+                        db = (int)b - (int)(prev & 255);
+                    dr = (signed char)dr, dg = (signed char)dg, db = (signed char)db; /* wrapped, as the decoder adds */
+                    int dr_dg = dr - dg, db_dg = db - dg;
+                    if (dr >= -2 && dr <= 1 && dg >= -2 && dg <= 1 && db >= -2 && db <= 1) {
+                        out[n++] = (u8)(0x40 | (dr + 2) << 4 | (dg + 2) << 2 | (db + 2));
+                    } else if (dg >= -32 && dg <= 31 && dr_dg >= -8 && dr_dg <= 7 && db_dg >= -8 && db_dg <= 7) {
+                        out[n++] = (u8)(0x80 | (dg + 32));
+                        out[n++] = (u8)((dr_dg + 8) << 4 | (db_dg + 8));
+                    } else {
+                        out[n++] = 0xFE, out[n++] = (u8)r, out[n++] = (u8)g, out[n++] = (u8)b;
+                    }
+                } else {
+                    out[n++] = 0xFF, out[n++] = (u8)r, out[n++] = (u8)g, out[n++] = (u8)b, out[n++] = (u8)a;
+                }
+            }
+            prev = c;
+        }
+    }
+    for (int i = 0; i < 7; i++)
+        out[n++] = 0;
+    out[n++] = 1;
+    return n;
+}
+
+/* A whole meta.bin (host/gfs_meta.py's layout) into out (cap bytes): the
+ * header's fields from mi (flags, name and its source, version), title's ID,
+ * then the three sections' bytes (sect[i], len[i]; NULL: none) with mi's
+ * sizes, formats and sources.  Its length, or 0 when it doesn't fit. */
+u64 meta_build(const struct meta_info *mi, const char *title, u64 written, const u8 *const sect[META_SECTIONS],
+               const u32 len[META_SECTIONS], u8 *out, u64 cap)
+{
+    u64 n = META_HEADER;
+    for (int s = 0; s < META_SECTIONS; s++)
+        n += sect[s] ? (len[s] + 15) & ~15u : 0;
+    if (n > cap || n > 0xFFFFFFFFu)
+        return 0;
+    __builtin_memset(out, 0, META_HEADER);
+    out[0] = 'G', out[1] = 'F', out[2] = 'S', out[3] = 'M';
+    put32le(out + 4, 1), put32le(out + 8, META_HEADER), put32le(out + 0x0C, mi->flags);
+    for (int i = 0; i < 15 && title[i]; i++)
+        out[0x10 + i] = (u8)title[i];
+    put32le(out + 0x20, (u32)written), put32le(out + 0x24, (u32)(written >> 32));
+    put32le(out + 0x30, (u32)n);
+    out[0x34] = mi->name_source;
+    for (int i = 0; i < 127 && mi->name[i]; i++)
+        out[0x40 + i] = (u8)mi->name[i];
+    for (int i = 0; i < 15 && mi->version[i]; i++)
+        out[0xF0 + i] = (u8)mi->version[i];
+    u64 at = META_HEADER;
+    u32 sum = 0x811C9DC5u; /* the content id: FNV-1a over what follows the header (changes with it) */
+    for (int s = 0; s < META_SECTIONS; s++) {
+        u8 *e = out + 0xC0 + 16 * s;
+        if (!sect[s])
+            continue;
+        __builtin_memcpy(out + at, sect[s], len[s]);
+        __builtin_memset(out + at + len[s], 0, ((len[s] + 15) & ~15u) - len[s]);
+        for (u32 i = 0; i < len[s]; i++)
+            sum = (sum ^ sect[s][i]) * 0x01000193u;
+        put32le(e, (u32)at), put32le(e + 4, len[s]);
+        e[8] = (u8)mi->s[s].w, e[9] = (u8)(mi->s[s].w >> 8), e[10] = (u8)mi->s[s].h, e[11] = (u8)(mi->s[s].h >> 8);
+        e[12] = mi->s[s].format, e[13] = mi->s[s].source;
+        at += (len[s] + 15) & ~15u;
+    }
+    put32le(out + 0x28, sum), put32le(out + 0x2C, (u32)n);
+    return n;
+}

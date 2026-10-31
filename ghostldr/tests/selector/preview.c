@@ -334,30 +334,50 @@ int sel_switch(struct sel *S, int i, int want)
 }
 static void fake_switches(struct sel_info *in)
 {
-    static const char labels[6][48] = {"Write logs to the USB drive", "Show the system's dialogs",
+    static const char labels[8][48] = {"Write logs to the USB drive", "Show the system's dialogs",
                                        "Plan memory automatically", "Keep Remote Play on", "Share learned memory plans",
-                                       "Use community memory plans"};
-    static const char on[6][112] = {"On: each boot's log goes to the folder ghostldr/logs on the drive",
+                                       "Use community memory plans", "Saves in FTP", "Fetch missing art"};
+    static const char on[8][112] = {"On: each boot's log goes to the folder ghostldr/logs on the drive",
                                     "On: a game's save, message and keyboard dialogs show and wait for you",
                                     "On: a game without a memory plan of its own gets one, learned from its runs",
                                     "On: a game that turns Remote Play off can't (for streaming the TV to another device)",
                                     "On: when the ghostldr app or run.py starts a game, it sends the game's plan to ghostldr",
-                                    "On: a game with no plan of its own starts from one shared by others, and keeps learning"};
-    static const char off[6][112] = {"Off: nothing is written to the drive",
+                                    "On: a game with no plan of its own starts from one shared by others, and keeps learning",
+                                    "On: the FTP server's saves folder has every logged-in user's saves",
+                                    "On: a game with no picture or backdrop of its own gets them, by its name, and keeps them"};
+    static const char off[8][112] = {"Off: nothing is written to the drive",
                                      "Off: they are answered at once and not shown (a game stuck at one may get past it)",
                                      "Off: such a game gets the plain budget",
                                      "Off: a game may turn Remote Play off, as on its own",
                                      "Off: plans stay on this console",
-                                     "Off: every game learns its own from scratch"};
-    in->nsw = 6, in->sw_on = g_sw_on, in->sw_safe = g_safe;
-    static const char keys[6][24] = {"log_usb", "dialogs", "auto_memory", "remote_play", "share_memory", "community_memory"};
-    for (int i = 0; i < 6; i++) {
+                                     "Off: every game learns its own from scratch",
+                                     "Off: the FTP server shows no saves folder",
+                                     "Off: such a game shows a tile drawn in its colour"};
+    in->nsw = 8, in->sw_on = g_sw_on, in->sw_safe = g_safe;
+    static const char keys[8][24] = {"log_usb", "dialogs", "auto_memory", "remote_play", "share_memory", "community_memory",
+                                     "ftp_saves", "fetch_art"};
+    for (int i = 0; i < 8; i++) {
         str_copy(in->sw[i].key, keys[i], sizeof(in->sw[i].key));
         str_copy(in->sw[i].label, labels[i], sizeof(in->sw[i].label));
         str_copy(in->sw[i].on, on[i], sizeof(in->sw[i].on));
         str_copy(in->sw[i].off, off[i], sizeof(in->sw[i].off));
-        in->sw[i].def = (SW_DEFAULTS >> i) & 1, in->sw[i].logs = i == 0;
+        in->sw[i].def = (SW_DEFAULTS >> i) & 1, in->sw[i].logs = i == 0, in->sw[i].art = i == CONF_FETCH_ART;
     }
+}
+
+/* Game art's keys (conf.c keeps them in GLDRCONF; here in memory, and said) */
+static char g_keys[NKEYS][KEY_MAX];
+int sel_art_key(struct sel *S, int which, const char *value, char *out, int cap)
+{
+    if (which < 0 || which >= NKEYS)
+        return -1;
+    if (out)
+        str_copy(out, g_keys[which], cap);
+    if (value) {
+        str_copy(g_keys[which], value, KEY_MAX);
+        fprintf(stderr, "art key %d: %s\n", which, value);
+    }
+    return 0;
 }
 
 /* a game's community memory plan off for it, or used again (conf.c keeps
@@ -391,11 +411,22 @@ void sel_info_load(struct sel *S, struct sel_info *in)
                                         : "Off: /temp0/ghostldr.log", sizeof(in->log_where));
     in->usb = g_ps4 ? USB_PS4 : USB_READ;
     fake_switches(in);
+    for (int k = 0; k < NKEYS; k++) { /* as info.c shows them: their ends */
+        int n = str_len(g_keys[k]);
+        if (n > 10)
+            snprintf(in->key_shown[k], sizeof(in->key_shown[k]), "%.4s\xE2\x80\xA6%s", g_keys[k], g_keys[k] + n - 4);
+        else if (n)
+            snprintf(in->key_shown[k], sizeof(in->key_shown[k]), "%d characters", n);
+        else
+            in->key_shown[k][0] = 0;
+    }
+    in->ps5 = g_usb ? 2 : 0; /* a USB boot: two PS5 dumps left out */
     in->ninst = -1;
     if (g_usb) { /* a USB boot: saved data holds two titles as well */
         in->ninst = 2;
         str_copy(in->inst[0].id, "CUSA00042", 16), str_copy(in->inst[0].name, "Skyward Harbour", 64);
         str_copy(in->inst[0].version, "01.00", 16), in->inst[0].size = 48ull << 30;
+        str_copy(in->inst[0].prefix, "GSKY", 16), str_copy(in->inst[1].prefix, "GBREW00083", 16);
         str_copy(in->inst[1].id, "BREW00083", 16), str_copy(in->inst[1].name, "Hello World", 64);
         in->inst[1].size = 1 << 20, in->inst[1].incomplete = 1;
     }
@@ -637,6 +668,27 @@ static void run(struct sel *S, struct script *sc)
             if (g_add_title)
                 g_add_title = 0, add_title(S);
         }
+        if (S->refresh_req && now >= S->refresh_at) { /* Refresh: the new title joins the row, as main.c's reload does */
+            S->refresh_req = 0;
+            add_title(S);
+            ui_toast_ok(S, now, "1 new game installed");
+            if (S->set_open)
+                set_rebuild(S);
+        }
+        if (S->delete_req && now >= S->delete_at) { /* Settings > Games: the title leaves the row */
+            S->delete_req = 0;
+            int k = 0;
+            for (int i = 0; i < S->ntitles; i++)
+                if (!str_same(S->titles[i].id, S->del_id))
+                    S->titles[k++] = S->titles[i];
+            fprintf(stderr, "delete: %s (%s): %d title(s) left\n", S->del_id, S->del_prefix, k);
+            ui_set_titles(S, S->titles, k);
+            char msg[96];
+            snprintf(msg, sizeof(msg), "Deleted %s: its saves are kept", S->del_name);
+            ui_toast_ok(S, now, msg);
+            if (S->set_open)
+                set_rebuild(S);
+        }
         if (boot == UI_QUIT) {
             fprintf(stderr, "quit at %llu ms: back to Luac0re's loader\n", (unsigned long long)(now / 1000));
             break;
@@ -725,6 +777,40 @@ int main(int argc, char **argv)
             }
             printf("name '%s' version '%s' icon %d backdrop %d\n", t.name, t.version, t.icon_src, t.bg_src);
             return 0;
+        } else if (!strcmp(argv[i], "--build-meta") && i + 1 < argc) { /* OUT: a meta.bin by meta.c (art.c's way) */
+            const char *outp = argv[++i];
+            static const u8 sfo[24] = {0, 'P', 'S', 'F', 1, 1, 0, 0, 20, 0, 0, 0, 20, 0, 0, 0};
+            struct meta_info mi;
+            memset(&mi, 0, sizeof(mi));
+            mi.flags = META_SCANNED, mi.name_source = 3;
+            str_copy(mi.name, "Skyward Harbour", sizeof(mi.name)), str_copy(mi.version, "01.00", sizeof(mi.version));
+            const u8 *sect[META_SECTIONS] = {sfo, NULL, NULL};
+            u32 len[META_SECTIONS] = {sizeof(sfo), 0, 0};
+            mi.s[META_SFO] = (struct meta_sect){0, sizeof(sfo), 0, 0, META_FMT_RAW, ART_TITLE};
+            for (int which = 0; which < 2; which++) {
+                int w = which ? SCREEN_W : TILE_BIG, h = which ? SCREEN_H : TILE_BIG;
+                surface img = {calloc((u64)w * h, 4), w, h, w, 0, 0};
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                        img.px[(u64)y * w + x] = scene(which ? 2 : 4, (float)x / (float)w, (float)y / (float)h,
+                                                       (float)w / (float)h) & (x < 8 && y < 8 ? 0x7FFFFFFFu : ~0u);
+                u8 *q = malloc(qoi_max(w, h));
+                u32 n = (u32)qoi_encode(&img, q);
+                int s = which ? META_BACKDROP : META_ICON;
+                sect[s] = q, len[s] = n;
+                mi.s[s] = (struct meta_sect){0, n, (u16)w, (u16)h, META_FMT_QOI, (u8)(which ? ART_IGDB : ART_SGDB)};
+                char raw[1024];
+                snprintf(raw, sizeof(raw), "%s.%s.bgra", outp, which ? "backdrop" : "icon");
+                FILE *f = fopen(raw, "wb");
+                fwrite(img.px, 4, (size_t)w * h, f), fclose(f);
+            }
+            u64 cap = META_HEADER + len[0] + len[1] + len[2] + 48;
+            u8 *out = malloc(cap);
+            u64 n = meta_build(&mi, "CUSA00042", 1761800000, sect, len, out, cap);
+            FILE *f = fopen(outp, "wb");
+            fwrite(out, 1, n, f), fclose(f);
+            printf("meta.bin %llu bytes: icon %u, backdrop %u\n", (unsigned long long)n, len[META_ICON], len[META_BACKDROP]);
+            return n ? 0 : 1;
         } else if (!strcmp(argv[i], "--verify"))
             P.verify = 1;
         else if (!strcmp(argv[i], "--user") && i + 1 < argc)
@@ -736,7 +822,7 @@ int main(int argc, char **argv)
                 *eq = 0, P.art[P.nart].id = a, P.art[P.nart].meta = meta, P.art[P.nart++].dir = eq + 1;
         } else {
             fprintf(stderr, "usage: preview --font F.glf --out DIR [--scene tour|info|single|launch|usb|ps4|long|apollo|"
-                            "apollo-only|apollo-cancel|settings|empty|one|quit|community] [--usb] [--ps4] [--titles N] [--start N] [--art TITLE=DIR] "
+                            "apollo-only|apollo-cancel|settings|empty|one|quit|community|refresh|delete|artkeys] [--usb] [--ps4] [--titles N] [--start N] [--art TITLE=DIR] "
                             "[--meta TITLE=meta.bin] [--user NAME] [--users NAME*,NAME+,NAME] [--scan TITLES:MS] "
                             "[--12h] [--prefix P]\n       preview --is-dump ID SFO_TITLE_ID CONTENT_ID\n");
             return 2;
@@ -809,6 +895,7 @@ int main(int argc, char **argv)
         }
     }
     ui_set_platform(&S, ps4 ? SEL_PS4 : SEL_PS5);
+    S.can_refresh = !only, S.can_delete = !only; /* as main.c says: a catalogue or a library */
     if (font_init(&S, glf, 2u << 20) || ui_init(&S, titles, ntitles, start)) {
         fprintf(stderr, "init failed\n");
         return 1;
@@ -973,11 +1060,63 @@ int main(int argc, char **argv)
             {21000, PAD_DOWN, 0, NULL}, {21080, 0, 0, NULL}, {21200, PAD_CROSS, 0, NULL}, {21280, 0, 0, NULL},
             {21400, 0, 0, "set-advanced-reset"},
             {21500, PAD_CIRCLE, 0, NULL}, {21580, 0, 0, NULL}, {21700, PAD_DOWN, 0, NULL}, {21780, 0, 0, NULL},
-            {22300, 0, 0, "set-about"}, {22400, PAD_RIGHT, 0, NULL}, {22480, 0, 0, NULL},
-            {22600, PAD_CROSS, 0, NULL}, {22680, 0, 0, NULL}, {23200, 0, 0, "set-close-ask"},
-            {23300, PAD_CROSS, 0, NULL}, {23380, 0, 0, NULL},                     /* No (selected first) */
-            {23500, PAD_CIRCLE, 0, NULL}, {23580, 0, 0, NULL}, {23700, PAD_CIRCLE, 0, NULL}, {23780, 0, 0, NULL},
-            {24500, 0, 0, "set-closed"}, {24600, PAD_L1, 0, NULL}, {24680, 0, 0, NULL}, {25700, 0, 0, NULL},
+            {22200, 0, 0, "set-art"}, {22300, PAD_DOWN, 0, NULL}, {22380, 0, 0, NULL},
+            {22900, 0, 0, "set-about"}, {23000, PAD_RIGHT, 0, NULL}, {23080, 0, 0, NULL},
+            {23200, PAD_CROSS, 0, NULL}, {23280, 0, 0, NULL}, {23800, 0, 0, "set-close-ask"},
+            {23900, PAD_CROSS, 0, NULL}, {23980, 0, 0, NULL},                     /* No (selected first) */
+            {24100, PAD_CIRCLE, 0, NULL}, {24180, 0, 0, NULL}, {24300, PAD_CIRCLE, 0, NULL}, {24380, 0, 0, NULL},
+            {25100, 0, 0, "set-closed"}, {25200, PAD_L1, 0, NULL}, {25280, 0, 0, NULL}, {26300, 0, 0, NULL},
+        };
+        RUN(ev);
+    } else if (!strcmp(scene_name, "refresh")) { /* Triangle: its message, then the new game in the row */
+        static const struct event ev[] = {
+            {1000, 0, 0, "refresh-home"},
+            {1100, PAD_TRIANGLE, 0, NULL}, {1180, 0, 0, NULL}, {1260, 0, 0, "refresh-asked"},
+            {1400, PAD_L1, 0, NULL}, {1480, 0, 0, NULL}, {1600, PAD_R1, 0, NULL}, {1680, 0, 0, NULL},
+            {1800, PAD_R1, 0, NULL}, {1880, 0, 0, NULL}, {2000, PAD_R1, 0, NULL}, {2080, 0, 0, NULL},
+            {4000, 0, 0, "refresh-done"},
+        };
+        RUN(ev);
+    } else if (!strcmp(scene_name, "delete")) { /* Settings > Games: Cross on a game, No; again, Yes */
+        static const struct event ev[] = {
+            {1100, PAD_SQUARE, 0, NULL}, {1180, 0, 0, NULL}, {1700, PAD_RIGHT, 0, NULL}, {1780, 0, 0, NULL},
+            {2300, 0, 0, "delete-row"},
+            {2400, PAD_CROSS, 0, NULL}, {2480, 0, 0, NULL}, {3000, 0, 0, "delete-ask"},
+            {3100, PAD_CROSS, 0, NULL}, {3180, 0, 0, NULL},                      /* No (selected first) */
+            {3600, PAD_CROSS, 0, NULL}, {3680, 0, 0, NULL}, {3800, PAD_LEFT, 0, NULL}, {3880, 0, 0, NULL},
+            {4300, 0, 0, "delete-yes"}, {4400, PAD_CROSS, 0, NULL}, {4480, 0, 0, NULL},
+            {4560, 0, 0, "delete-deleting"}, {5500, 0, 0, "delete-done"},
+            {5600, PAD_CIRCLE, 0, NULL}, {5680, 0, 0, NULL}, {5800, PAD_CIRCLE, 0, NULL}, {5880, 0, 0, NULL},
+            {6800, 0, 0, "delete-row-after"},
+        };
+        RUN(ev);
+    } else if (!strcmp(scene_name, "artkeys")) { /* Settings > Game art: the switch, a key typed on the keyboard */
+        static const struct event ev[] = {
+            {1100, PAD_SQUARE, 0, NULL}, {1180, 0, 0, NULL},
+            {1300, PAD_DOWN, 0, NULL}, {1380, 0, 0, NULL}, {1500, PAD_DOWN, 0, NULL}, {1580, 0, 0, NULL},
+            {1700, PAD_DOWN, 0, NULL}, {1780, 0, 0, NULL}, {1900, PAD_DOWN, 0, NULL}, {1980, 0, 0, NULL},
+            {2100, PAD_DOWN, 0, NULL}, {2180, 0, 0, NULL}, {2700, 0, 0, "art"},
+            {2800, PAD_RIGHT, 0, NULL}, {2880, 0, 0, NULL}, {3000, PAD_CROSS, 0, NULL}, {3080, 0, 0, NULL},
+            {3600, 0, 0, "art-on"},
+            {3700, PAD_DOWN, 0, NULL}, {3780, 0, 0, NULL}, {3900, PAD_CROSS, 0, NULL}, {3980, 0, 0, NULL},
+            {4500, 0, 0, "art-keyboard"},
+            /* a, b, c, d, e, f (two rows down, the last row's keys), 1 2 3 4 5 6 7 8 */
+            {4600, PAD_DOWN, 0, NULL}, {4680, 0, 0, NULL}, {4700, PAD_CROSS, 0, NULL}, {4780, 0, 0, NULL},
+            {4800, PAD_TRIANGLE, 0, NULL}, {4880, 0, 0, NULL}, {4900, PAD_RIGHT, 0, NULL}, {4980, 0, 0, NULL},
+            {5000, PAD_CROSS, 0, NULL}, {5080, 0, 0, NULL}, {5100, PAD_TRIANGLE, 0, NULL}, {5180, 0, 0, NULL},
+            {5200, PAD_UP, 0, NULL}, {5280, 0, 0, NULL}, {5300, PAD_UP, 0, NULL}, {5380, 0, 0, NULL},
+            {5400, PAD_CROSS, 0, NULL}, {5480, 0, 0, NULL}, {5500, PAD_RIGHT, 0, NULL}, {5580, 0, 0, NULL},
+            {5600, PAD_CROSS, 0, NULL}, {5680, 0, 0, NULL}, {5700, PAD_RIGHT, 0, NULL}, {5780, 0, 0, NULL},
+            {5800, PAD_CROSS, 0, NULL}, {5880, 0, 0, NULL}, {5900, PAD_RIGHT, 0, NULL}, {5980, 0, 0, NULL},
+            {6000, PAD_CROSS, 0, NULL}, {6080, 0, 0, NULL}, {6100, PAD_RIGHT, 0, NULL}, {6180, 0, 0, NULL},
+            {6200, PAD_CROSS, 0, NULL}, {6280, 0, 0, NULL}, {6300, PAD_RIGHT, 0, NULL}, {6380, 0, 0, NULL},
+            {6400, PAD_CROSS, 0, NULL}, {6480, 0, 0, NULL}, {6500, PAD_RIGHT, 0, NULL}, {6580, 0, 0, NULL},
+            {6600, PAD_CROSS, 0, NULL}, {6680, 0, 0, NULL}, {6700, PAD_RIGHT, 0, NULL}, {6780, 0, 0, NULL},
+            {6800, PAD_CROSS, 0, NULL}, {6880, 0, 0, NULL},
+            {6900, PAD_SQUARE, 0, NULL}, {6980, 0, 0, NULL}, {7000, PAD_UP, 0, NULL}, {7080, 0, 0, NULL},
+            {7100, PAD_UP, 0, NULL}, {7180, 0, 0, NULL}, {7200, PAD_DOWN, 0, NULL}, {7280, 0, 0, NULL},
+            {7600, 0, 0, "art-typed"},
+            {7700, PAD_OPTIONS, 0, NULL}, {7780, 0, 0, NULL}, {8400, 0, 0, "art-saved"},
         };
         RUN(ev);
     } else if (!strcmp(scene_name, "empty")) { /* no title: the gear alone; Cross opens Settings */

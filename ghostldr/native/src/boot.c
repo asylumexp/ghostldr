@@ -171,7 +171,7 @@ static int elfldr_select(struct el_select *s)
      * hold the ELF loader's); it goes with the extension below, and the
      * title's boot starts it again */
     if (!is_ps4() && !is_jakx())
-        ext_ftp_early(1212);
+        ext_ftp_early(CTX_SELECTOR_FTP_PORT(g_ctx->flags));
     int picked = sel_run(true, title);
     __atomic_store_n(&s->stop, 1, __ATOMIC_RELEASE);
     logf("elfldr: %s picked: the ELF loader stops once no payload runs", picked >= 0 ? title : "nothing");
@@ -217,6 +217,16 @@ int boot_title_pick(const char *title, int index)
                     : g_library ? ext_approot_pick(title, index, &g_pick_root)
                     : gfs_pick(title) ? -1 : 0;
     return g_pick_rc;
+}
+
+/* ghost_api.library_scan: only while a library leaves the choice to the
+ * game selector (and before title_pick mounted its pick) */
+int boot_library_scan(const struct lib_title **list, u32 *ps5, int again)
+{
+    *list = NULL;
+    if (!g_choose || !g_library || g_pick_rc != 1)
+        return -1;
+    return ext_library_scan(list, ps5, again);
 }
 
 int boot_save_prescan(u32 user, int (*progress)(void *arg, u32 done, u32 total), void *arg)

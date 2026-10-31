@@ -13,6 +13,9 @@
  *                   calls (ghostldr's GLDRCONF container), libkernel.
  *   plansync_ta.c   the certificate authorities it trusts
  *                   (tools/gen_trust_anchors.py).
+ *   artfetch.c      game art from the services the player gave keys for
+ *                   (SteamGridDB, IGDB), over plansync.c's HTTPS: the
+ *                   selector's art job (plansync_sel.c artsync_*).
  *
  * The selector starts ps_run on a thread of its own while it shows the
  * games, and joins it before it returns.  Every failure is silent: a game
@@ -96,3 +99,41 @@ struct ps_job {
 void ps_run(struct ps_env *e, struct ps_job *job);
 /* is this a struct am_plan this ghostldr reads, for that build? */
 int ps_plan_ok(const unsigned char *plan, unsigned long n, const unsigned char fingerprint[20]);
+
+/* one HTTP/1.1 request (plansync.c): the status, or -1 with no complete
+ * answer; the body in out (at most cap bytes: *truncated when there was more) */
+int ps_http(struct ps_env *e, int tls, const char *host, unsigned short port, const char *method, const char *path,
+            const char *headers, const void *body, unsigned long blen, unsigned char *out, unsigned long cap,
+            unsigned long *len, int *truncated);
+
+/* ---- game art (artfetch.c, docs/selector.md "Game art") ----
+ * A game with no tile picture or backdrop of its own gets them from the
+ * services the player gave keys for in Settings > Game art, looked up by
+ * its name: SteamGridDB (an official icon, a hero), else IGDB (its cover, an
+ * artwork), PNG only (the selector decodes nothing else). */
+#define PS_ART_IMAGE_CAP (8ul << 20)
+#define PS_ART_SGDB 1 /* where a picture came from (sel.h ART_SGDB, ART_IGDB) */
+#define PS_ART_IGDB 2
+struct ps_art_keys {
+    char sgdb[72];               /* SteamGridDB's API key */
+    char igdb_id[48], igdb_secret[72]; /* a Twitch application's Client ID and secret, for IGDB */
+    /* the services' hosts as "host[:port]", and whether over TLS: "" means
+     * www.steamgriddb.com, id.twitch.tv and api.igdb.com over TLS, and only
+     * https images (the host tests point them at a plain server of their own) */
+    char sgdb_host[64], twitch_host[64], igdb_host[64];
+    int plain;
+};
+struct ps_art_state {            /* what the job keeps between games */
+    char igdb_token[128];        /* Twitch's app access token, once asked for */
+    int igdb_refused;            /* the keys were refused: IGDB isn't asked again */
+    int sgdb_refused;
+};
+struct ps_art_got {              /* PNG files, from e->alloc (PS_ART_IMAGE_CAP each): the caller frees them */
+    unsigned char *icon, *backdrop;
+    unsigned long icon_len, backdrop_len;
+    int icon_from, backdrop_from; /* PS_ART_* */
+};
+/* name's art (want_icon, want_backdrop: what the game lacks): 0 when
+ * something was found, -1 when nothing */
+int ps_art_fetch(struct ps_env *e, const struct ps_art_keys *k, struct ps_art_state *st, const char *name,
+                 int want_icon, int want_backdrop, struct ps_art_got *got);
