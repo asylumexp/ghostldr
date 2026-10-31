@@ -1,0 +1,155 @@
+name: Game compatibility report
+description: How far a PS4 game or homebrew gets under ghostldr
+title: "[Compatibility] <game name> (CUSA00000) <version>"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One report per game, version and console. Search the [existing reports](https://github.com/asylumexp/ghostldr/issues?q=is%3Aissue+in%3Atitle+Compatibility) for the title ID first, and add to that issue if it's there.
+
+        **Never attach game files**: no `eboot.bin`, modules or dumps. The log is enough. A save is welcome only where the form asks for one.
+
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      description: The name, as the game selector shows it.
+      placeholder: Ghost of Tsushima
+    validations:
+      required: true
+
+  - type: input
+    id: title-id
+    attributes:
+      label: Title ID
+      description: From the dump's `sce_sys/param.sfo`, or the game selector.
+      placeholder: CUSA11456
+    validations:
+      required: true
+
+  - type: input
+    id: game-version
+    attributes:
+      label: Game version
+      description: The version of the dump, with its update merged in.
+      placeholder: "2.18"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: How far it gets
+      options:
+        - "Works: plays from start to finish (or as far as you played) with no major problems"
+        - "In-game: reaches gameplay, but crashes, hangs or has major problems"
+        - "Broken: doesn't reach gameplay (stops at boot, a loading screen or a menu)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: What happened
+      description: How far it got, what works and what doesn't. Name the last screen you saw, and any message on the TV word for word.
+      placeholder: |
+        Reaches the title screen in about 40 s. New game loads, then the TV shows "The game stopped" in the first cutscene.
+        Sound and controller work in the menus.
+    validations:
+      required: true
+
+  - type: textarea
+    id: save
+    attributes:
+      label: Save data (optional)
+      description: |
+        If it crashes or hangs at one point in the game, a save from just before that point lets it be tried without playing up to it. Zip the game's save folder and drag the zip in.
+        To get it: turn on Settings > Advanced > Saves in FTP and copy `/saves/<user>/<title ID>/` over FTP while a game runs ([docs/ftp.md](https://github.com/asylumexp/ghostldr/blob/main/docs/ftp.md#saves)).
+        A save's `sce_sys/param.sfo` holds the account ID of the user it belongs to.
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: What you checked
+      description: Tick what you tried and found working.
+      options:
+        - label: Gameplay
+        - label: Saving, and loading that save after a restart
+        - label: Sound
+        - label: Videos and cutscenes
+
+  - type: input
+    id: ghostldr-version
+    attributes:
+      label: ghostldr version
+      description: Settings > About in the game selector shows it, with the build.
+      placeholder: v1.0.0 (build 4079274f413f397e)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: console
+    attributes:
+      label: Console
+      options:
+        - PS5
+        - PS4
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware
+      placeholder: "13.60"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host game
+      options:
+        - Star Wars Racer Revenge, USA (CUSA03474)
+        - Star Wars Racer Revenge, Europe (CUSA03492)
+        - Jak X, USA (CUSA07842)
+        - Jak X, Europe (CUSA07992)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Where the game runs from
+      options:
+        - USB drive, exFAT
+        - USB drive, FAT32
+        - Installed in internal storage via saved data
+    validations:
+      required: true
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings changed from the defaults
+      description: Anything under Settings > Advanced in the game selector
+      placeholder: Plan memory automatically off
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        Drag in the boot's log file: `ghostldr/logs/NNNN_YYYY-MM-DD_HHMM.log` on the USB drive. Without a drive, `/temp0/ghostldr.log` over FTP while the game runs, or what `nc` printed.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before you send
+      options:
+        - label: Nothing I attached in this report contains game files.
+          required: true
+        - label: I searched the existing reports for this title ID.
+          required: true

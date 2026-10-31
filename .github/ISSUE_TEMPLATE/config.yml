@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Using the release
+    url: https://github.com/asylumexp/ghostldr/blob/main/docs/using-the-release.md
+    about: Download to gameplay, step by step.
+  - name: When something goes wrong
+    url: https://github.com/asylumexp/ghostldr/blob/main/docs/failures.md
+    about: Every message ghostldr shows on the TV, and what to do.

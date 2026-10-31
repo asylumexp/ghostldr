@@ -1,0 +1,126 @@
+name: Bug report
+description: Something in ghostldr itself doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For how far a particular game gets, use the **Game compatibility report** instead.
+        [When something goes wrong](https://github.com/asylumexp/ghostldr/blob/main/docs/failures.md) explains every message ghostldr shows on the TV and what to do about it; check it first.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - Booting (ghostldr.lua, the bundle, its cache)
+        - Game selector or Settings
+        - USB drives
+        - Install over network (web manager)
+        - FTP server
+        - ELF loader
+        - Saves (backup, restore, resign, transfer)
+        - Desktop app or its installers
+        - Python tools (ghostldr.py, run.py)
+        - Documentation
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Any error message / bug you encountered.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to make it happen
+      placeholder: |
+        1. Send ghostldr.lua to 9026, then ghostldr-ext.bin to 9021
+        2. In the game selector, Settings > USB drives > Look again
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how-often
+    attributes:
+      label: How often
+      options:
+        - Every time
+        - Sometimes
+        - Once
+    validations:
+      required: true
+
+  - type: input
+    id: game
+    attributes:
+      label: Game, if one was involved
+      description: Name, title ID and version. (eg Bloodborne (CUSA00900) 1.09)
+
+  - type: input
+    id: ghostldr-version
+    attributes:
+      label: ghostldr version
+      description: Settings > About in the game selector shows it, with the build. From source, the commit.
+      placeholder: v1.0.0 (build 4079274f413f397e)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: console
+    attributes:
+      label: Console
+      options:
+        - PS5
+        - PS4
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware
+      placeholder: "13.60"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: host
+    attributes:
+      label: Host game
+      options:
+        - Star Wars Racer Revenge, USA (CUSA03474)
+        - Star Wars Racer Revenge, Europe (CUSA03492)
+        - Jak X, USA (CUSA07842), with UltraC0re
+        - Jak X, Europe (CUSA07992), with UltraC0re
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        Drag in the boot's log file: `ghostldr/logs/NNNN_YYYY-MM-DD_HHMM.log` on the USB drive. Without a drive, `/temp0/ghostldr.log` over FTP while a game runs, or what `nc` printed.
+        The log can name the console's local network address; edit it out if you'd rather.
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before you send
+      options:
+        - label: Nothing I have attached in this report contains game files.
+          required: true
