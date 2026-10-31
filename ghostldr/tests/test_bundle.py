@@ -992,14 +992,19 @@ class Autoloader(FakeConsole):
         r = self.auto("pad=400", "elfldr=pick:0:CUSA00900")                  # L1 alone: no
         self.assertEqual(len(r["ctxs"]), 2)
 
-    def test_l1_r1_through_the_systems_reads(self) -> None:
-        """Reads the system intercepts (a dialog or overlay has the controller) carry no buttons: the ones
-        after them count, for half a second; intercepted all along, ghostldr starts."""
-        r = self.auto("pad=c00", "pad-intercepted=3")
-        self.assertFalse(r["called"])
-        self.assertIn("ghostldr autoloader: L1+R1 held: Luac0re's loader on TCP 9026", r["notes"])
-        r = self.auto("pad=c00", "pad-intercepted=9", "elfldr=pick:0:CUSA00900")
+    def test_l1_r1_through_late_and_intercepted_reads(self) -> None:
+        """The pad is read for up to 3 seconds and stops at L1+R1: states that arrive late (measured on a
+        PS5: L1+R1 2.4 s into the reads) and reads the system intercepts (only bit 31) don't hide it; with
+        nothing held, or intercepted all along, ghostldr starts after the 3 seconds."""
+        for late in ("pad-late=24", "pad-intercepted=24"):
+            r = self.auto("pad=c00", late)
+            self.assertFalse(r["called"], late)
+            self.assertIn("ghostldr autoloader: L1+R1 held: Luac0re's loader on TCP 9026", r["notes"])
+        r = self.auto("pad=c00", "pad-intercepted=30", "elfldr=pick:0:CUSA00900")
         self.assertEqual(len(r["ctxs"]), 2)
+        r = self.auto("pad=0", "elfldr=pick:0:CUSA00900")
+        self.assertEqual(len(r["ctxs"]), 2)
+        self.assertEqual(r["clock"], 3)                                     # 30 reads, 100 ms apart
 
     def test_no_ghostldr_lua_in_the_save(self) -> None:
         (self.save / "ghostldr/ghostldr.lua").unlink()

@@ -39,6 +39,8 @@
 --                   without it libScePad does not load
 --   pad-intercepted=N  the first N reads have only the system's bit (0x80000000:
 --                   a dialog or overlay has the controller)
+--   pad-late=N      the first N reads have no buttons (the pad's states arrive
+--                   late after the PS2 game stops reading them)
 --   disk=BYTES      free space on the console's storage (default: plenty)
 --   no-savedata     libSceSaveData does not load
 -- It prints what it saw: "bind <fd> <port> <rc>", "accept <fd>",
@@ -447,7 +449,8 @@ local SAVE = {
     scePadReadState = function(h, data)
         pad_reads = (pad_reads or 0) + 1
         local intercepted = pad_reads <= tonumber(opts["pad-intercepted"] or "0")
-        write32(data, intercepted and 0x80000000 or tonumber(opts.pad or "0", 16))
+        local late = pad_reads <= tonumber(opts["pad-late"] or "0")
+        write32(data, intercepted and 0x80000000 or late and 0 or tonumber(opts.pad or "0", 16))
         return h == 3 and 0 or 0x80920003
     end,
     sceKernelUsleep = function(us)

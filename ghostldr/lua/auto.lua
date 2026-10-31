@@ -9,7 +9,7 @@
 -- bundle sent to the ELF loader, or a cached one of this build, wins as
 -- without the autoloader.
 --
--- Hold L1+R1 as the Hall of Fame opens to skip it: Luac0re's loader on 9026,
+-- Hold L1+R1 from choosing HALL OF FAME until Luac0re's loader shows to skip it: Luac0re's loader on 9026,
 -- as with no auto.lua.  However ghostldr ends (Close ghostldr in Settings, a
 -- failure, a missing file), that loader takes scripts after it.
 --
@@ -24,9 +24,10 @@ local PORT = 9026
 
 local function s32(v) v = v & 0xFFFFFFFF return v >= 0x80000000 and v - 0x100000000 or v end
 
--- the buttons held on the first user's controller now, or 0 (no pad library, no handle, or the system
--- has the controller for the whole half second it is read)
-local function buttons()
+-- whether L1+R1 are held on the first user's controller, read for up to 3 seconds: the pad's states
+-- come after the PS2 game stops reading them, and a controller's can lag (reads the system intercepts,
+-- with only bit 31, carry no buttons)
+local function skip_held()
     init_dlsym()                -- Luac0re's dlsym answers only after it (each script calls it)
     local function sym(module, name)
         local load = func_wrap(dlsym(LIBKERNEL_HANDLE, "sceKernelLoadStartModule"))
@@ -40,18 +41,21 @@ local function buttons()
     local get_user, get_handle = sym("libSceUserService.sprx", "sceUserServiceGetInitialUser"),
         sym("libScePad.sprx", "scePadGetHandle")
     local read_state = sym("libScePad.sprx", "scePadReadState")
-    if not (get_user and get_handle and read_state) then return 0 end
+    if not (get_user and get_handle and read_state) then return false end
     local uid, data = malloc(8), malloc(0x100)
     write32(uid, 0)
-    if s32(get_user(uid)) ~= 0 then return 0 end
+    if s32(get_user(uid)) ~= 0 then return false end
     local h = s32(get_handle(read32(uid), 0, 0))
-    if h < 0 then return 0 end
-    for _ = 1, 5 do
+    if h < 0 then return false end
+    for _ = 1, 30 do
         for i = 0, 0xF8, 8 do write64(data + i, 0) end
-        if s32(read_state(h, data)) == 0 and read32(data) & INTERCEPTED == 0 then return read32(data) end
+        if s32(read_state(h, data)) == 0 then
+            local b = read32(data)
+            if b & INTERCEPTED == 0 and b & SKIP == SKIP then return true end
+        end
         sceKernelUsleep(100000)
     end
-    return 0
+    return false
 end
 
 local function loader(why)
@@ -59,8 +63,8 @@ local function loader(why)
     return remote_lua_loader(PORT)
 end
 
-local ok, held = pcall(buttons)
-if ok and held & SKIP == SKIP then return loader("L1+R1 held") end
+local ok, held = pcall(skip_held)
+if ok and held then return loader("L1+R1 held") end
 if not file_exists(LUA) then return loader(LUA .. " is not in the save") end
 
 local main, err = loadfile(LUA)
